@@ -1,0 +1,234 @@
+"""
+test_v16.py — engine test suite, no network and no FastMCP required.
+
+    python3 test_v16.py
+
+Builds a throwaway vault in a temporary directory, exercises every important
+path and prints a verdict. The checks that must FAIL matter as much as the ones
+that must pass: most of this service's safety lives in things that must not
+happen.
+
+The last section is a static consistency check between server.py and vault.py:
+the tools are not exercised here (that would need FastMCP and a network), so
+this at least proves that every engine method server.py calls exists, with a
+compatible signature. It is the gap the runtime tests cannot cover.
+"""
+from __future__ import annotations
+import ast
+import inspect
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+from vault import VaultRoot, Dataset, VaultError  # noqa: E402
+
+OK = FAIL = 0
+KEY = "k7m2xq4p"
+
+
+def ok(cond, label, extra=""):
+    global OK, FAIL
+    if cond:
+        OK += 1
+        print(f"  PASS  {label}")
+    else:
+        FAIL += 1
+        print(f"  FAIL  {label}  {extra}")
+
+
+def must_fail(label, fn):
+    global OK, FAIL
+    try:
+        fn()
+        FAIL += 1
+        print(f"  FAIL  {label}: did NOT fail")
+    except VaultError:
+        OK += 1
+        print(f"  PASS  {label} (refused)")
+
+
+def static_api_check() -> None:
+    """Parse server.py and verify that every ds.<method>() / vault.<method>()
+    call resolves to a real method on Dataset / VaultRoot, with an arity the
+    call satisfies. Catches a rename done on one side only."""
+    src = (HERE / "server.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    targets = {"vault": VaultRoot, "ds": Dataset, "ds_s": Dataset, "ds_d": Dataset}
+    seen = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        owner = node.func.value
+        if not isinstance(owner, ast.Name) or owner.id not in targets:
+            continue
+        cls, meth = targets[owner.id], node.func.attr
+        seen += 1
+        fn = getattr(cls, meth, None)
+        if fn is None or not callable(fn):
+            ok(False, f"server.py calls {owner.id}.{meth}()", "no such method on the engine")
+            continue
+        params = [p for p in inspect.signature(fn).parameters if p != "self"]
+        required = [p for p, v in inspect.signature(fn).parameters.items()
+                    if p != "self" and v.default is inspect.Parameter.empty]
+        given = len(node.args) + len(node.keywords)
+        if given < len(required) or given > len(params):
+            ok(False, f"{owner.id}.{meth}() arity",
+               f"{given} arguments passed, expected {len(required)}..{len(params)}")
+        else:
+            ok(True, f"{owner.id}.{meth}() exists with a compatible signature")
+    ok(seen >= 15, "static check covered the engine calls in server.py", f"only {seen} found")
+
+
+def main() -> int:
+    root = tempfile.mkdtemp(prefix="archivist-test-")
+    try:
+        os.makedirs(Path(root) / "Example Project" / "01 Notes")
+        (Path(root) / "Example Project" / "01 Notes" / "a.md").write_text("line one\nline two\n")
+        (Path(root) / "Example Project" / "log.md").write_text("# Log\n")
+        (Path(root) / "keys.txt").write_text(f"Example Project\t{KEY}\n")
+
+        v = VaultRoot(root)
+        v.boot(0)
+
+        print("\n[1] vault status")
+        st = v.status("test")
+        ok(st["vault"] == "ok", "vault answers")
+        ok(st["datasets"] == [{"name": "Example Project", "state": "locked"}],
+           "dataset list and state", st["datasets"])
+
+        print("\n[2] protection — everything here MUST fail")
+        must_fail("no key", lambda: v.open("Example Project/log.md", ""))
+        must_fail("wrong key", lambda: v.open("Example Project/log.md", "nope"))
+        must_fail("keys.txt as a path", lambda: v.open("keys.txt", KEY))
+        must_fail("traversal with ..", lambda: v.open("Example Project/../keys.txt", KEY))
+        must_fail("empty path", lambda: v.open("", KEY))
+        must_fail("unknown dataset", lambda: v.open("Other/x.md", ""))
+        must_fail(".git as a path", lambda: v.open("Example Project/.git/config", KEY))
+
+        ds, rel = v.open("Example Project/log.md", KEY)
+        ok(ds.name == "Example Project" and rel == "log.md", "resolution with the right key")
+
+        print("\n[3] reading")
+        r = ds.read_file(rel)
+        ok(r["content"] == "# Log\n", "read_file content")
+        ok(r["path"] == "Example Project/log.md", "paths come back dataset-prefixed", r["path"])
+        ok(ds.list_files("")["count"] == 3, "list_files is recursive (counting .gitignore)")
+        ok(len(ds.manifest("")["manifest_sha256"]) == 64, "manifest sha")
+
+        print("\n[4] writing and CAS")
+        ok(ds.append(rel, "| entry |")["commit"] != "(nothing to commit)", "append commits")
+        sha = ds.read_file(rel)["sha256"]
+        ok(ds.edit_file(rel, "# Log", "# Register", sha)["sha256"] != sha, "edit_file changes the sha")
+        must_fail("write with a wrong sha", lambda: ds.write_file("log.md", "x", "0" * 64))
+        must_fail("edit with absent text", lambda: ds.edit_file(
+            "log.md", "NOT THERE", "x", ds.read_file("log.md")["sha256"]))
+        (Path(root) / "Example Project" / "dup.md").write_text("aaa\naaa\n")
+        ds._commit("setup dup")
+        must_fail("edit with ambiguous text", lambda: ds.edit_file(
+            "dup.md", "aaa", "bbb", ds.read_file("dup.md")["sha256"]))
+        ok(ds.write_file("new.md", "hi\n", "new")["size"] == 3, "write_file new")
+        must_fail('"new" on an existing file', lambda: ds.write_file("new.md", "x", "new"))
+        must_fail("append over 64 KB", lambda: ds.append("log.md", "x" * 70_000))
+
+        print("\n[5] binaries")
+        import base64
+        b = base64.b64encode(b"\xff\xfe\x00%PDF").decode()   # deliberately not valid UTF-8
+        ok(ds.write_binary("bin.dat", b, "new")["size"] == 7, "write_binary")
+        ok(ds.read_binary("bin.dat")["content_base64"] == b, "read_binary round trip")
+        must_fail("invalid base64", lambda: ds.write_binary("x.dat", "not-base64!!", "new"))
+        must_fail("read_file on a binary", lambda: ds.read_file("bin.dat"))
+
+        print("\n[6] search and archive")
+        s = ds.search("line", "")
+        ok(s["matches"] >= 2, "search finds", s)
+        ok(ds.search("^line", "", regex=True)["matches"] >= 2, "search with regex")
+        must_fail("invalid regex", lambda: ds.search("[", "", regex=True))
+        a = ds.archive("", "*.md")
+        ok(a["file_count"] >= 3 and a["tgz_bytes"] > 0, "archive packs", a["file_count"])
+        must_fail("archive with no match", lambda: ds.archive("", "*.xyz"))
+
+        print("\n[7] trash and purge")
+        mv = ds.move_path("new.md", "Trash/new.md")
+        ok(mv["trashed"] is True, "move into Trash is marked")
+        must_fail("move onto an existing destination",
+                  lambda: ds.move_path("log.md", "Trash/new.md"))
+        ok(ds.trash_purge("2020-01-01")["removed"] == 0, "a purge in the past removes nothing")
+        p = ds.trash_purge("2035-01-01")
+        ok(p["removed"] == 1, "purge removes the trashed file", p)
+        must_fail("purge with an invalid date", lambda: ds.trash_purge("not-a-date"))
+
+        print("\n[8] history and recovery")
+        h = ds.history("", 10)
+        ok(len(h["entries"]) >= 5, "history", len(h["entries"]))
+        rev = h["entries"][3].split(" · ")[0]
+        ok("content" in ds.read_at("log.md", rev), "read_at")
+        must_fail("invalid revision", lambda: ds.read_at("log.md", "; rm -rf /"))
+        ok("diff" in ds.diff("HEAD~2", "HEAD", ""), "diff summary")
+
+        print("\n[9] restore")
+        before = ds.manifest("")
+        must_fail("restore with a wrong manifest", lambda: ds.restore(rev, "0" * 64))
+        res = ds.restore(rev, before["manifest_sha256"])
+        ok(res["commit"] != "(nothing to commit)", "restore commits forward")
+        ok(int(ds.status()["total_commits"]) > 0, "history survives the restore")
+
+        print("\n[10] dataset administration")
+        c = v.create("Scratch")
+        ok(c["state"] == "open", "dataset created open")
+        for bad in ("scratch", "_reserved", ".hidden", "a/b", "..", ""):
+            must_fail(f"create {bad!r}", lambda n=bad: v.create(n))
+        ds2 = v.open_by_name("Scratch", "")
+        ok(ds2.status()["dataset"] == "Scratch", "open dataset needs no key")
+        must_fail("drop a dataset that has a key",
+                  lambda: v.drop("Example Project", ds.manifest("")["manifest_sha256"]))
+        must_fail("drop with a wrong manifest", lambda: v.drop("Scratch", "0" * 64))
+        d = v.drop("Scratch", ds2.manifest("")["manifest_sha256"])
+        ok(d["dropped"] == "Scratch", "drop an open dataset")
+        ok(not (Path(root) / "Scratch").exists(), "the directory is really gone")
+
+        print("\n[11] key registry hot reload")
+        kf = Path(root) / "keys.txt"
+        kf.write_text("# no keys\n"); time.sleep(0.02)
+        ok(v.status("t")["datasets"][0]["state"] == "open", "removing the line opens the dataset")
+        ok(v.open("Example Project/log.md", "")[1] == "log.md", "no key needed now")
+        kf.write_text(f"Example Project\t{KEY}\n"); time.sleep(0.02)
+        ok(v.status("t")["datasets"][0]["state"] == "locked", "putting the line back locks it")
+        must_fail("and it blocks again", lambda: v.open("Example Project/log.md", ""))
+
+        print("\n[12] history pruning")
+        os.makedirs(Path(root) / "Old")
+        v.boot(0)
+        old = Dataset(Path(root) / "Old", "Old")
+        for i in range(6, 0, -1):
+            (Path(root) / "Old" / f"f{i}.md").write_text(f"content {i}\n")
+            when = f"2024-0{i}-15T12:00:00"
+            subprocess.run(["git", "-C", str(Path(root) / "Old"), "add", "-A"], capture_output=True)
+            subprocess.run(["git", "-C", str(Path(root) / "Old"), "commit", "-q", "-m", f"c{i}"],
+                           capture_output=True,
+                           env=dict(os.environ, GIT_AUTHOR_DATE=when, GIT_COMMITTER_DATE=when))
+        (Path(root) / "Old" / "recent.md").write_text("new\n")
+        old._commit("recent")
+        before_sha = old.manifest("")["manifest_sha256"]
+        n_before = old.status()["total_commits"]
+        old.prune_history(6)
+        ok(old.status()["total_commits"] < n_before, "history gets shorter")
+        ok(old.manifest("")["manifest_sha256"] == before_sha, "CONTENT NEVER CHANGES")
+        ok("not needed" in old.prune_history(6), "a second prune is a no-op")
+
+        print("\n[13] static server.py <-> vault.py consistency")
+        static_api_check()
+
+        print(f"\n{'=' * 46}\n  {OK} passed, {FAIL} failed\n{'=' * 46}")
+        return 1 if FAIL else 0
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
