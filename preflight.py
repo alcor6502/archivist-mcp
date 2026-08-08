@@ -6,10 +6,35 @@ Selective skip (for local testing only, never in production):
   PREFLIGHT_SKIP="funnel,node_key"
 """
 from __future__ import annotations
-import os, subprocess, sys, secrets
+import os, re, subprocess, sys, secrets
 
 SKIP = {s.strip() for s in os.environ.get("PREFLIGHT_SKIP", "").split(",") if s.strip()}
 RESULTS: list[tuple[str, bool, str]] = []
+
+
+_SEPARATORS = re.compile(r"[\s._\-]")
+# Not preceded by a letter: the word has to START here. Without that guard,
+# "exchange mechanism" squeezes to "exchangemechanism", which contains
+# "changeme" — and so does a perfectly legitimate https://exchange.me.ts.net.
+# A check that refuses to start the service on a real value is worse than the
+# hole it closes.
+_PLACEHOLDER = re.compile(r"(?<![A-Za-z])(CHANGEME|CAMBIAMI)", re.IGNORECASE)
+
+
+def is_placeholder(v: str) -> bool:
+    """True if the value is still a template placeholder.
+
+    Separators are stripped before matching, so CHANGE_ME, CHANGE-ME, CHANGE.ME
+    and 'change me' are all recognised. The earlier version matched the literal
+    string only, which meant the guard depended on whoever wrote the template
+    remembering to spell it exactly right — that is a guard which holds until
+    the day it is needed.
+
+    Only separators are stripped, never / or :, so the word boundary at the
+    start of the placeholder survives: it is what tells CHANGEME inside
+    https://CHANGEME.your-tailnet.ts.net (caught, and it teaches the syntax
+    while being caught) from the one hiding inside exchange (let through)."""
+    return bool(_PLACEHOLDER.search(_SEPARATORS.sub("", v)))
 
 
 def check(name):
@@ -124,10 +149,15 @@ def c_oauth():
     # Funnel, indexed within minutes via certificate transparency logs.
     for k in ("GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET", "ALLOWED_GITHUB_LOGIN", "BASE_URL"):
         v = os.environ.get(k, "")
-        if not v or "CHANGEME" in v.upper() or "CAMBIAMI" in v.upper():
+        if not v or is_placeholder(v):
             raise RuntimeError(f"{k} missing or still a placeholder")
-    if len(os.environ.get("JWT_SIGNING_KEY", "")) < 32:
+    jwt = os.environ.get("JWT_SIGNING_KEY", "")
+    if len(jwt) < 32:
         raise RuntimeError("JWT_SIGNING_KEY missing or too short (openssl rand -hex 32)")
+    # Length alone was not enough: a 64-character placeholder would have walked
+    # straight through, and the failure would only have surfaced at first login.
+    if is_placeholder(jwt):
+        raise RuntimeError("JWT_SIGNING_KEY is still a placeholder (openssl rand -hex 32)")
     if not os.environ["BASE_URL"].startswith("https://"):
         raise RuntimeError("BASE_URL must be https")
     return "credentials present"

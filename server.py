@@ -1,5 +1,5 @@
 """
-server.py — self-hosted MCP server for a dataset vault. v1.6
+server.py — self-hosted MCP server for a dataset vault. v1.7
 
 Architecture:
 - the server listens on 127.0.0.1:PORT and does NOT know how traffic reaches
@@ -45,10 +45,27 @@ from fastmcp.server.middleware import Middleware, MiddlewareContext
 
 from vault import VaultRoot, VaultError
 
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+# The ROOT logger stays at WARNING. It used to be INFO, which switched on INFO
+# for every library loaded, not for ours: that is where the noise came from.
+# Only our own logger follows LOG_LEVEL.
+logging.basicConfig(level=logging.WARNING,
+                    format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("archivist-mcp")
+log.setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
+
+# uvicorn's access log is one line per request; a request carries a path, and a
+# path carries dataset and document names. Left on, the log slowly becomes a
+# record of what was read and when. Same reasoning that keeps vault_status()
+# minimal: commit messages contain paths.
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+
+# FastMCP's own banner, rich formatting and boot-time update check are turned
+# off in the Dockerfile (ENV), NOT here: those settings are read when fastmcp is
+# imported, so anything set after the import above would arrive too late. The
+# test suite checks the Dockerfile still carries them, so the cure cannot go
+# missing without something saying so.
 
 
 def env(name: str, default: str | None = None) -> str:

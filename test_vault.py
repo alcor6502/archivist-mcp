@@ -1,7 +1,7 @@
 """
-test_v16.py — engine test suite, no network and no FastMCP required.
+test_vault.py — engine test suite, no network and no FastMCP required.
 
-    python3 test_v16.py
+    python3 test_vault.py
 
 Builds a throwaway vault in a temporary directory, exercises every important
 path and prints a verdict. The checks that must FAIL matter as much as the ones
@@ -83,6 +83,21 @@ def static_api_check() -> None:
         else:
             ok(True, f"{owner.id}.{meth}() exists with a compatible signature")
     ok(seen >= 15, "static check covered the engine calls in server.py", f"only {seen} found")
+
+
+def dockerfile_env_check() -> None:
+    """FastMCP reads its settings when it is IMPORTED, so they cannot be set
+    from inside server.py — they live in the Dockerfile as ENV. That makes them
+    easy to delete by accident, and the only symptom would be the noise quietly
+    coming back. This is the tripwire.
+
+    Values verified against fastmcp 3.4.5."""
+    df = (HERE / "Dockerfile").read_text(encoding="utf-8")
+    for var, val in (("FASTMCP_SHOW_SERVER_BANNER", "false"),
+                     ("FASTMCP_ENABLE_RICH_LOGGING", "false"),
+                     ("FASTMCP_CHECK_FOR_UPDATES", "off"),
+                     ("FASTMCP_LOG_LEVEL", "WARNING")):
+        ok(f"ENV {var}={val}" in df, f"Dockerfile sets {var}={val}")
 
 
 def main() -> int:
@@ -192,6 +207,40 @@ def main() -> int:
         ok(d["dropped"] == "Scratch", "drop an open dataset")
         ok(not (Path(root) / "Scratch").exists(), "the directory is really gone")
 
+        print("\n[10b] the root lock")
+        from vault import ROOT_LOCKFILE
+        lf = Path(root) / ROOT_LOCKFILE
+        ok(lf.exists(), "create/drop left a root lockfile")
+        ok(ROOT_LOCKFILE not in v.dataset_names(), "the root lockfile is not a dataset")
+        must_fail("the root lockfile as a path", lambda: v.split(ROOT_LOCKFILE))
+        must_fail("the root lockfile with something after it",
+                  lambda: v.split(f"{ROOT_LOCKFILE}/x.md"))
+        # A directory that appeared from outside between the check and the
+        # mkdir: the lock cannot prevent it, but the message must stay readable
+        # instead of surfacing a raw FileExistsError.
+        (Path(root) / "Ghost").mkdir()
+        try:
+            v.create("Ghost")
+            ok(False, "create over an existing directory is refused")
+        except VaultError as e:
+            ok("already exists" in str(e), "create over an existing directory is refused", e)
+        except FileExistsError as e:
+            ok(False, "create over an existing directory is refused", f"raw FileExistsError: {e}")
+        shutil.rmtree(Path(root) / "Ghost")
+
+        print("\n[10c] placeholders the preflight must catch")
+        import preflight
+        for bad in ("CHANGEME", "CHANGE_ME", "change-me", "change me", "CamBiaMi",
+                    "https://CHANGEME.your-tailnet.ts.net", "CHANGEME-YOUR-GITHUB-USERNAME",
+                    "0" * 28 + "CHANGE_ME" + "0" * 28):
+            ok(preflight.is_placeholder(bad), f"placeholder recognised: {bad[:34]!r}")
+        # The other half: a real value must NEVER be mistaken for a placeholder.
+        # Refusing to start on a legitimate config is worse than the hole this
+        # check closes — and "exchange" contains the letters of "changeme".
+        for good in ("alcor6502", "https://svc-a1.example.ts.net", "a3f9" * 16,
+                     "exchange mechanism", "https://exchange.me.ts.net", "exchangemeister"):
+            ok(not preflight.is_placeholder(good), f"real value let through: {good[:34]!r}")
+
         print("\n[11] key registry hot reload")
         kf = Path(root) / "keys.txt"
         kf.write_text("# no keys\n"); time.sleep(0.02)
@@ -223,6 +272,9 @@ def main() -> int:
 
         print("\n[13] static server.py <-> vault.py consistency")
         static_api_check()
+
+        print("\n[14] the Dockerfile still quiets FastMCP down")
+        dockerfile_env_check()
 
         print(f"\n{'=' * 46}\n  {OK} passed, {FAIL} failed\n{'=' * 46}")
         return 1 if FAIL else 0

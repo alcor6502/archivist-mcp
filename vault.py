@@ -1,5 +1,5 @@
 """
-vault.py — storage operations, v1.6 (datasets + keys).
+vault.py — storage operations, v1.7 (datasets + keys).
 
 The model
 ---------
@@ -53,6 +53,12 @@ MAX_DATASETS = 200
 KEYS_BASENAME = "keys.txt"
 TRASH = "Trash"
 LOCKFILE = ".archivist.lock"
+# Root-level lock, for create and drop only. Dataset writes keep their own
+# per-dataset lock: datasets are independent repositories, so queueing a write
+# on one behind a write on another would be a cost with nothing bought. Like
+# keys.txt, this file is unreachable from the tools — its name is not a dataset
+# name, so split() stops it with the same check that stops '..' and '.git'.
+ROOT_LOCKFILE = ".archivist-root.lock"
 
 # Dataset names: letters, digits, space, dash, underscore and INNER dots.
 # The first character cannot be '.' (invisible over SMB from macOS) nor '_'
@@ -90,6 +96,15 @@ class VaultRoot:
         self.keys_file = Path(keys_file).resolve() if keys_file else (self.root / KEYS_BASENAME)
         self._keys_cache: dict[str, str] = {}
         self._keys_mtime: float = -1.0
+        self._lockfile = self.root / ROOT_LOCKFILE
+
+    def _lock(self):
+        """Exclusive lock on the vault root. Taken by create and drop, which
+        are the only operations that add or remove a top-level directory and
+        therefore the only ones no per-dataset lock can protect."""
+        fh = open(self._lockfile, "w")
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        return fh
 
     # ---------- datasets ----------
 
@@ -242,19 +257,30 @@ class VaultRoot:
                 "over SMB) nor '_' (reserved).")
         if _fold(n) == _fold(self.keys_file.name):
             raise VaultError("reserved name.")
-        if self.exists(n):
-            real = self._actual_name(n)
-            raise VaultError(f"dataset {real!r} already exists (names are case-insensitive).")
-        if len(self.dataset_names()) >= MAX_DATASETS:
-            raise VaultError(f"too many datasets (max {MAX_DATASETS}).")
-        d = self.root / n
-        d.mkdir(parents=False, exist_ok=False)
-        try:
-            os.chmod(d, 0o777)
-        except OSError:
-            pass
-        ds = Dataset(d, n)
-        result = ds.ensure_git()
+        # Everything that reads or writes the set of datasets happens under the
+        # root lock: without it, "check that it does not exist" and "create it"
+        # are two steps with a gap in between, and the gap is the bug.
+        with self._lock():
+            if self.exists(n):
+                real = self._actual_name(n)
+                raise VaultError(f"dataset {real!r} already exists (names are case-insensitive).")
+            if len(self.dataset_names()) >= MAX_DATASETS:
+                raise VaultError(f"too many datasets (max {MAX_DATASETS}).")
+            d = self.root / n
+            try:
+                d.mkdir(parents=False, exist_ok=False)
+            except FileExistsError:
+                # The lock rules out another create, but not a directory that
+                # appeared over SMB a moment ago. Belt and braces, and above all
+                # a readable message instead of a raw traceback.
+                raise VaultError(
+                    f"dataset {n!r} already exists (names are case-insensitive).") from None
+            try:
+                os.chmod(d, 0o777)
+            except OSError:
+                pass
+            ds = Dataset(d, n)
+            result = ds.ensure_git()
         return {"dataset": n, "state": "open", "git": result,
                 "note": "open: add a line to the key registry to protect it"}
 
@@ -267,23 +293,37 @@ class VaultRoot:
         what you have not looked at, and if someone wrote in the meantime the
         drop is refused."""
         import shutil
-        n = self._actual_name(name)
-        if n is None:
-            raise VaultError(f"no such dataset: {name!r}")
-        if self.is_locked(n):
-            raise VaultError(
-                f"dataset {n!r} has a key and cannot be dropped. "
-                "To remove it: take its line out of the key registry (it then "
-                "becomes open), or delete it directly on the server.")
-        ds = Dataset(self.root / n, n)
-        current = ds.manifest("")["manifest_sha256"]
-        if expected_manifest != current:
-            raise VaultError(
-                f"CONFLICT: expected manifest {expected_manifest[:12]}... but the dataset "
-                f"is {current[:12]}... Re-read the manifest and retry — someone wrote "
-                "after you looked at it.")
-        n_files = ds.manifest("")["file_count"]
-        shutil.rmtree(self.root / n)
+        with self._lock():
+            n = self._actual_name(name)
+            if n is None:
+                raise VaultError(f"no such dataset: {name!r}")
+            if self.is_locked(n):
+                raise VaultError(
+                    f"dataset {n!r} has a key and cannot be dropped. "
+                    "To remove it: take its line out of the key registry (it then "
+                    "becomes open), or delete it directly on the server.")
+            ds = Dataset(self.root / n, n)
+            current = ds.manifest("")["manifest_sha256"]
+            if expected_manifest != current:
+                raise VaultError(
+                    f"CONFLICT: expected manifest {expected_manifest[:12]}... but the dataset "
+                    f"is {current[:12]}... Re-read the manifest and retry — someone wrote "
+                    "after you looked at it.")
+            n_files = ds.manifest("")["file_count"]
+            # The root lock alone would NOT be enough: a write in flight holds
+            # the DATASET lock, not this one, so rmtree and the write would
+            # still tread on each other. Both locks, always in this order —
+            # root then dataset — so no two callers can take them in opposite
+            # order and deadlock.
+            #
+            # What stays open, honestly: rmtree removes the lockfile too, so a
+            # write ARRIVING afterwards finds no directory and fails. This
+            # closes the window on a write already in progress; it does not
+            # make "drop" and "start writing" atomic. That would take a global
+            # lock on every write — the very thing the dataset design rejected.
+            # drop only works on open datasets, which are ephemeral by design.
+            with ds._lock():
+                shutil.rmtree(self.root / n)
         return {"dropped": n, "files_removed": n_files,
                 "note": "deleted. The ZFS snapshot of the vault is the only remaining net."}
 

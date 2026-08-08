@@ -1,4 +1,4 @@
-# Archivist MCP — quick guide (v1.6)
+# Archivist MCP — quick guide (v1.7)
 
 ## The model
 

@@ -11,6 +11,18 @@ ENV FASTMCP_HOME=/data/fastmcp
 # Service user (Unraid: nobody:users). Overridable from the template.
 ENV VAULT_UID=99
 ENV VAULT_GID=100
+# Quiet FastMCP down. These are read when fastmcp is IMPORTED, so they have to
+# be in the environment before the process starts — setting them inside
+# server.py would arrive too late. Verified against fastmcp 3.4.5.
+#   banner        the ASCII art and the commercial pointer
+#   rich logging  the boxed, source-annotated lines
+#   update check  an OUTBOUND call at every boot to ask what the latest version
+#                 is, on a service that pins its version on purpose
+#   log level     fastmcp's own logger; ours follows LOG_LEVEL
+ENV FASTMCP_SHOW_SERVER_BANNER=false
+ENV FASTMCP_ENABLE_RICH_LOGGING=false
+ENV FASTMCP_CHECK_FOR_UPDATES=off
+ENV FASTMCP_LOG_LEVEL=WARNING
 # The vault mounts on /vault, state (logs + tokens) on /data.
 # No EXPOSE: the Funnel inside the container handles ingress.
 CMD ["/bin/sh", "/app/entrypoint.sh"]

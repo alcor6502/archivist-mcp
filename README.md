@@ -1,6 +1,6 @@
 # Archivist MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/version-1.6.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-21%20tools-8A63D2.svg">
+<img src="https://img.shields.io/badge/version-1.7.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-21%20tools-8A63D2.svg">
 
 **A document vault Claude can read and write, git-versioned on every write,
 self-hosted on your own server.**
@@ -271,7 +271,7 @@ old image, convinced you fixed something.
 Before installing, test the engine with no network and no Docker:
 
 ```sh
-python3 test_v16.py     # 102 checks, all must pass
+python3 test_vault.py     # 125 checks, all must pass
 ```
 
 Half of those checks verify things that must **not** happen — traversal, wrong
@@ -646,7 +646,7 @@ between projects, not a defence against an attacker. That is what OAuth is for.
 | `entrypoint.sh` | init, permissions, privilege drop, preflight, start |
 | `Dockerfile` · `requirements.txt` | the image |
 | `archivist-mcp.template.xml` | Unraid template, every field documented |
-| `test_v16.py` | 102 checks on the engine, no network needed |
+| `test_vault.py` | 125 checks on the engine, no network needed |
 
 ## Licence and credits
 

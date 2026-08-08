@@ -1,6 +1,6 @@
 # Archivist MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/version-1.6.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-21%20tools-8A63D2.svg">
+<img src="https://img.shields.io/badge/version-1.7.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-21%20tools-8A63D2.svg">
 
 **Un magazzino di documenti che Claude può leggere e scrivere, versionato con
 git a ogni scrittura, self-hosted a casa tua.**
@@ -271,7 +271,7 @@ un'ora a collaudare l'immagine vecchia convinti di aver corretto qualcosa.
 Prima di installare, collauda il motore senza rete e senza Docker:
 
 ```sh
-python3 test_v16.py     # 62 controlli, devono passare tutti
+python3 test_vault.py     # 125 controlli, devono passare tutti
 ```
 
 Metà di quei controlli verifica cose che **non** devono succedere — traversal,
@@ -652,7 +652,7 @@ sono un confine fra progetti, non una difesa contro un attaccante. Quella è OAu
 | `entrypoint.sh` | init, permessi, drop privilegi, preflight, avvio |
 | `Dockerfile` · `requirements.txt` | immagine |
 | `archivist-mcp.template.xml` | template Unraid, ogni campo descritto |
-| `test_v16.py` | 62 controlli sul motore, senza rete |
+| `test_vault.py` | 125 controlli sul motore, senza rete |
 
 ## Licenza e crediti
 
