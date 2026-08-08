@@ -657,7 +657,8 @@ read_at("Example Project", "01 Notes/a.md", "HEAD~3")
 
 **`search(dataset, pattern, path="", regex=False)`** — server-side grep:
 nothing is downloaded. Text files only; find binaries by name with `list_files`.
-**Returns** `dataset · pattern · files_scanned · matches · truncated · lines[]`
+**Returns** `dataset · base · pattern · files_scanned · matches · truncated ·
+lines[]`
 
 ```
 search("Example Project", "deadline")
@@ -781,6 +782,7 @@ dataset_restore("Example Project", "0583255", "2428…")
 last modified. Contents remain in git history: this removes clutter, it does
 not destroy information.
 **Returns** `dataset · before · removed · bytes_freed · files · note`
+(plus `commit`, when something was actually removed)
 
 ```
 trash_purge("Example Project", "2026-06-01")

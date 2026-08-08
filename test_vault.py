@@ -144,6 +144,41 @@ def static_api_check() -> None:
     ok(seen >= 15, "static check covered the engine calls in server.py", f"only {seen} found")
 
 
+def single_door_check() -> None:
+    """Every tool that takes a path must reach the engine THROUGH the vault.
+
+    The refusal of a dataset-prefixed path lives in VaultRoot, not in Dataset:
+    `Dataset.move_path("a.md", "X/y.md")` called directly would happily create
+    a nested folder. That is fine — the engine is the primitive — but it means
+    the guarantee rests on server.py routing every path through `vault.open`
+    (and `vault.check_path` for a second path in the same call). Nothing at
+    runtime would notice a tool that skipped it, so this reads the source and
+    checks. It is the same trade as the arity check above: cover the gap the
+    runtime tests cannot see."""
+    tree = ast.parse((HERE / "server.py").read_text(encoding="utf-8"))
+    checked = 0
+    for fn in tree.body:
+        if not isinstance(fn, ast.FunctionDef):
+            continue
+        args = [a.arg for a in fn.args.args]
+        pathish = [a for a in args if a in ("path", "src", "dst")]
+        if not pathish:
+            continue
+        calls = {n.func.attr for n in ast.walk(fn)
+                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                 and isinstance(n.func.value, ast.Name) and n.func.value.id == "vault"}
+        checked += 1
+        ok("open" in calls, f"{fn.name}() resolves its path through vault.open()", sorted(calls))
+        # A second path in the same call cannot come out of vault.open: it has
+        # to be validated on its own, or it slips past the whole check.
+        if len(pathish) > 1:
+            ok("check_path" in calls,
+               f"{fn.name}() validates its second path through vault.check_path()",
+               sorted(calls))
+        ok("dataset" in args, f"{fn.name}() names its dataset explicitly", args)
+    ok(checked >= 14, "the single-door check covered the path-taking tools", checked)
+
+
 def dockerfile_env_check() -> None:
     """FastMCP reads its settings when it is IMPORTED, so they cannot be set
     from inside server.py — they live in the Dockerfile as ENV. That makes them
@@ -198,23 +233,59 @@ def main() -> int:
         ds, rel = v.open("Example Project", "log.md", KEY)
         ok(ds.name == "Example Project" and rel == "log.md", "resolution with the right key")
         # keys.txt is not merely refused, it is not EXPRESSIBLE: as a dataset it
-        # does not exist, and as a path it can only mean a file inside a dataset,
-        # where there is none. The registry in the vault root stays untouched.
-        must_fail("keys.txt as a path inside a dataset",
+        # does not exist, and as a path it can only ever mean a file inside a
+        # dataset, where there is none. This one passes because the file is not
+        # there, which is the point — but say so, or it looks like a guard.
+        must_fail("keys.txt inside a dataset is simply absent",
                   lambda: ds.read_file("keys.txt"))
         ok((Path(root) / "keys.txt").read_text().startswith("Example Project"),
            "the key registry is still where it was")
 
+        print("\n[2c] the lockfiles are refused as PATHS, not merely hidden")
+        # Hiding them from listings, which _skip does, is not protection. A write
+        # goes through os.replace and swaps the inode under whoever holds the
+        # flock, and then two writers both believe they have it.
+        from vault import LOCKFILE, ROOT_LOCKFILE as RLF
+        with ds._lock():                                  # this is what creates it
+            pass
+        ok((Path(root) / "Example Project" / LOCKFILE).exists(), "the dataset lockfile exists")
+        for label, fn in (
+            ("read", lambda: ds.read_file(LOCKFILE)),
+            ("write", lambda: ds.write_file(LOCKFILE, "stolen", "new")),
+            ("move away", lambda: ds.move_path(LOCKFILE, "stolen.md")),
+            ("move onto", lambda: ds.move_path("log.md", LOCKFILE)),
+            ("at resolution", lambda: v.check_path("Example Project", LOCKFILE)),
+            ("nested", lambda: v.check_path("Example Project", f"01 Notes/{LOCKFILE}")),
+            ("root lockfile", lambda: v.check_path("Example Project", RLF)),
+        ):
+            must_fail(f"the lockfile as a path, {label}", fn)
+        ok((Path(root) / "Example Project" / LOCKFILE).exists(),
+           "and it is still there, untouched")
+        # Case-folded, because on a case-insensitive volume an exact comparison
+        # lets '.GIT' through to the real repository.
+        for bad in (".GIT/config", ".Git", LOCKFILE.upper()):
+            must_fail(f"case variant refused: {bad!r}",
+                      lambda b=bad: v.check_path("Example Project", b))
+        # And the other half, the one that matters: exact names only. '.gitignore'
+        # is an ordinary file that lives in every dataset and must pass.
+        ok(v.check_path("Example Project", ".gitignore") == ".gitignore",
+           "'.gitignore' is not '.git': it passes")
+        ok(ds.read_file(".gitignore")["path"] == ".gitignore", "and it really reads")
+
         print("\n[2b] the ambiguous path — the v1.8 shape MUST be refused")
         # A caller not yet rewritten sends the dataset twice: once in `dataset`,
-        # once as the head of `path`. Refused loudly, on reads exactly as on
-        # writes — a read that normalised would teach the wrong form and never
-        # complain.
+        # once as the head of `path`. Refused loudly.
+        #
+        # These all go through v.open because that IS the single door — reads and
+        # writes alike reach it, which is not asserted here but in
+        # single_door_check(), by reading server.py. Listing a read and a write
+        # separately would only have looked like two proofs.
         for label, fn in (
-            ("write", lambda: v.open("Example Project", "Example Project/log.md", KEY)),
-            ("read", lambda: v.open("Example Project", "Example Project/01 Notes/a.md", KEY)),
+            ("a file", lambda: v.open("Example Project", "Example Project/log.md", KEY)),
+            ("a nested file", lambda: v.open("Example Project", "Example Project/01 Notes/a.md", KEY)),
             ("bare dataset as path", lambda: v.open("Example Project", "Example Project", KEY)),
             ("folded case", lambda: v.open("Example Project", "example project/log.md", KEY)),
+            ("with a trailing slash", lambda: v.open("Example Project", "Example Project/", KEY)),
         ):
             must_fail(f"prefixed path, {label}", fn)
         try:
@@ -246,20 +317,43 @@ def main() -> int:
         ok(ds.manifest()["file_count"] == 4, "manifest with no path covers the dataset")
 
         print("\n[3b] every returned path is relative, and carries its dataset")
+        # The writes are exercised here too, not only the reads: a return that
+        # kept the prefix on one side and dropped it on the other would be the
+        # worst of both, and only a sweep catches the one that was forgotten.
+        ds.write_file("sweep.md", "a\n", "new")
+        sweep_sha = ds.read_file("sweep.md")["sha256"]
         returns = {
             "list_files": ds.list_files(""),
             "list_files (one file)": ds.list_files("log.md"),
             "read_file": ds.read_file("log.md"),
+            "read_binary": ds.read_binary("log.md"),
+            "read_at": ds.read_at("log.md", "HEAD"),
             "manifest": ds.manifest(""),
             "search": ds.search("line", ""),
             "history": ds.history("", 5),
+            "history (one file)": ds.history("log.md", 5),
             "archive": ds.archive("", "*.md"),
+            "diff": ds.diff("HEAD~1", "HEAD", ""),
             "status": ds.status(),
+            "append": ds.append("sweep.md", "b"),
+            "edit_file": ds.edit_file("sweep.md", "a\n", "c\n", ds.read_file("sweep.md")["sha256"]),
+            "write_file": ds.write_file("sweep.md", "d\n", ds.read_file("sweep.md")["sha256"]),
+            "write_binary": ds.write_binary("sweep.bin", "AAEC", "new"),
+            "move_path": ds.move_path("sweep.md", "moved.md"),
+            "trash_purge": ds.trash_purge("2020-01-01"),
         }
         for label, res in returns.items():
-            ok(res.get("dataset") == "Example Project", f"{label} echoes the dataset", res.get("dataset"))
+            ok(res.get("dataset") == "Example Project",
+               f"{label} echoes the dataset", res.get("dataset"))
         for label, field in (("list_files", "base"), ("list_files (one file)", "file"),
-                             ("read_file", "path"), ("manifest", "base"), ("history", "path")):
+                             ("read_file", "path"), ("read_binary", "path"),
+                             ("read_at", "path"), ("manifest", "base"),
+                             ("search", "base"), ("history", "path"),
+                             ("history (one file)", "path"), ("archive", "base"),
+                             ("diff", "path"), ("append", "path"),
+                             ("edit_file", "path"), ("write_file", "path"),
+                             ("write_binary", "path"), ("move_path", "from"),
+                             ("move_path", "to")):
             val = returns[label][field]
             ok(not val.startswith("Example Project"),
                f"{label}[{field}] carries no dataset prefix", val)
@@ -267,6 +361,13 @@ def main() -> int:
            "search lines are file:line:text, relative", returns["search"]["lines"][:1])
         ok(all(not f["path"].startswith("Example Project") for f in returns["list_files"]["files"]),
            "every entry in list_files is relative")
+        ok(sweep_sha != returns["write_file"]["sha256"], "the sweep really wrote")
+        ds.move_path("moved.md", "Trash/moved.md")
+        ds.move_path("sweep.bin", "Trash/sweep.bin")
+        purged = ds.trash_purge("2035-01-01")
+        ok(purged["dataset"] == "Example Project" and
+           all(not f.startswith("Example Project") for f in purged["files"]),
+           "trash_purge lists relative paths", purged["files"])
 
         print("\n[4] writing and CAS")
         ok(ds.append(rel, "| entry |")["commit"] != "(nothing to commit)", "append commits")
@@ -411,6 +512,7 @@ def main() -> int:
 
         print("\n[13] static server.py <-> vault.py consistency")
         static_api_check()
+        single_door_check()
 
         print("\n[14] the Dockerfile still quiets FastMCP down")
         dockerfile_env_check()

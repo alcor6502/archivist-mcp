@@ -623,8 +623,8 @@ dataset_status("Example Project")
    "last_commit": "2781f59 2026-08-08T18:30:51+02:00 edit: Notes.md"}
 ```
 
-**`list_files(path)`** — elenco ricorsivo con taglia e sha di ogni file. Il
-nome nudo del dataset elenca tutto il dataset.
+**`list_files(dataset, path="")`** — elenco ricorsivo con taglia e sha di ogni
+file. Un path vuoto elenca tutto il dataset.
 **Ritorna** `dataset · base · count · files[{path, size, sha256}]`
 (su un file solo: `dataset · file · size · sha256`)
 
@@ -664,7 +664,8 @@ read_at("Example Project", "01 Notes/a.md", "HEAD~3")
 **`search(dataset, pattern, path="", regex=False)`** — grep sul server: non
 scarica niente. Solo file di testo; i binari si trovano per nome con
 `list_files`.
-**Ritorna** `dataset · pattern · files_scanned · matches · truncated · lines[]`
+**Ritorna** `dataset · base · pattern · files_scanned · matches · truncated ·
+lines[]`
 
 ```
 search("Example Project", "scadenza")
@@ -791,6 +792,7 @@ cestinato **prima** di una data ISO. La data è quella di cestinamento, non
 quella dell'ultima modifica. I contenuti restano nella storia git: toglie
 ingombro, non distrugge informazione.
 **Ritorna** `dataset · before · removed · bytes_freed · files · note`
+(più `commit`, quando qualcosa è stato davvero rimosso)
 
 ```
 trash_purge("Example Project", "2026-06-01")

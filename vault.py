@@ -57,8 +57,9 @@ LOCKFILE = ".archivist.lock"
 # Root-level lock, for create and drop only. Dataset writes keep their own
 # per-dataset lock: datasets are independent repositories, so queueing a write
 # on one behind a write on another would be a cost with nothing bought. Like
-# keys.txt, this file is unreachable from the tools — its name is not a dataset
-# name, so it cannot appear in `dataset`, and inside a dataset it does not exist.
+# keys.txt, this file is unreachable from the tools: its name is not a dataset
+# name, so it cannot appear in `dataset`, and as a path segment it is refused
+# outright — see _FORBIDDEN_SEGMENTS below.
 ROOT_LOCKFILE = ".archivist-root.lock"
 
 # Dataset names: letters, digits, space, dash, underscore and INNER dots.
@@ -83,6 +84,26 @@ def _fold(s: str) -> str:
     """Comparison form for collisions: NFC + casefold. 'Scratch' and 'scratch'
     are the same dataset and must not be able to coexist."""
     return _norm(s).casefold()
+
+
+# Names a path segment may never be. Compared case-folded, because on a
+# case-insensitive volume — an SMB share is the obvious one — '.GIT' reaches the
+# real repository while an exact comparison waves it through.
+#
+# The lockfiles are here for a reason worth writing down: excluding them from
+# LISTINGS, which _skip already did, hides them but does not protect them. A
+# write to a lockfile goes through os.replace and so swaps the INODE underneath
+# whoever is holding the flock, and the two writers then think they both have it.
+#
+# EXACT names, never substrings. '.gitignore' is an ordinary file that lives in
+# every dataset, and a guard widened until it caught that too would be refusing
+# what must pass — the failure this project already paid for once, in v1.7, with
+# the placeholder check.
+_FORBIDDEN_SEGMENTS = {"..", ".git", LOCKFILE.casefold(), ROOT_LOCKFILE.casefold()}
+
+
+def _has_forbidden(parts) -> bool:
+    return any(_fold(x) in _FORBIDDEN_SEGMENTS for x in parts)
 
 
 # =====================================================================
@@ -236,7 +257,7 @@ class VaultRoot:
         # The same check exists in Dataset._resolve, the choke point of every
         # operation. Here it is hoisted: the guarantee then holds already at
         # resolution time, and no future tool can bypass it by oversight.
-        if any(x in ("..", ".git") for x in parts):
+        if _has_forbidden(parts):
             raise VaultError(f"path not allowed: {path!r}")
         if _fold(parts[0]) == _fold(dataset):
             raise VaultError(
@@ -413,7 +434,7 @@ class Dataset:
         if not rel or rel == ".":
             p = self.root
         else:
-            if any(part in ("..", ".git") for part in Path(rel).parts):
+            if _has_forbidden(Path(rel).parts):
                 raise VaultError(f"path not allowed: {rel!r}")
             p = self.root / rel
         rp = p.resolve() if p.exists() else p.parent.resolve() / p.name
@@ -763,8 +784,9 @@ class Dataset:
                     hits.append(f"{self._rel(p)}:{i}: {line.strip()[:200]}")
             if truncated:
                 break
-        return {"dataset": self.name, "pattern": pattern, "files_scanned": scanned,
-                "matches": len(hits), "truncated": truncated, "lines": hits}
+        return {"dataset": self.name, "base": self._rel(base), "pattern": pattern,
+                "files_scanned": scanned, "matches": len(hits),
+                "truncated": truncated, "lines": hits}
 
     def manifest(self, rel: str = "") -> dict:
         # The lines that go into the fingerprint carry dataset-relative paths, so
