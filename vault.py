@@ -237,6 +237,7 @@ class VaultRoot:
         return {
             "vault": "ok",
             "version": version,
+            "guide": "call reference_guide() for the manual",
             "datasets": [
                 {"name": n, "state": "locked" if _fold(n) in keys else "open"}
                 for n in self.dataset_names()
