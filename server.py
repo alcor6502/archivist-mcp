@@ -1,5 +1,5 @@
 """
-server.py — self-hosted MCP server for a dataset vault. v1.7
+server.py — self-hosted MCP server for a dataset vault. v2
 
 Architecture:
 - the server listens on 127.0.0.1:PORT and does NOT know how traffic reaches
@@ -13,8 +13,8 @@ Architecture:
 Datasets and keys:
 - the vault root holds DATASETS (top-level directories), each with its own git
   repository;
-- every path starts with the dataset name; a path that is only the dataset
-  name means "the whole dataset";
+- every call names its dataset explicitly in `dataset`, and `path` is relative
+  to it; an empty path means "the whole dataset";
 - a dataset listed in keys.txt is LOCKED: every call must carry its key in the
   `key` parameter. Without a line it is OPEN.
 
@@ -52,7 +52,7 @@ from fastmcp.server.middleware import Middleware, MiddlewareContext
 from preflight import cidrs_from_env, describe_cidrs
 from vault import VaultRoot, VaultError
 
-VERSION = "1.8.1"
+VERSION = "2.0.0"
 
 # The ROOT logger stays at WARNING. It used to be INFO, which switched on INFO
 # for every library loaded, not for ours: that is where the noise came from.
@@ -186,120 +186,123 @@ def dataset_status(dataset: str, key: str = "") -> dict:
 
 
 @mcp.tool
-def list_files(path: str, key: str = "") -> dict:
+def list_files(dataset: str, path: str = "", key: str = "") -> dict:
     """Files under `path` with size and sha256, recursive. Same sha means same
-    file."""
-    ds, rel = vault.open(path, key)
+    file. Empty path: the whole dataset."""
+    ds, rel = vault.open(dataset, path, key)
     return ds.list_files(rel)
 
 
 @mcp.tool
-def read_file(path: str, key: str = "") -> dict:
+def read_file(dataset: str, path: str, key: str = "") -> dict:
     """Read a UTF-8 text file: content plus sha256. That sha is what write_file
     and edit_file want back."""
-    ds, rel = vault.open(path, key)
+    ds, rel = vault.open(dataset, path, key)
     return ds.read_file(rel)
 
 
 @mcp.tool
-def append(path: str, text: str, key: str = "") -> dict:
+def append(dataset: str, path: str, text: str, key: str = "") -> dict:
     """Append a block to an existing file. It never touches existing bytes, so it
     needs no sha. Max 64 KB."""
-    ds, rel = vault.open(path, key)
+    ds, rel = vault.open(dataset, path, key)
     return ds.append(rel, text)
 
 
 @mcp.tool
-def write_file(path: str, content: str, expected_sha256: str, key: str = "") -> dict:
+def write_file(dataset: str, path: str, content: str,
+               expected_sha256: str, key: str = "") -> dict:
     """Write the WHOLE file. CAS: expected_sha256 must match the file's current
     sha, or "new" for a new file. UTF-8, max 2 MB."""
-    ds, rel = vault.open(path, key)
+    ds, rel = vault.open(dataset, path, key)
     return ds.write_file(rel, content, expected_sha256)
 
 
 @mcp.tool
-def edit_file(path: str, old_text: str, new_text: str,
+def edit_file(dataset: str, path: str, old_text: str, new_text: str,
               expected_sha256: str, key: str = "") -> dict:
     """Replace old_text — which must occur EXACTLY once — with new_text. Same CAS
     as write_file. Only the fragments travel, not the file."""
-    ds, rel = vault.open(path, key)
+    ds, rel = vault.open(dataset, path, key)
     return ds.edit_file(rel, old_text, new_text, expected_sha256)
 
 
 @mcp.tool
-def move_path(src: str, dst: str, key: str = "") -> dict:
-    """Move, rename or trash, WITHIN one dataset. Never overwrites. There is no
+def move_path(dataset: str, src: str, dst: str, key: str = "") -> dict:
+    """Move, rename or trash inside the dataset. Never overwrites. There is no
     delete tool: moving into Trash/ is the disposal route."""
-    ds_s, rel_s = vault.open(src, key)
-    ds_d, rel_d = vault.open(dst, key)
-    if ds_s.name != ds_d.name:
-        raise VaultError(
-            f"src is in {ds_s.name!r} and dst in {ds_d.name!r}: move_path works "
-            "inside a single dataset. Moves across datasets are done on the server.")
-    return ds_s.move_path(rel_s, rel_d)
+    # src and dst are relative to the SAME dataset, so a move across datasets is
+    # no longer expressible: the runtime check that used to catch it is gone,
+    # replaced by the shape of the call itself.
+    ds, rel_s = vault.open(dataset, src, key)
+    rel_d = vault.check_path(ds.name, dst)
+    return ds.move_path(rel_s, rel_d)
 
 
 @mcp.tool
-def search(pattern: str, path: str, regex: bool = False, key: str = "") -> dict:
+def search(dataset: str, pattern: str, path: str = "",
+           regex: bool = False, key: str = "") -> dict:
     """Grep the dataset server-side: file:line:text, nothing downloaded.
     regex=True for expressions."""
-    ds, rel = vault.open(path, key)
+    ds, rel = vault.open(dataset, path, key)
     return ds.search(pattern, rel, regex)
 
 
 @mcp.tool
-def manifest(path: str, key: str = "") -> dict:
+def manifest(dataset: str, path: str = "", key: str = "") -> dict:
     """Fingerprint of a tree in one number. Two equal manifests mean identical
     trees. Required by dataset_drop and dataset_restore."""
-    ds, rel = vault.open(path, key)
+    ds, rel = vault.open(dataset, path, key)
     return ds.manifest(rel)
 
 
 @mcp.tool
-def archive(path: str, pattern: str = "*.md", key: str = "") -> dict:
+def archive(dataset: str, path: str = "", pattern: str = "*.md", key: str = "") -> dict:
     """Every file matching `pattern` under `path` in ONE call, as a base64
     tar.gz. Needs a sandbox to extract it in."""
-    ds, rel = vault.open(path, key)
+    ds, rel = vault.open(dataset, path, key)
     return ds.archive(rel, pattern)
 
 
 @mcp.tool
-def read_binary(path: str, key: str = "") -> dict:
+def read_binary(dataset: str, path: str, key: str = "") -> dict:
     """Read any file (PDF, binary) as base64 plus sha256. Max 2 MB. Useless
     without a sandbox to decode it in."""
-    ds, rel = vault.open(path, key)
+    ds, rel = vault.open(dataset, path, key)
     return ds.read_binary(rel)
 
 
 @mcp.tool
-def write_binary(path: str, content_base64: str, expected_sha256: str, key: str = "") -> dict:
+def write_binary(dataset: str, path: str, content_base64: str,
+                 expected_sha256: str, key: str = "") -> dict:
     """Write a binary file from base64. Same CAS as write_file. Max 2 MB decoded.
     Compare the returned sha with the one computed at the source."""
-    ds, rel = vault.open(path, key)
+    ds, rel = vault.open(dataset, path, key)
     return ds.write_binary(rel, content_base64, expected_sha256)
 
 
 @mcp.tool
-def read_at(path: str, rev: str, key: str = "") -> dict:
+def read_at(dataset: str, path: str, rev: str, key: str = "") -> dict:
     """Read a text file as it was at a past revision (a hash from history, or
     "HEAD~3"). Read-only."""
-    ds, rel = vault.open(path, key)
+    ds, rel = vault.open(dataset, path, key)
     return ds.read_at(rel, rev)
 
 
 @mcp.tool
-def history(path: str, n: int = 10, key: str = "") -> dict:
-    """The last n commits of a dataset or of a file: hash, ISO date, message.
-    The short hash goes verbatim into read_at and diff."""
-    ds, rel = vault.open(path, key)
+def history(dataset: str, path: str = "", n: int = 10, key: str = "") -> dict:
+    """The last n commits of the dataset (empty path) or of one file: hash, ISO
+    date, message. The short hash goes verbatim into read_at and diff."""
+    ds, rel = vault.open(dataset, path, key)
     return ds.history(rel, n)
 
 
 @mcp.tool
-def diff(rev_a: str, path: str, rev_b: str = "HEAD", key: str = "") -> dict:
-    """Differences between two revisions. A bare dataset name gives the per-file
+def diff(dataset: str, rev_a: str, path: str = "", rev_b: str = "HEAD",
+         key: str = "") -> dict:
+    """Differences between two revisions. An empty path gives the per-file
     summary; a file gives its full diff."""
-    ds, rel = vault.open(path, key)
+    ds, rel = vault.open(dataset, path, key)
     return ds.diff(rev_a, rev_b, rel)
 
 

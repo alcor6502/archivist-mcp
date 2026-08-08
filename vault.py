@@ -1,19 +1,20 @@
 """
-vault.py — storage operations, v1.7 (datasets + keys).
+vault.py — storage operations, v2 (datasets as a field + keys).
 
 The model
 ---------
 - The vault root holds no working files: it holds DATASETS. A dataset is a
   top-level directory with its OWN git repository.
-- Every path starts with a dataset name. A path that is ONLY the dataset name
-  means "the whole dataset". There is no root-level operation at all: the
-  entire protection model follows from that single rule.
+- The dataset is NAMED EXPLICITLY on every call, in its own `dataset`
+  argument; `path` is relative to it, and an empty path means "the whole
+  dataset". There is no root-level operation at all: the entire protection
+  model follows from that single rule, which up to v1.8 was expressed by
+  making the dataset the first segment of the path.
 - A dataset listed in keys.txt is LOCKED and every call must carry its key.
   Without a line it is OPEN.
-- keys.txt lives in the vault root and is unreachable BY CONSTRUCTION: its
-  first path segment is not a dataset directory, so resolution rejects it the
-  same way it rejects any other stray root file. It is also excluded
-  explicitly — belt as well as braces.
+- keys.txt lives in the vault root and is unreachable BY CONSTRUCTION: it is
+  not a dataset, so it cannot be named in `dataset`, and as a `path` it is
+  only ever looked for INSIDE a dataset. It is not even expressible.
 
 Invariants
 ----------
@@ -57,7 +58,7 @@ LOCKFILE = ".archivist.lock"
 # per-dataset lock: datasets are independent repositories, so queueing a write
 # on one behind a write on another would be a cost with nothing bought. Like
 # keys.txt, this file is unreachable from the tools — its name is not a dataset
-# name, so split() stops it with the same check that stops '..' and '.git'.
+# name, so it cannot appear in `dataset`, and inside a dataset it does not exist.
 ROOT_LOCKFILE = ".archivist-root.lock"
 
 # Dataset names: letters, digits, space, dash, underscore and INNER dots.
@@ -187,43 +188,71 @@ class VaultRoot:
 
     # ---------- resolution ----------
 
-    def split(self, path: str) -> tuple[str, str]:
-        """'Example Project/01 Notes/a.md' -> ('Example Project', '01 Notes/a.md').
-        'Example Project' -> ('Example Project', '').
+    def resolve_dataset(self, dataset: str) -> str:
+        """The on-disk name of an existing dataset, or a readable refusal.
 
-        The first segment MUST be an existing dataset. This is where everything
-        that must not pass gets stopped, keys.txt included."""
-        p = _norm(path).lstrip("/")
-        if not p or p == ".":
+        This is the whole root-level surface: nothing that is not a dataset can
+        be named here, keys.txt and the lockfiles included."""
+        name = _norm(dataset)
+        if not name:
             raise VaultError(
-                "empty path: every path must start with a dataset name "
+                "dataset is required: name it explicitly "
                 "(vault_status lists the available ones)")
+        real = self._actual_name(name)
+        if real is None:
+            if _fold(name) == _fold(self.keys_file.name):
+                raise VaultError("the key registry is not accessible from the tools.")
+            raise VaultError(
+                f"no such dataset: {name!r}. Name it in `dataset` — see vault_status.")
+        return real
+
+    def check_path(self, dataset: str, path: str) -> str:
+        """Validate a DATASET-RELATIVE path and hand it back normalised.
+        An empty path means the whole dataset.
+
+        `dataset` is the real name, as returned by resolve_dataset.
+
+        Three refusals, and the third is the reason this version exists. A path
+        whose first segment repeats the dataset name is the shape a caller
+        written against v1.8 produces, and it is REFUSED rather than quietly
+        stripped. Silence would be worse than the error: normalising here would
+        teach the wrong form without ever complaining, and it would do so on
+        reads as much as on writes.
+
+        The refusal fires ONLY on the declared dataset, never on "any existing
+        dataset name": a folder inside a dataset may legitimately be called like
+        another dataset, and the day it is, a wider check would refuse a correct
+        path. That is the same failure already paid for in v1.7, when a
+        placeholder check taught that widening what a guard recognises is exactly
+        where it starts refusing what must pass.
+        """
+        p = _norm(path)
+        if not p or p == ".":
+            return ""
+        if p.startswith("/"):
+            raise VaultError(
+                f"path is relative to the dataset, not absolute: {path!r}")
         parts = Path(p).parts
         # The same check exists in Dataset._resolve, the choke point of every
         # operation. Here it is hoisted: the guarantee then holds already at
         # resolution time, and no future tool can bypass it by oversight.
         if any(x in ("..", ".git") for x in parts):
             raise VaultError(f"path not allowed: {path!r}")
-        first = parts[0]
-        real = self._actual_name(first)
-        if real is None:
-            if _fold(first) == _fold(self.keys_file.name):
-                raise VaultError("the key registry is not accessible from the tools.")
+        if _fold(parts[0]) == _fold(dataset):
             raise VaultError(
-                f"no such dataset: {first!r}. "
-                "Every path starts with a dataset name — see vault_status.")
-        return real, "/".join(parts[1:])
+                f"path must be relative to the dataset: drop the leading {parts[0] + '/'!r}")
+        return "/".join(parts)
 
-    def open(self, path: str, key: str = "") -> tuple["Dataset", str]:
-        """Resolve a full path into (unlocked dataset, relative path)."""
-        name, rel = self.split(path)
+    def open(self, dataset: str, path: str = "", key: str = "") -> tuple["Dataset", str]:
+        """(unlocked dataset, validated relative path) — the one door every
+        path-bearing tool goes through, reads included."""
+        name = self.resolve_dataset(dataset)
         self.check_key(name, key)
-        return Dataset(self.root / name, name), rel
+        return Dataset(self.root / name, name), self.check_path(name, path)
 
     def open_by_name(self, dataset: str, key: str = "") -> "Dataset":
-        name, rel = self.split(dataset)
-        if rel:
-            raise VaultError(f"expected a bare dataset name, got {dataset!r}")
+        """The same, for the tools that act on a whole dataset."""
+        name = self.resolve_dataset(dataset)
         self.check_key(name, key)
         return Dataset(self.root / name, name)
 
@@ -363,10 +392,19 @@ class Dataset:
 
     # ---------- helpers ----------
 
-    def _full(self, rel: Path | str) -> str:
-        """A path as the client sees it: always prefixed with the dataset."""
-        r = str(rel).replace(os.sep, "/")
-        return f"{self.name}/{r}" if r and r != "." else self.name
+    def _rel(self, p: Path | str) -> str:
+        """A path as the client sees it: relative to the dataset, '/' separated,
+        empty for the dataset root. It is the same form the documents in the
+        vault use, which is the point of the whole thing: a path copied out of a
+        result and pasted into a document now means what it says.
+
+        Takes either an absolute path inside the dataset or an already relative
+        one."""
+        q = Path(p)
+        if q.is_absolute():
+            q = q.relative_to(self.root)
+        r = str(q).replace(os.sep, "/")
+        return "" if r == "." else r
 
     def _resolve(self, rel: str, *, must_exist: bool) -> Path:
         """Dataset-relative to absolute, ALWAYS inside the dataset: no
@@ -382,7 +420,7 @@ class Dataset:
         if not str(rp).startswith(str(self.root) + os.sep) and rp != self.root:
             raise VaultError(f"path outside the dataset: {rel!r}")
         if must_exist and not rp.exists():
-            raise VaultError(f"no such file: {self._full(rel)!r}")
+            raise VaultError(f"no such file: {self._rel(rel)!r} in dataset {self.name!r}")
         return rp
 
     def _skip(self, p: Path) -> bool:
@@ -512,7 +550,7 @@ class Dataset:
         base = self._resolve(rel, must_exist=True)
         if base.is_file():
             data = self._read_bytes(base)
-            return {"file": self._full(base.relative_to(self.root)),
+            return {"dataset": self.name, "file": self._rel(base),
                     "size": len(data), "sha256": _sha(data)}
         out, n = [], 0
         for p in sorted(base.rglob("*")):
@@ -523,36 +561,35 @@ class Dataset:
                 raise VaultError(f"more than {MAX_LIST_FILES} files: narrow the path")
             try:
                 data = self._read_bytes(p)
-                out.append({"path": self._full(p.relative_to(self.root)),
-                            "size": len(data), "sha256": _sha(data)})
+                out.append({"path": self._rel(p), "size": len(data), "sha256": _sha(data)})
             except VaultError as e:
-                out.append({"path": self._full(p.relative_to(self.root)), "error": str(e)})
-        return {"base": self._full(base.relative_to(self.root)),
+                out.append({"path": self._rel(p), "error": str(e)})
+        return {"dataset": self.name, "base": self._rel(base),
                 "count": len(out), "files": out}
 
     def read_file(self, rel: str) -> dict:
         p = self._resolve(rel, must_exist=True)
         if not p.is_file():
-            raise VaultError(f"not a file: {self._full(rel)!r}")
+            raise VaultError(f"not a file: {self._rel(rel)!r}")
         data = self._read_bytes(p)
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError:
             raise VaultError("not UTF-8 (binary?): read_file is for text only — use read_binary")
-        return {"path": self._full(p.relative_to(self.root)), "size": len(data),
+        return {"dataset": self.name, "path": self._rel(p), "size": len(data),
                 "sha256": _sha(data), "content": text}
 
     def read_binary(self, rel: str) -> dict:
         p = self._resolve(rel, must_exist=True)
         if not p.is_file():
-            raise VaultError(f"not a file: {self._full(rel)!r}")
+            raise VaultError(f"not a file: {self._rel(rel)!r}")
         size = p.stat().st_size
         if size > MAX_BINARY_BYTES:
             raise VaultError(f"file too large ({size} bytes, max {MAX_BINARY_BYTES}): use SMB/scp")
         data = p.read_bytes()
         if len(data) != size:
             raise VaultError(f"read {len(data)} bytes, {size} declared: incomplete read, stopping")
-        return {"path": self._full(p.relative_to(self.root)), "size": len(data),
+        return {"dataset": self.name, "path": self._rel(p), "size": len(data),
                 "sha256": _sha(data), "content_base64": base64.b64encode(data).decode("ascii")}
 
     def read_at(self, rel: str, rev: str) -> dict:
@@ -570,7 +607,7 @@ class Dataset:
             text = data.decode("utf-8")
         except UnicodeDecodeError:
             raise VaultError("not UTF-8 at that revision: read_at is for text only")
-        return {"path": self._full(r), "rev": rev, "size": len(data),
+        return {"dataset": self.name, "path": self._rel(r), "rev": rev, "size": len(data),
                 "sha256": _sha(data), "content": text}
 
     # ---------- writing ----------
@@ -593,7 +630,7 @@ class Dataset:
             if not new.endswith(add.encode("utf-8")):
                 raise VaultError("post-append verification failed: the file does not end with the block written")
             commit = self._commit(f"append: {p.relative_to(self.root)}")
-        return {"path": self._full(p.relative_to(self.root)), "size": len(new),
+        return {"dataset": self.name, "path": self._rel(p), "size": len(new),
                 "sha256": _sha(new), "commit": commit,
                 **({"external_commit_first": external} if external else {})}
 
@@ -628,7 +665,7 @@ class Dataset:
                 raise VaultError('the file does not exist: to create it, expected_sha256 must be "new"')
             back = self._atomic_write(p, data)
             commit = self._commit(f"{label}: {p.relative_to(self.root)}")
-        return {"path": self._full(p.relative_to(self.root)), "size": len(back),
+        return {"dataset": self.name, "path": self._rel(p), "size": len(back),
                 "sha256": _sha(back), "commit": commit,
                 **({"external_commit_first": external} if external else {})}
 
@@ -662,7 +699,7 @@ class Dataset:
             if new_text.encode("utf-8") not in back:
                 raise VaultError("post-edit verification failed: the new text is not in the file")
             commit = self._commit(f"edit: {p.relative_to(self.root)}")
-        return {"path": self._full(p.relative_to(self.root)), "size": len(back),
+        return {"dataset": self.name, "path": self._rel(p), "size": len(back),
                 "sha256": _sha(back), "commit": commit,
                 **({"external_commit_first": external} if external else {})}
 
@@ -672,7 +709,7 @@ class Dataset:
         with self._lock():
             external = self._commit_external_if_dirty()
             if d.exists():
-                raise VaultError(f"destination already exists: {self._full(dst)!r} (never overwrites)")
+                raise VaultError(f"destination already exists: {self._rel(dst)!r} (never overwrites)")
             d.parent.mkdir(parents=True, exist_ok=True)
             os.replace(s, d)
             # When the destination is inside Trash/, mtime becomes "trashed at":
@@ -691,7 +728,7 @@ class Dataset:
                 except OSError:
                     pass
             commit = self._commit(f"move: {s.relative_to(self.root)} -> {d.relative_to(self.root)}")
-        return {"from": self._full(s.relative_to(self.root)), "to": self._full(d.relative_to(self.root)),
+        return {"dataset": self.name, "from": self._rel(s), "to": self._rel(d),
                 "trashed": in_trash, "commit": commit,
                 **({"external_commit_first": external} if external else {})}
 
@@ -723,13 +760,19 @@ class Dataset:
                     if len(hits) >= MAX_SEARCH_HITS:
                         truncated = True
                         break
-                    hits.append(f"{self._full(p.relative_to(self.root))}:{i}: {line.strip()[:200]}")
+                    hits.append(f"{self._rel(p)}:{i}: {line.strip()[:200]}")
             if truncated:
                 break
-        return {"pattern": pattern, "files_scanned": scanned, "matches": len(hits),
-                "truncated": truncated, "lines": hits}
+        return {"dataset": self.name, "pattern": pattern, "files_scanned": scanned,
+                "matches": len(hits), "truncated": truncated, "lines": hits}
 
     def manifest(self, rel: str = "") -> dict:
+        # The lines that go into the fingerprint carry dataset-relative paths, so
+        # the same tree yields a DIFFERENT manifest_sha256 than it did in v1.8.
+        # Nothing stores a manifest between calls — it is read and handed back
+        # within the same exchange — so the change costs nothing; it is written
+        # here because a fingerprint that silently changes meaning is exactly the
+        # kind of thing that is noticed six months later.
         base = self._resolve(rel, must_exist=True)
         lines, total = [], 0
         for p in sorted(base.rglob("*") if base.is_dir() else [base], key=lambda x: str(x)):
@@ -738,9 +781,9 @@ class Dataset:
             size = p.stat().st_size
             h = _sha(self._read_bytes(p)) if size <= MAX_READ_BYTES else "OVERSIZE"
             total += size
-            lines.append(f"{h}  {self._full(p.relative_to(self.root))}")
+            lines.append(f"{h}  {self._rel(p)}")
         blob = "\n".join(lines).encode("utf-8")
-        return {"base": self._full(base.relative_to(self.root)),
+        return {"dataset": self.name, "base": self._rel(base),
                 "file_count": len(lines), "total_bytes": total,
                 "manifest_sha256": _sha(blob)}
 
@@ -756,17 +799,22 @@ class Dataset:
                 total += len(data)
                 if total > MAX_ARCHIVE_BYTES:
                     raise VaultError(f"archive over {MAX_ARCHIVE_BYTES} bytes: narrow path or pattern")
-                info = tarfile.TarInfo(name=self._full(p.relative_to(self.root)))
+                info = tarfile.TarInfo(name=self._rel(p))
                 info.size = len(data)
                 info.mtime = int(p.stat().st_mtime)
                 tar.addfile(info, io.BytesIO(data))
                 n += 1
         if n == 0:
-            raise VaultError(f"no files matching {pattern!r} under {self._full(rel)!r}")
+            raise VaultError(
+                f"no files matching {pattern!r} under {self._rel(rel)!r} in dataset {self.name!r}")
         gz = buf.getvalue()
         if len(gz) > MAX_ARCHIVE_OUT_BYTES:
             raise VaultError(f"tgz is {len(gz)} bytes (max {MAX_ARCHIVE_OUT_BYTES}): narrow path or pattern")
-        return {"file_count": n, "original_bytes": total, "tgz_bytes": len(gz),
+        # Member names are dataset-relative, like every other path that comes
+        # back: extracting the tgz reproduces the tree as the dataset holds it,
+        # not a directory named after the dataset.
+        return {"dataset": self.name, "base": self._rel(base), "file_count": n,
+                "original_bytes": total, "tgz_bytes": len(gz),
                 "tgz_base64": base64.b64encode(gz).decode("ascii")}
 
     def history(self, rel: str = "", n: int = 10) -> dict:
@@ -776,7 +824,7 @@ class Dataset:
             p = self._resolve(rel, must_exist=True)
             args += ["--follow", "--", str(p.relative_to(self.root))]
         out = self._git(*args, check=False).strip()
-        return {"path": self._full(rel) if rel else self.name,
+        return {"dataset": self.name, "path": self._rel(rel),
                 "entries": out.splitlines() if out else ["(no history)"]}
 
     def diff(self, rev_a: str, rev_b: str = "HEAD", rel: str = "") -> dict:
@@ -789,7 +837,8 @@ class Dataset:
         out = self._git(*args)
         if len(out.encode()) > MAX_DIFF_BYTES:
             out = out.encode()[:MAX_DIFF_BYTES].decode(errors="replace") + "\n[... diff truncated ...]"
-        return {"dataset": self.name, "from": rev_a, "to": rev_b, "diff": out or "(no differences)"}
+        return {"dataset": self.name, "path": self._rel(rel), "from": rev_a, "to": rev_b,
+                "diff": out or "(no differences)"}
 
     # ---------- maintenance ----------
 
@@ -844,7 +893,7 @@ class Dataset:
                     continue
                 if st.st_mtime < limit:
                     freed += st.st_size
-                    removed.append(self._full(p.relative_to(self.root)))
+                    removed.append(self._rel(p))
                     p.unlink()
             # directories left empty: remove those too, deepest first
             for d in sorted((q for q in trash.rglob("*") if q.is_dir()),

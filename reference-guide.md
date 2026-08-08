@@ -3,11 +3,19 @@
 ## THE MODEL
 
 The vault root holds **datasets**: top-level directories, each with its own git
-repository. **Every path starts with a dataset name.** A path that is *only* a
-dataset name means the whole dataset.
+repository. **Every call names its dataset explicitly, in `dataset`.** `path` is
+relative to that dataset, and an **empty path means the whole dataset**.
 
-    Example Project/01 Notes/a.md   →  dataset "Example Project", file "01 Notes/a.md"
-    Example Project                 →  the whole dataset
+    dataset="Example Project", path="01 Notes/a.md"   →  that one file
+    dataset="Example Project", path=""                →  the whole dataset
+
+**Do not repeat the dataset inside the path.** `dataset="Example Project"` with
+`path="Example Project/01 Notes/a.md"` is refused, and deliberately so: it is
+never silently corrected, on reads any more than on writes.
+
+The paths that come back are relative too, so a path you read out of a result is
+the same string the documents in the vault use — copy it either way and it still
+means what it says.
 
 A **locked** dataset needs its key in `key` on every call; an **open** one does
 not. `vault_status()` says which is which, and it is the call you make first.
@@ -27,8 +35,8 @@ key registry on the server, never from a tool.
    demands it — and **every write hands back the new one**, ready to go
    straight into the next call. A chain needs no re-read in between:
 
-       write_file(p, text, "new")       → sha256 b946…
-       edit_file(p, old, new, "b946…")  → accepted, sha256 8ded…
+       write_file(ds, p, text, "new")       → sha256 b946…
+       edit_file(ds, p, old, new, "b946…")  → accepted, sha256 8ded…
 
    `append` returns it too. `move_path` does not, and does not need to: the
    content did not change, so the sha you already held still holds.
@@ -86,8 +94,12 @@ Each has a right answer that already exists.
 - **Do not rewrite a file to add a line.** `append`.
 - **Do not rewrite a file to change a number.** `edit_file`.
 - **Do not try to delete.** `move_path` into `Trash/`.
-- **Do not copy across datasets with `move_path`** — it refuses by design.
+- **Do not try to copy across datasets in one call.** `move_path` takes one
+  `dataset` and moves inside it; there is no second dataset to move to.
   `read_file` in one, `write_file` in the other.
+- **Do not put the dataset name at the head of `path`.** It is refused, and the
+  message names the prefix to drop. Repeating it is the shape of a caller
+  written against an older version of this server.
 - **Do not retry a `CONFLICT` unchanged.** The refusal is information: someone
   wrote after you read. Re-read, reconcile, then retry.
 - **Do not paste a whole file into `edit_file` as `old_text`.** If the fragment
@@ -117,23 +129,27 @@ one host: no tool will succeed while another fails.
 
 ## RECIPES
 
-    change a number:      read_file → sha → edit_file(path, old, new, sha)
-    add to a log:         append(path, block)
-    create a document:    write_file(path, content, "new")
-    archive something:    move_path("X/doc.md", "X/Trash/doc.md")
-    find something:       search("term", "X") → read_file on the match only
+Written with `X` for the dataset. `key` goes on every call to a locked one.
+
+    change a number:      read_file → sha → edit_file(X, path, old, new, sha)
+    add to a log:         append(X, path, block)
+    create a document:    write_file(X, path, content, "new")
+    archive something:    move_path(X, "doc.md", "Trash/doc.md")
+    find something:       search(X, "term") → read_file on the match only
     full audit:           manifest → list_files → archive → verify → manifest
-    recover content:      history → read_at(path, hash) → write_file
-    roll a dataset back:  history → manifest → dataset_restore(ds, rev, manifest)
+    recover content:      history → read_at(X, path, hash) → write_file
+    roll a dataset back:  history → manifest → dataset_restore(X, rev, manifest)
     did anything move:    manifest before, manifest after — equal means no
-    copy across datasets: read_file("A/x.md") → write_file("B/x.md", …, "new")
+    copy across datasets: read_file("A", "x.md") → write_file("B", "x.md", …, "new")
 
 ## ERRORS AND WHAT TO DO
 
 | Message | Cure |
 |---|---|
 | `dataset ... is protected: a key is required` | the key is in the project's instructions |
-| `no such dataset` | `vault_status` lists them; the first path segment is the dataset |
+| `no such dataset` | `vault_status` lists them; the dataset goes in `dataset`, not in `path` |
+| `path must be relative to the dataset` | the dataset is repeated at the head of `path`: drop it |
+| `path is relative to the dataset, not absolute` | drop the leading `/` |
 | `CONFLICT: expected sha ...` | re-read, reconcile, retry |
 | `the file already exists` | `"new"` on an existing file: pass the real sha |
 | `the file does not exist` | the opposite: pass `"new"` |

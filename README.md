@@ -1,6 +1,6 @@
 # Archivist MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/version-1.8.1-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-21%20tools-8A63D2.svg">
+<img src="https://img.shields.io/badge/version-2.0.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-21%20tools-8A63D2.svg">
 
 **A document vault Claude can read and write, git-versioned on every write,
 self-hosted on your own server.**
@@ -54,9 +54,23 @@ vault/
 └── Scratch/                  ← another dataset, with its own .git
 ```
 
-**Every path starts with a dataset name.** There is no root-level operation at
-all — and the entire protection model follows from that single rule, with no
-exception lists to maintain.
+**Every call names its dataset explicitly**, in its own `dataset` argument;
+`path` is relative to that dataset, and an empty path means the whole dataset.
+There is no root-level operation at all — and the entire protection model
+follows from that single rule, with no exception lists to maintain. `keys.txt`
+is not merely refused: it is not expressible, because it is not a dataset.
+
+```
+dataset="Example Project", path="01 Notes/a.md"   →  that one file
+dataset="Example Project", path=""                →  the whole dataset
+```
+
+Paths come back relative too, which is the point of the arrangement: the string
+a result hands you is the same string the documents inside the vault use, so a
+path copied from one to the other still means what it says. Repeating the
+dataset at the head of `path` is **refused**, never silently corrected — on
+reads exactly as on writes, because a read that normalised would teach the wrong
+form and never complain.
 
 ### Keys
 
@@ -275,7 +289,7 @@ old image, convinced you fixed something.
 Before installing, test the engine with no network and no Docker:
 
 ```sh
-python3 test_vault.py     # 125 checks, all must pass
+python3 test_vault.py     # the engine checks, all must pass
 ```
 
 Half of those checks verify things that must **not** happen — traversal, wrong
@@ -449,11 +463,11 @@ reconnect the connector, then open a fresh conversation.
 In order of severity:
 
 ```
-history("Example Project/file.md", 20)         what happened
-read_at("Example Project/file.md", "<hash>")   how it was
-write_file(...)                                put it back
+history("Example Project", "file.md", 20)         what happened
+read_at("Example Project", "file.md", "<hash>")  how it was
+write_file(...)                                  put it back
 
-diff("HEAD~5", "Example Project")              what changed across the dataset
+diff("Example Project", "HEAD~5")                what changed across the dataset
 dataset_restore("Example Project", "<hash>", "<manifest>", key)
 ```
 
@@ -481,9 +495,9 @@ asked for. To *know*, use `search`, `manifest`, `list_files`; to *read*,
 it:
 
 ```
-read_file("X") → sha256: a3f9…
-                 ↓
-write_file("X", new, expected_sha256="a3f9…")
+read_file(ds, "X") → sha256: a3f9…
+                     ↓
+write_file(ds, "X", new, expected_sha256="a3f9…")
 ```
 
 If the file changed in the meantime, the write is **refused without touching
@@ -539,10 +553,12 @@ file that is the difference between a light call and a heavy one.
 <details>
 <summary><b>The 21 tools</b></summary>
 
-Every `path` begins with a dataset name. `key` is accepted by every
-dataset-level tool and is only needed for locked datasets; it is omitted in the
-examples. Returns are given as their keys. Any write may additionally carry
-`external_commit_first` when changes made outside the tools were committed
+Every dataset-level tool takes `dataset` first, and `path` relative to it; an
+empty `path` means the whole dataset. `key` is accepted by all of them and is
+only needed for locked datasets; it is omitted in the examples. Returns are
+given as their keys, and every return that carries a path also carries
+`dataset`, so the pair can be put back together. Any write may additionally
+carry `external_commit_first` when changes made outside the tools were committed
 before yours — that is information, not an error.
 
 ### Vault level — no key
@@ -552,7 +568,7 @@ before yours — that is information, not an error.
 
 ```
 vault_status()
-→ {"vault": "ok", "version": "1.7.1",
+→ {"vault": "ok", "version": "2.0.0",
    "guide": "call reference_guide() for the manual",
    "datasets": [{"name": "Example Project", "state": "open"},
                 {"name": "Ledger",          "state": "locked"}]}
@@ -563,7 +579,7 @@ vault_status()
 
 ```
 reference_guide()
-→ {"version": "1.7.1", "guide": "# Archivist MCP — manual\n\n## THE MODEL\n…"}
+→ {"version": "2.0.0", "guide": "# Archivist MCP — manual\n\n## THE MODEL\n…"}
 ```
 
 **`dataset_create(name)`** — a new dataset: open, empty, its own git.
@@ -583,6 +599,10 @@ manifest("Scratch")                       # → manifest_sha256: 7c1e…
 dataset_drop("Scratch", "7c1e…")
 ```
 
+A dataset name is the ONLY thing `dataset` accepts. `keys.txt`, the lockfiles
+and anything else sitting in the vault root are not datasets, so they cannot be
+named — the refusal costs no denylist.
+
 ### Dataset level — every one also accepts `key=""`
 
 **`dataset_status(dataset)`** — one dataset in detail.
@@ -597,148 +617,151 @@ dataset_status("Example Project")
    "last_commit": "2781f59 2026-08-08T18:30:51+02:00 edit: Notes.md"}
 ```
 
-**`list_files(path)`** — recursive listing with size and sha per file. A bare
-dataset name lists the whole dataset.
-**Returns** `base · count · files[{path, size, sha256}]`
+**`list_files(dataset, path="")`** — recursive listing with size and sha per
+file. An empty path lists the whole dataset.
+**Returns** `dataset · base · count · files[{path, size, sha256}]`
+(on a single file: `dataset · file · size · sha256`)
 
 ```
-list_files("Example Project/01 Notes")
-→ {"base": "Example Project/01 Notes", "count": 2,
-   "files": [{"path": "Example Project/01 Notes/a.md",
-              "size": 412, "sha256": "a3f9…"}, …]}
+list_files("Example Project", "01 Notes")
+→ {"dataset": "Example Project", "base": "01 Notes", "count": 2,
+   "files": [{"path": "01 Notes/a.md", "size": 412, "sha256": "a3f9…"}, …]}
 ```
 
-**`read_file(path)`** — a UTF-8 text file. The `sha256` it returns is the one
-`write_file` and `edit_file` want back.
-**Returns** `path · size · sha256 · content`
+**`read_file(dataset, path)`** — a UTF-8 text file. The `sha256` it returns is
+the one `write_file` and `edit_file` want back.
+**Returns** `dataset · path · size · sha256 · content`
 
 ```
-read_file("Example Project/01 Notes/a.md")
-→ {"path": "Example Project/01 Notes/a.md", "size": 412,
+read_file("Example Project", "01 Notes/a.md")
+→ {"dataset": "Example Project", "path": "01 Notes/a.md", "size": 412,
    "sha256": "a3f9…", "content": "# Notes\n…"}
 ```
 
-**`read_binary(path)`** — any file as base64. Max 2 MB. Useless without a
-sandbox to decode it in.
-**Returns** `path · size · sha256 · content_base64`
+**`read_binary(dataset, path)`** — any file as base64. Max 2 MB. Useless
+without a sandbox to decode it in.
+**Returns** `dataset · path · size · sha256 · content_base64`
 
 ```
-read_binary("Example Project/Scans/invoice.pdf")
+read_binary("Example Project", "Scans/invoice.pdf")
 ```
 
-**`read_at(path, rev)`** — the file as it was at a past revision. Read-only.
-`rev` is a short hash from `history`, or `"HEAD~3"`. Revisions are those of the
-dataset, not of the vault.
-**Returns** `path · rev · size · sha256 · content`
+**`read_at(dataset, path, rev)`** — the file as it was at a past revision.
+Read-only. `rev` is a short hash from `history`, or `"HEAD~3"`. Revisions are
+those of the dataset, not of the vault.
+**Returns** `dataset · path · rev · size · sha256 · content`
 
 ```
-read_at("Example Project/01 Notes/a.md", "HEAD~3")
+read_at("Example Project", "01 Notes/a.md", "HEAD~3")
 ```
 
-**`search(pattern, path, regex=False)`** — server-side grep: nothing is
-downloaded. Text files only; find binaries by name with `list_files`.
-**Returns** `pattern · files_scanned · matches · truncated · lines[]`
+**`search(dataset, pattern, path="", regex=False)`** — server-side grep:
+nothing is downloaded. Text files only; find binaries by name with `list_files`.
+**Returns** `dataset · pattern · files_scanned · matches · truncated · lines[]`
 
 ```
-search("deadline", "Example Project")
-→ {"pattern": "deadline", "files_scanned": 14, "matches": 3,
-   "truncated": false,
-   "lines": ["Example Project/01 Notes/a.md:31: the deadline is …", …]}
+search("Example Project", "deadline")
+→ {"dataset": "Example Project", "pattern": "deadline", "files_scanned": 14,
+   "matches": 3, "truncated": false,
+   "lines": ["01 Notes/a.md:31: the deadline is …", …]}
 ```
 
-**`manifest(path)`** — the fingerprint of a tree in one number. Two equal
-manifests mean identical trees. Required by `dataset_drop` and
+**`manifest(dataset, path="")`** — the fingerprint of a tree in one number. Two
+equal manifests mean identical trees. Required by `dataset_drop` and
 `dataset_restore`.
-**Returns** `base · file_count · total_bytes · manifest_sha256`
+**Returns** `dataset · base · file_count · total_bytes · manifest_sha256`
 
 ```
 manifest("Example Project")
-→ {"base": "Example Project", "file_count": 8, "total_bytes": 147600,
-   "manifest_sha256": "24280b93…"}
+→ {"dataset": "Example Project", "base": "", "file_count": 8,
+   "total_bytes": 147600, "manifest_sha256": "24280b93…"}
 ```
 
-**`archive(path, pattern="*.md")`** — every matching file in ONE call, as a
-base64 tar.gz. Replaces hundreds of `read_file` calls in an audit; needs a
-sandbox to extract it in.
-**Returns** `file_count · original_bytes · tgz_bytes · tgz_base64`
+**`archive(dataset, path="", pattern="*.md")`** — every matching file in ONE
+call, as a base64 tar.gz. Replaces hundreds of `read_file` calls in an audit;
+needs a sandbox to extract it in. Member names inside the tgz are
+dataset-relative, so extracting reproduces the dataset's own tree.
+**Returns** `dataset · base · file_count · original_bytes · tgz_bytes ·
+tgz_base64`
 
 ```
-archive("Example Project", "*.md")
+archive("Example Project", "", "*.md")
 ```
 
-**`append(path, text)`** — a block at the end of an existing file. It never
-touches existing bytes, so it needs **no sha**: this is the operation for logs
-and registers. Max 64 KB.
-**Returns** `path · size · sha256 · commit`
+**`append(dataset, path, text)`** — a block at the end of an existing file. It
+never touches existing bytes, so it needs **no sha**: this is the operation for
+logs and registers. Max 64 KB.
+**Returns** `dataset · path · size · sha256 · commit`
 
 ```
-append("Example Project/Log.md", "\n- 2026-08-08 · reconciled\n")
-→ {"path": "Example Project/Log.md", "size": 2140,
+append("Example Project", "Log.md", "\n- 2026-08-08 · reconciled\n")
+→ {"dataset": "Example Project", "path": "Log.md", "size": 2140,
    "sha256": "b71c…", "commit": "9da9597"}
 ```
 
-**`write_file(path, content, expected_sha256)`** — the WHOLE file.
+**`write_file(dataset, path, content, expected_sha256)`** — the WHOLE file.
 Compare-and-swap: `expected_sha256` must match the file's current sha, or
 `"new"` for a file that does not exist yet. A mismatch is refused without
 touching anything. UTF-8, max 2 MB.
-**Returns** `path · size · sha256 · commit`
+**Returns** `dataset · path · size · sha256 · commit`
 
 ```
-read_file("Example Project/a.md")          # → sha256: a3f9…
-write_file("Example Project/a.md", "# Notes\nrewritten\n", "a3f9…")
-write_file("Example Project/new.md", "# Fresh\n", "new")
+read_file("Example Project", "a.md")       # → sha256: a3f9…
+write_file("Example Project", "a.md", "# Notes\nrewritten\n", "a3f9…")
+write_file("Example Project", "new.md", "# Fresh\n", "new")
 ```
 
-**`write_binary(path, content_base64, expected_sha256)`** — same
+**`write_binary(dataset, path, content_base64, expected_sha256)`** — same
 compare-and-swap, from base64. Max 2 MB decoded. Always compare the returned
 sha with the one computed at the source: base64 travels as generated text.
-**Returns** `path · size · sha256 · commit`
+**Returns** `dataset · path · size · sha256 · commit`
 
 ```
-write_binary("Example Project/Scans/invoice.pdf", "JVBERi0…", "new")
+write_binary("Example Project", "Scans/invoice.pdf", "JVBERi0…", "new")
 ```
 
-**`edit_file(path, old_text, new_text, expected_sha256)`** — replaces
+**`edit_file(dataset, path, old_text, new_text, expected_sha256)`** — replaces
 `old_text`, which must occur **exactly once**, with `new_text`. Only the two
 fragments travel, not the file. Same compare-and-swap as `write_file`.
-**Returns** `path · size · sha256 · commit`
+**Returns** `dataset · path · size · sha256 · commit`
 
 ```
-read_file("Example Project/a.md")          # → sha256: a3f9…
-edit_file("Example Project/a.md", "retention: 0", "retention: 6", "a3f9…")
+read_file("Example Project", "a.md")       # → sha256: a3f9…
+edit_file("Example Project", "a.md", "retention: 0", "retention: 6", "a3f9…")
 ```
 
-**`move_path(src, dst)`** — move, rename or trash, **within one dataset**.
-Never overwrites. There is no delete tool: moving into `Trash/` is the disposal
-route, and it resets the file's mtime so `trash_purge` can date it.
-**Returns** `from · to · trashed · commit`
+**`move_path(dataset, src, dst)`** — move, rename or trash. Both paths are
+relative to the same dataset, so a move across datasets is not expressible at
+all. Never overwrites. There is no delete tool: moving into `Trash/` is the
+disposal route, and it resets the file's mtime so `trash_purge` can date it.
+**Returns** `dataset · from · to · trashed · commit`
 
 ```
-move_path("Example Project/a.md", "Example Project/Trash/a.md")
-→ {"from": "Example Project/a.md", "to": "Example Project/Trash/a.md",
+move_path("Example Project", "a.md", "Trash/a.md")
+→ {"dataset": "Example Project", "from": "a.md", "to": "Trash/a.md",
    "trashed": true, "commit": "0583255"}
 ```
 
-**`history(path, n=10)`** — the last n commits. A bare dataset name gives the
-dataset's history; a file gives its own, following renames. The short hash goes
-verbatim into `read_at` and `diff`.
-**Returns** `path · entries[]`
+**`history(dataset, path="", n=10)`** — the last n commits. An empty path gives
+the dataset's history; a file gives its own, following renames. The short hash
+goes verbatim into `read_at` and `diff`.
+**Returns** `dataset · path · entries[]`
 
 ```
-history("Example Project/a.md", 2)
-→ {"path": "Example Project/a.md",
+history("Example Project", "a.md", 2)
+→ {"dataset": "Example Project", "path": "a.md",
    "entries": ["2781f59 · 2026-08-08T18:30:51+02:00 · edit: a.md",
                "0583255 · 2026-08-08T18:22:33+02:00 · edit: a.md"]}
 ```
 
-**`diff(rev_a, path, rev_b="HEAD")`** — differences between two revisions. A
-bare dataset name gives the per-file summary; a file gives its full diff.
+**`diff(dataset, rev_a, path="", rev_b="HEAD")`** — differences between two
+revisions. An empty path gives the per-file summary; a file gives its full diff.
 Truncates at 60 KB rather than failing.
-**Returns** `dataset · from · to · diff`
+**Returns** `dataset · path · from · to · diff`
 
 ```
-diff("HEAD~1", "Example Project")
-diff("HEAD~5", "Example Project/a.md")
+diff("Example Project", "HEAD~1")
+diff("Example Project", "HEAD~5", "a.md")
 ```
 
 **`dataset_restore(dataset, rev, expected_manifest)`** — ⚠ rewrites EVERY file
@@ -748,7 +771,7 @@ with `history` first.
 **Returns** `dataset · restored_from · commit · file_count · manifest_sha256`
 
 ```
-history("Example Project", 5)             # pick the revision
+history("Example Project", "", 5)         # pick the revision
 manifest("Example Project")               # → manifest_sha256: 2428…
 dataset_restore("Example Project", "0583255", "2428…")
 ```
@@ -789,15 +812,18 @@ the vault acts as the archivist.
 <details>
 <summary><b>Recipes</b></summary>
 
+Written with `X` for the dataset.
+
 ```
-change a number:      read_file → sha → edit_file(path, old, new, sha)
-add to a log:         append(path, line)
-create a document:    write_file(path, content, "new")
-archive something:    move_path("X/doc.md", "X/Trash/doc.md")
-find something:       search("term", "X") → read_file on the right file only
-recover content:      history → read_at(path, hash) → write_file
+change a number:      read_file → sha → edit_file(X, path, old, new, sha)
+add to a log:         append(X, path, line)
+create a document:    write_file(X, path, content, "new")
+archive something:    move_path(X, "doc.md", "Trash/doc.md")
+find something:       search(X, "term") → read_file on the right file only
+recover content:      history → read_at(X, path, hash) → write_file
 compare two moments:  manifest before, manifest after — equal means nothing moved
 full audit:           manifest → list_files → archive → verify hashes → manifest
+copy across datasets: read_file("A", "x.md") → write_file("B", "x.md", …, "new")
 ```
 
 </details>
@@ -808,7 +834,9 @@ full audit:           manifest → list_files → archive → verify hashes → 
 | Message | Cure |
 |---|---|
 | `dataset ... is protected: a key is required` | the key is in the project's instructions |
-| `no such dataset` | `vault_status` lists them |
+| `no such dataset` | `vault_status` lists them; the dataset goes in `dataset`, not in `path` |
+| `path must be relative to the dataset` | the dataset is repeated at the head of `path`: drop it |
+| `path is relative to the dataset, not absolute` | drop the leading `/` |
 | `CONFLICT: expected sha ...` | re-read, reconcile, retry |
 | `the file already exists` | you used `"new"` on an existing file |
 | `the file does not exist: ... "new"` | the opposite |
@@ -848,7 +876,7 @@ between projects, not a defence against an attacker. That is what OAuth is for.
 | `entrypoint.sh` | init, permissions, privilege drop, preflight, start |
 | `Dockerfile` · `requirements.txt` | the image |
 | `archivist-mcp.template.xml` | Unraid template, every field documented |
-| `test_vault.py` | 125 checks on the engine, no network needed |
+| `test_vault.py` | the engine checks, no network needed |
 
 ## Licence and credits
 

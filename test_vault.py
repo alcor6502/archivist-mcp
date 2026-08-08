@@ -165,6 +165,14 @@ def main() -> int:
         os.makedirs(Path(root) / "Example Project" / "01 Notes")
         (Path(root) / "Example Project" / "01 Notes" / "a.md").write_text("line one\nline two\n")
         (Path(root) / "Example Project" / "log.md").write_text("# Log\n")
+        # A SECOND dataset, and inside the first a folder that carries its name.
+        # That collision is not decoration: it is the case the amendment to the
+        # ambiguous-path rule exists to protect, and it has to be present from
+        # the start so nothing can quietly stop covering it.
+        os.makedirs(Path(root) / "Example Project" / "Other Project")
+        (Path(root) / "Example Project" / "Other Project" / "note.md").write_text("homonym\n")
+        os.makedirs(Path(root) / "Other Project")
+        (Path(root) / "Other Project" / "b.md").write_text("elsewhere\n")
         (Path(root) / "keys.txt").write_text(f"Example Project\t{KEY}\n")
 
         v = VaultRoot(root)
@@ -173,27 +181,92 @@ def main() -> int:
         print("\n[1] vault status")
         st = v.status("test")
         ok(st["vault"] == "ok", "vault answers")
-        ok(st["datasets"] == [{"name": "Example Project", "state": "locked"}],
+        ok(st["datasets"] == [{"name": "Example Project", "state": "locked"},
+                              {"name": "Other Project", "state": "open"}],
            "dataset list and state", st["datasets"])
 
         print("\n[2] protection — everything here MUST fail")
-        must_fail("no key", lambda: v.open("Example Project/log.md", ""))
-        must_fail("wrong key", lambda: v.open("Example Project/log.md", "nope"))
-        must_fail("keys.txt as a path", lambda: v.open("keys.txt", KEY))
-        must_fail("traversal with ..", lambda: v.open("Example Project/../keys.txt", KEY))
-        must_fail("empty path", lambda: v.open("", KEY))
-        must_fail("unknown dataset", lambda: v.open("Other/x.md", ""))
-        must_fail(".git as a path", lambda: v.open("Example Project/.git/config", KEY))
+        must_fail("no key", lambda: v.open("Example Project", "log.md", ""))
+        must_fail("wrong key", lambda: v.open("Example Project", "log.md", "nope"))
+        must_fail("keys.txt as a dataset", lambda: v.open("keys.txt", "", KEY))
+        must_fail("traversal with ..", lambda: v.open("Example Project", "../keys.txt", KEY))
+        must_fail("empty dataset name", lambda: v.open("", "log.md", KEY))
+        must_fail("unknown dataset", lambda: v.open("Nowhere", "x.md", ""))
+        must_fail(".git as a path", lambda: v.open("Example Project", ".git/config", KEY))
+        must_fail("an absolute path", lambda: v.open("Example Project", "/log.md", KEY))
 
-        ds, rel = v.open("Example Project/log.md", KEY)
+        ds, rel = v.open("Example Project", "log.md", KEY)
         ok(ds.name == "Example Project" and rel == "log.md", "resolution with the right key")
+        # keys.txt is not merely refused, it is not EXPRESSIBLE: as a dataset it
+        # does not exist, and as a path it can only mean a file inside a dataset,
+        # where there is none. The registry in the vault root stays untouched.
+        must_fail("keys.txt as a path inside a dataset",
+                  lambda: ds.read_file("keys.txt"))
+        ok((Path(root) / "keys.txt").read_text().startswith("Example Project"),
+           "the key registry is still where it was")
+
+        print("\n[2b] the ambiguous path — the v1.8 shape MUST be refused")
+        # A caller not yet rewritten sends the dataset twice: once in `dataset`,
+        # once as the head of `path`. Refused loudly, on reads exactly as on
+        # writes — a read that normalised would teach the wrong form and never
+        # complain.
+        for label, fn in (
+            ("write", lambda: v.open("Example Project", "Example Project/log.md", KEY)),
+            ("read", lambda: v.open("Example Project", "Example Project/01 Notes/a.md", KEY)),
+            ("bare dataset as path", lambda: v.open("Example Project", "Example Project", KEY)),
+            ("folded case", lambda: v.open("Example Project", "example project/log.md", KEY)),
+        ):
+            must_fail(f"prefixed path, {label}", fn)
+        try:
+            v.check_path("Example Project", "Example Project/log.md")
+        except VaultError as e:
+            ok("drop the leading" in str(e) and "Example Project/" in str(e),
+               "the refusal says exactly what to drop", e)
+        # The other half, which is the half that matters: the check must NOT
+        # widen to "any existing dataset name". A folder inside a dataset may
+        # legitimately be called like another dataset, and that day a wider
+        # check would refuse a correct path.
+        _, homonym = v.open("Example Project", "Other Project/note.md", KEY)
+        ok(homonym == "Other Project/note.md",
+           "a folder named like ANOTHER dataset passes", homonym)
+        ok(ds.read_file("Other Project/note.md")["content"] == "homonym\n",
+           "and it reads the file that is really there")
 
         print("\n[3] reading")
         r = ds.read_file(rel)
         ok(r["content"] == "# Log\n", "read_file content")
-        ok(r["path"] == "Example Project/log.md", "paths come back dataset-prefixed", r["path"])
-        ok(ds.list_files("")["count"] == 3, "list_files is recursive (counting .gitignore)")
+        ok(r["path"] == "log.md", "paths come back RELATIVE to the dataset", r["path"])
+        ok(r["dataset"] == "Example Project", "and the dataset is echoed back", r.get("dataset"))
+        ok(ds.list_files("")["count"] == 4, "list_files is recursive (counting .gitignore)")
         ok(len(ds.manifest("")["manifest_sha256"]) == 64, "manifest sha")
+        # An empty path means the whole dataset, everywhere it is accepted.
+        ok(ds.list_files("")["base"] == "", "empty path is the dataset root")
+        ok(ds.list_files()["count"] == ds.list_files("")["count"],
+           "the default path is the empty one")
+        ok(ds.manifest()["file_count"] == 4, "manifest with no path covers the dataset")
+
+        print("\n[3b] every returned path is relative, and carries its dataset")
+        returns = {
+            "list_files": ds.list_files(""),
+            "list_files (one file)": ds.list_files("log.md"),
+            "read_file": ds.read_file("log.md"),
+            "manifest": ds.manifest(""),
+            "search": ds.search("line", ""),
+            "history": ds.history("", 5),
+            "archive": ds.archive("", "*.md"),
+            "status": ds.status(),
+        }
+        for label, res in returns.items():
+            ok(res.get("dataset") == "Example Project", f"{label} echoes the dataset", res.get("dataset"))
+        for label, field in (("list_files", "base"), ("list_files (one file)", "file"),
+                             ("read_file", "path"), ("manifest", "base"), ("history", "path")):
+            val = returns[label][field]
+            ok(not val.startswith("Example Project"),
+               f"{label}[{field}] carries no dataset prefix", val)
+        ok(all(not ln.startswith("Example Project") for ln in returns["search"]["lines"]),
+           "search lines are file:line:text, relative", returns["search"]["lines"][:1])
+        ok(all(not f["path"].startswith("Example Project") for f in returns["list_files"]["files"]),
+           "every entry in list_files is relative")
 
         print("\n[4] writing and CAS")
         ok(ds.append(rel, "| entry |")["commit"] != "(nothing to commit)", "append commits")
@@ -226,6 +299,14 @@ def main() -> int:
         a = ds.archive("", "*.md")
         ok(a["file_count"] >= 3 and a["tgz_bytes"] > 0, "archive packs", a["file_count"])
         must_fail("archive with no match", lambda: ds.archive("", "*.xyz"))
+        # The member names inside the tgz follow the same rule as every other
+        # path that comes back: extracting reproduces the dataset's tree, not a
+        # directory named after the dataset.
+        import io as _io, tarfile as _tf
+        names = _tf.open(fileobj=_io.BytesIO(base64.b64decode(a["tgz_base64"])),
+                         mode="r:gz").getnames()
+        ok(all(not n.startswith("Example Project") for n in names),
+           "tar member names are dataset-relative", names[:2])
 
         print("\n[7] trash and purge")
         mv = ds.move_path("new.md", "Trash/new.md")
@@ -271,9 +352,8 @@ def main() -> int:
         lf = Path(root) / ROOT_LOCKFILE
         ok(lf.exists(), "create/drop left a root lockfile")
         ok(ROOT_LOCKFILE not in v.dataset_names(), "the root lockfile is not a dataset")
-        must_fail("the root lockfile as a path", lambda: v.split(ROOT_LOCKFILE))
-        must_fail("the root lockfile with something after it",
-                  lambda: v.split(f"{ROOT_LOCKFILE}/x.md"))
+        must_fail("the root lockfile as a dataset", lambda: v.resolve_dataset(ROOT_LOCKFILE))
+        must_fail("the dataset lockfile as a dataset", lambda: v.resolve_dataset(".archivist.lock"))
         # A directory that appeared from outside between the check and the
         # mkdir: the lock cannot prevent it, but the message must stay readable
         # instead of surfacing a raw FileExistsError.
@@ -304,10 +384,10 @@ def main() -> int:
         kf = Path(root) / "keys.txt"
         kf.write_text("# no keys\n"); time.sleep(0.02)
         ok(v.status("t")["datasets"][0]["state"] == "open", "removing the line opens the dataset")
-        ok(v.open("Example Project/log.md", "")[1] == "log.md", "no key needed now")
+        ok(v.open("Example Project", "log.md", "")[1] == "log.md", "no key needed now")
         kf.write_text(f"Example Project\t{KEY}\n"); time.sleep(0.02)
         ok(v.status("t")["datasets"][0]["state"] == "locked", "putting the line back locks it")
-        must_fail("and it blocks again", lambda: v.open("Example Project/log.md", ""))
+        must_fail("and it blocks again", lambda: v.open("Example Project", "log.md", ""))
 
         print("\n[12] history pruning")
         os.makedirs(Path(root) / "Old")
