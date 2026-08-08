@@ -1,6 +1,6 @@
 # Archivist MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/version-1.7.1-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-21%20tools-8A63D2.svg">
+<img src="https://img.shields.io/badge/version-1.8.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-21%20tools-8A63D2.svg">
 
 **Un magazzino di documenti che Claude può leggere e scrivere, versionato con
 git a ogni scrittura, self-hosted a casa tua.**
@@ -141,7 +141,7 @@ accessibili anche dalle share SMB.
 
 ### Preflight bloccante
 
-All'avvio girano dieci controlli. Se **uno solo** fallisce, il servizio **non
+All'avvio girano i controlli di preflight. Se **uno solo** fallisce, il servizio **non
 parte** — e un controllo che va in crash conta come fallito, non come passato.
 
 Sembra eccessivo finché non ti capita: un mount sbagliato che rende il vault
@@ -162,7 +162,7 @@ rifiuta di partire dicendoti perché, di uno che parte e funziona male.
         ▼
    127.0.0.1:3000   server.py  ── 21 tool MCP
         │                        ├─ filtro identità GitHub
-        │                        └─ filtro IP egress Anthropic
+        │                        └─ filtro IP sorgente (lista)
         ▼
    vault.py  ── VaultRoot (dataset, chiavi)  ──►  Dataset (file + git)
         │
@@ -310,7 +310,7 @@ Ogni campo ha la sua descrizione nell'interfaccia; qui il riassunto.
 | `ALLOWED_GITHUB_LOGIN` | il tuo username GitHub |
 | `JWT_SIGNING_KEY` | `openssl rand -hex 32` |
 | `PORT` | `3000` |
-| `ANTHROPIC_CIDR` | `160.79.104.0/21` |
+| `ALLOWED_CIDRS` | `160.79.104.0/21 # documented egress of the model provider` |
 
 **Tailscale**: Enabled `true`, Hostname `<host>`, Serve `funnel`, Serve Port
 **uguale a `PORT`**, State Dir `/var/lib/tailscale`.
@@ -843,7 +843,7 @@ sono un confine fra progetti, non una difesa contro un attaccante. Quella è OAu
 |---|---|
 | `vault.py` | il motore: `VaultRoot` e `Dataset` |
 | `server.py` | i 21 tool MCP; i parametri nello schema, la prosa nella guida |
-| `preflight.py` | i 10 controlli bloccanti |
+| `preflight.py` | i controlli bloccanti d'avvio, e il parser del filtro IP |
 | `reference-guide.md` | la guida compatta servita da `reference_guide()` |
 | `entrypoint.sh` | init, permessi, drop privilegi, preflight, avvio |
 | `Dockerfile` · `requirements.txt` | immagine |

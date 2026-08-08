@@ -7,8 +7,8 @@ Architecture:
 - auth: OAuth 2.1 towards the client (DCR/PKCE handled by FastMCP's
   OAuthProxy), login delegated to GitHub, access ALLOWED ONLY to
   ALLOWED_GITHUB_LOGIN;
-- defence in depth: requests are refused unless they come from Anthropic's
-  documented egress range (disable with ANTHROPIC_CIDR="").
+- defence in depth: requests are refused unless their source IP falls in one
+  of the ALLOWED_CIDRS ranges (an empty string disables the filter).
 
 Datasets and keys:
 - the vault root holds DATASETS (top-level directories), each with its own git
@@ -28,7 +28,13 @@ Environment:
   ALLOWED_GITHUB_LOGIN    the only user allowed in
   JWT_SIGNING_KEY         stable key for issued tokens (openssl rand -hex 32)
   PORT                    default 3000
-  ANTHROPIC_CIDR          default 160.79.104.0/21; empty string disables it
+  ALLOWED_CIDRS           list of accepted ranges, ';' between entries and
+                          '#' opening a description:
+                            160.79.104.0/21 # egress ; 100.64.0.0/10 # tailnet
+                          empty string disables the filter; if the variable is
+                          not defined at all the deprecated ANTHROPIC_CIDR is
+                          read, and failing that the documented egress range
+  ANTHROPIC_CIDR          DEPRECATED, still honoured: see ALLOWED_CIDRS
 """
 from __future__ import annotations
 
@@ -43,9 +49,10 @@ from fastmcp.server.auth.providers.github import GitHubProvider
 from fastmcp.server.dependencies import get_access_token, get_http_request
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 
+from preflight import cidrs_from_env, describe_cidrs
 from vault import VaultRoot, VaultError
 
-VERSION = "1.7.1"
+VERSION = "1.8.0"
 
 # The ROOT logger stays at WARNING. It used to be INFO, which switched on INFO
 # for every library loaded, not for ours: that is where the noise came from.
@@ -82,7 +89,10 @@ RETENTION = int(env("GIT_RETENTION_MONTHS", "0") or 0)
 BASE_URL = env("BASE_URL")
 ALLOWED_LOGIN = env("ALLOWED_GITHUB_LOGIN")
 PORT = int(env("PORT", "3000"))
-CIDR = os.environ.get("ANTHROPIC_CIDR", "160.79.104.0/21").strip()
+# Resolved in preflight.cidrs_from_env so that the service and the preflight
+# can never disagree about what the filter is. A malformed entry raises here,
+# which is deliberate: it has already blocked the preflight by this point.
+ALLOWED_CIDRS = cidrs_from_env()
 
 vault = VaultRoot(VAULT_ROOT, KEYS_FILE)
 for line in vault.boot(RETENTION):
@@ -106,19 +116,20 @@ class Gate(Middleware):
     """Two filters, before anything else: the GitHub identity and the source IP."""
 
     def __init__(self) -> None:
-        self.net = ipaddress.ip_network(CIDR) if CIDR else None
+        self.nets = [ipaddress.ip_network(c) for c, _ in ALLOWED_CIDRS]
 
     async def on_call_tool(self, ctx: MiddlewareContext, call_next):
         tok = get_access_token()
         login = (tok.claims.get("login") if tok and tok.claims else None)
         if login != ALLOWED_LOGIN:
             raise ValueError("user not authorised")
-        if self.net is not None:
+        if self.nets:
             req = get_http_request()
             src = (req.headers.get("x-forwarded-for", "").split(",")[0].strip()
                    or (req.client.host if req.client else ""))
             try:
-                if not src or ipaddress.ip_address(src) not in self.net:
+                ip = ipaddress.ip_address(src) if src else None
+                if ip is None or not any(ip in n for n in self.nets):
                     raise ValueError("origin not allowed")
             except ValueError:
                 raise ValueError("origin not allowed")
@@ -312,7 +323,7 @@ def trash_purge(dataset: str, before: str, key: str = "") -> dict:
 if __name__ == "__main__":
     log.info("archivist-mcp %s — starting on 127.0.0.1:%s — base_url %s — allowed user: %s "
              "— IP filter: %s — token store: %s — retention: %s",
-             VERSION, PORT, BASE_URL, ALLOWED_LOGIN, CIDR or "OFF",
+             VERSION, PORT, BASE_URL, ALLOWED_LOGIN, describe_cidrs(ALLOWED_CIDRS),
              os.environ.get("FASTMCP_HOME", "(default — NOT persistent!)"),
              f"{RETENTION} months" if RETENTION else "disabled")
     mcp.run(transport="http", host=os.environ.get("BIND_HOST", "127.0.0.1"), port=PORT)

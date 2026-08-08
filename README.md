@@ -1,6 +1,6 @@
 # Archivist MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/version-1.7.1-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-21%20tools-8A63D2.svg">
+<img src="https://img.shields.io/badge/version-1.8.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-21%20tools-8A63D2.svg">
 
 **A document vault Claude can read and write, git-versioned on every write,
 self-hosted on your own server.**
@@ -143,7 +143,7 @@ shares too.
 
 ### Blocking preflight
 
-Ten checks run at startup. If **a single one** fails, the service **does not
+The preflight checks run at startup. If **a single one** fails, the service **does not
 start** — and a check that crashes counts as failed, not as passed.
 
 It looks excessive until it happens to you: a wrong mount that makes the vault
@@ -310,7 +310,7 @@ hand. Every field carries its own description in the UI; here is the summary.
 | `ALLOWED_GITHUB_LOGIN` | your GitHub username |
 | `JWT_SIGNING_KEY` | `openssl rand -hex 32` |
 | `PORT` | `3000` |
-| `ANTHROPIC_CIDR` | `160.79.104.0/21` |
+| `ALLOWED_CIDRS` | `160.79.104.0/21 # documented egress of the model provider` |
 
 **Tailscale**: Enabled `true`, Hostname `<host>`, Serve `funnel`, Serve Port
 **equal to `PORT`**, State Dir `/var/lib/tailscale`.
@@ -834,7 +834,7 @@ between projects, not a defence against an attacker. That is what OAuth is for.
 |---|---|
 | `vault.py` | the engine: `VaultRoot` and `Dataset` |
 | `server.py` | the 21 MCP tools; parameters in the schema, prose in the guide |
-| `preflight.py` | the 10 blocking checks |
+| `preflight.py` | the blocking startup checks, and the IP-filter parser |
 | `reference-guide.md` | the compact guide served by `reference_guide()` |
 | `entrypoint.sh` | init, permissions, privilege drop, preflight, start |
 | `Dockerfile` · `requirements.txt` | the image |

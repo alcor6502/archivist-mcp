@@ -1,12 +1,13 @@
 """
-preflight.py — 10 checks that do not warn: if one fails the process exits 2 and
-the service does NOT start (a check that crashes counts as FAILED, not passed).
+preflight.py — blocking checks that do not warn: if one fails the process exits 2
+and the service does NOT start (a check that crashes counts as FAILED, not passed).
+The count is printed from len(CHECKS): there is no number to keep aligned anywhere.
 
 Selective skip (for local testing only, never in production):
   PREFLIGHT_SKIP="funnel,node_key"
 """
 from __future__ import annotations
-import os, re, subprocess, sys, secrets
+import ipaddress, os, re, subprocess, sys, secrets
 
 SKIP = {s.strip() for s in os.environ.get("PREFLIGHT_SKIP", "").split(",") if s.strip()}
 RESULTS: list[tuple[str, bool, str]] = []
@@ -35,6 +36,73 @@ def is_placeholder(v: str) -> bool:
     https://CHANGEME.your-tailnet.ts.net (caught, and it teaches the syntax
     while being caught) from the one hiding inside exchange (let through)."""
     return bool(_PLACEHOLDER.search(_SEPARATORS.sub("", v)))
+
+
+DEFAULT_CIDRS = "160.79.104.0/21 # documented egress of the model provider"
+
+
+def parse_cidrs(raw: str) -> list[tuple[str, str]]:
+    """Parse an ALLOWED_CIDRS list into [(cidr, description), ...].
+
+    Entries are separated by ';' and '#' opens a description that runs to the
+    end of the entry:
+
+        160.79.104.0/21 # Anthropic egress ; 100.64.0.0/10 # tailnet
+
+    The separator is not a comma precisely so that a description may contain
+    one. An empty string yields [], which means NO filter — that is the
+    existing meaning of ANTHROPIC_CIDR="" and it does not change.
+
+    A malformed entry RAISES; it is never skipped. A filter wider or narrower
+    than you believe is worse than a service that refuses to start, because it
+    is the failure nobody notices. Empty entries between separators are
+    tolerated: a trailing ';' cannot change what the filter means.
+    """
+    out: list[tuple[str, str]] = []
+    for chunk in raw.split(";"):
+        entry = chunk.strip()
+        if not entry:
+            continue
+        net_s, _, desc = entry.partition("#")
+        net_s, desc = net_s.strip(), desc.strip()
+        if not net_s:
+            raise ValueError(f"entry with a description but no network: {entry!r}")
+        try:
+            net = ipaddress.ip_network(net_s, strict=True)
+        except ValueError as e:
+            raise ValueError(f"{net_s!r} is not a valid CIDR ({e})")
+        out.append((str(net), desc))
+    return out
+
+
+def cidrs_from_env() -> list[tuple[str, str]]:
+    """The IP filter as configured, resolved in one place only.
+
+    ALLOWED_CIDRS wins when it is DEFINED, even if empty — "defined and empty"
+    means the filter is off, and is not the same thing as "not defined". The
+    deprecated ANTHROPIC_CIDR is still honoured, so a container updated without
+    touching its template keeps working exactly as before: a new variable is
+    always born optional.
+
+    server.py and preflight must never answer this question differently, which
+    is why they both come here.
+    """
+    raw = os.environ.get("ALLOWED_CIDRS")
+    if raw is None:
+        raw = os.environ.get("ANTHROPIC_CIDR")  # deprecated, still supported
+    if raw is None:
+        raw = DEFAULT_CIDRS
+    return parse_cidrs(raw)
+
+
+def describe_cidrs(parsed: list[tuple[str, str]]) -> str:
+    """What was UNDERSTOOD, not what was given. The way this breaks is mute: a
+    comma in place of a semicolon and a range disappears without a word."""
+    if not parsed:
+        return "OFF (no IP filter)"
+    n = len(parsed)
+    body = ", ".join(f"{c} ({d})" if d else c for c, d in parsed)
+    return f"{n} range{'s' if n != 1 else ''} — {body}"
 
 
 def check(name):
@@ -203,6 +271,13 @@ def c_node_key():
     return "key expiry disabled"
 
 
+@check("cidrs")
+def c_cidrs():
+    # A malformed entry must BLOCK, not be skipped: the whole point of the
+    # filter is knowing exactly what it lets through.
+    return describe_cidrs(cidrs_from_env())
+
+
 @check("public_dns")
 def c_dns():
     # The BASE_URL hostname must resolve, or the client never arrives.
@@ -213,7 +288,7 @@ def c_dns():
 
 
 CHECKS = [c_datasets, c_readable, c_writable, c_git, c_keys,
-          c_oauth, c_token_store, c_funnel, c_node_key, c_dns]
+          c_oauth, c_token_store, c_funnel, c_node_key, c_cidrs, c_dns]
 
 if __name__ == "__main__":
     for fn in CHECKS:

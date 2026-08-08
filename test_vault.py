@@ -53,6 +53,65 @@ def must_fail(label, fn):
         print(f"  PASS  {label} (refused)")
 
 
+def cidr_checks() -> None:
+    """The IP filter parser, in BOTH directions.
+
+    The half that matters most is the one proving that legitimate forms are
+    accepted: a filter that refuses to start on a real configuration is worse
+    than the hole it closes. The other half proves that a malformed entry is
+    REFUSED rather than quietly skipped — a range that disappears in silence is
+    exactly the failure this check exists to prevent."""
+    from preflight import parse_cidrs, cidrs_from_env, DEFAULT_CIDRS
+
+    one = parse_cidrs("160.79.104.0/21")
+    ok(one == [("160.79.104.0/21", "")], "a bare entry, the form used until now", one)
+
+    two = parse_cidrs("  160.79.104.0/21 # egress  ;100.64.0.0/10#tailnet  ")
+    ok(two == [("160.79.104.0/21", "egress"), ("100.64.0.0/10", "tailnet")],
+       "two entries, descriptions, ragged spacing", two)
+
+    comma = parse_cidrs("100.64.0.0/10 # tailnet, and the web UI on it")
+    ok(comma == [("100.64.0.0/10", "tailnet, and the web UI on it")],
+       "a comma inside a description does not split the entry", comma)
+
+    ok(parse_cidrs("10.0.0.0/8 ; ") == [("10.0.0.0/8", "")],
+       "a trailing separator is tolerated")
+
+    for bad in ("not-a-cidr", "160.79.104.0/99", "160.79.104.5/21", "# only a description"):
+        try:
+            parse_cidrs(bad)
+            global FAIL
+            FAIL += 1
+            print(f"  FAIL  malformed entry {bad!r} was ACCEPTED")
+        except ValueError:
+            global OK
+            OK += 1
+            print(f"  PASS  malformed entry {bad!r} refused")
+
+    saved = {k: os.environ.get(k) for k in ("ALLOWED_CIDRS", "ANTHROPIC_CIDR")}
+    try:
+        for k in saved:
+            os.environ.pop(k, None)
+        ok(cidrs_from_env() == parse_cidrs(DEFAULT_CIDRS),
+           "neither variable defined: the usual default")
+
+        os.environ["ANTHROPIC_CIDR"] = "10.0.0.0/8"
+        ok(cidrs_from_env() == [("10.0.0.0/8", "")],
+           "ALLOWED_CIDRS undefined: the deprecated name still works")
+
+        os.environ["ALLOWED_CIDRS"] = ""
+        ok(cidrs_from_env() == [], "ALLOWED_CIDRS defined EMPTY: filter off")
+
+        os.environ["ALLOWED_CIDRS"] = "192.168.0.0/16 # lan"
+        ok(cidrs_from_env() == [("192.168.0.0/16", "lan")],
+           "ALLOWED_CIDRS defined: it wins over the deprecated name")
+    finally:
+        for k, v in saved.items():
+            os.environ.pop(k, None)
+            if v is not None:
+                os.environ[k] = v
+
+
 def static_api_check() -> None:
     """Parse server.py and verify that every ds.<method>() / vault.<method>()
     call resolves to a real method on Dataset / VaultRoot, with an arity the
@@ -275,6 +334,9 @@ def main() -> int:
 
         print("\n[14] the Dockerfile still quiets FastMCP down")
         dockerfile_env_check()
+
+        print("\n[15] the IP filter list, in both directions")
+        cidr_checks()
 
         print(f"\n{'=' * 46}\n  {OK} passed, {FAIL} failed\n{'=' * 46}")
         return 1 if FAIL else 0
