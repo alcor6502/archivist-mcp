@@ -1,4 +1,4 @@
 __pycache__/
 *.py[cod]
 .DS_Store
-.vault-mcp.lock
+.archivist.lock
