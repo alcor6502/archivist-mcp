@@ -24,7 +24,14 @@ key registry on the server, never from a tool.
 1. **Every tool returns a verdict, not a dump.** To *know*: `search`,
    `manifest`, `list_files`. To *read*: `read_file`.
 2. **The sha256 is the unit of truth.** Every read gives it, every write
-   demands it: `read_file` → `sha256` → back into `write_file`/`edit_file`.
+   demands it — and **every write hands back the new one**, ready to go
+   straight into the next call. A chain needs no re-read in between:
+
+       write_file(p, text, "new")       → sha256 b946…
+       edit_file(p, old, new, "b946…")  → accepted, sha256 8ded…
+
+   `append` returns it too. `move_path` does not, and does not need to: the
+   content did not change, so the sha you already held still holds.
    A different sha means someone wrote after you: re-read, reconcile, retry.
    `expected_sha256="new"` for a file that does not exist yet.
 3. **Nothing is deleted.** Disposal is `move_path` into `Trash/`. `trash_purge`
@@ -44,10 +51,13 @@ key registry on the server, never from a tool.
 | add lines to a register or log | `append` | no |
 | change a phrase or a number | `edit_file` | yes |
 | rewrite the file, or create it | `write_file` | yes (`"new"` if new) |
+| write a PDF or a binary | `write_binary` | yes |
 | move, rename, trash | `move_path` | no |
 | know whether something exists, and where | `search` | — |
 | know which files exist | `list_files` | — |
 | know whether a tree changed at all | `manifest` | — |
+| know how big a dataset is, how dirty, how many commits | `dataset_status` | — |
+| know when something changed, and get its hash | `history` | — |
 | read text | `read_file` | — |
 | read a PDF or a binary | `read_binary` (needs a sandbox) | — |
 | read a whole tree at once | `archive` (needs a sandbox) | — |

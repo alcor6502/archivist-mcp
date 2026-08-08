@@ -1,6 +1,6 @@
 # Archivist MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/version-1.8.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-21%20tools-8A63D2.svg">
+<img src="https://img.shields.io/badge/version-1.8.1-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-21%20tools-8A63D2.svg">
 
 **Un magazzino di documenti che Claude può leggere e scrivere, versionato con
 git a ogni scrittura, self-hosted a casa tua.**
@@ -492,6 +492,11 @@ Se nel frattempo il file è cambiato, la scrittura è **rifiutata senza toccare
 niente**. Si chiama compare-and-swap. Per creare un file nuovo:
 `expected_sha256="new"`.
 
+**Ogni scrittura restituisce lo sha nuovo**, quindi una catena non ha bisogno di
+riletture intermedie: lo `sha256` che torna da `write_file` va dritto
+nell'`edit_file` che segue. Anche `append` lo restituisce. `move_path` no, e non
+serve — il contenuto non è cambiato, quindi vale ancora quello che avevi.
+
 **3. Non si cancella.** Non esiste un tool `delete`. Lo smaltimento è `move_path`
 verso `Trash/`, e `move_path` non sovrascrive mai.
 
@@ -511,17 +516,21 @@ tua.
 
 | Vuoi | Usa | Sha? |
 |---|---|---|
-| aggiungere righe a un registro | `append` | no |
+| aggiungere righe a un registro o a un log | `append` | no |
 | cambiare una frase o un numero | `edit_file` | sì |
 | rifare il file, o crearlo | `write_file` | sì (`"new"` se nuovo) |
+| scrivere un PDF o un binario | `write_binary` | sì |
 | spostare, rinominare, cestinare | `move_path` | no |
 | sapere se una cosa c'è e dove | `search` | — |
 | sapere quali file ci sono | `list_files` | — |
-| confrontare due alberi | `manifest` | — |
+| sapere se un albero è cambiato o no | `manifest` | — |
+| sapere quanto è grosso un dataset, quanto sporco, quanti commit | `dataset_status` | — |
+| sapere quando una cosa è cambiata, e prenderne l'hash | `history` | — |
 | leggere testo | `read_file` | — |
-| leggere PDF o binari | `read_binary` | — |
-| leggerne tanti in un colpo | `archive` | — |
+| leggere un PDF o un binario | `read_binary` (serve una sandbox) | — |
+| leggere un albero intero in un colpo | `archive` (serve una sandbox) | — |
 | leggere com'era prima | `read_at` | — |
+| vedere cosa è cambiato fra due momenti | `diff` | — |
 
 `append` non chiede lo sha perché **non tocca mai i byte esistenti**: non c'è
 conflitto possibile, quindi non c'è niente da proteggere. È l'operazione giusta

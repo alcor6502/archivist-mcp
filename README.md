@@ -1,6 +1,6 @@
 # Archivist MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/version-1.8.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-21%20tools-8A63D2.svg">
+<img src="https://img.shields.io/badge/version-1.8.1-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-21%20tools-8A63D2.svg">
 
 **A document vault Claude can read and write, git-versioned on every write,
 self-hosted on your own server.**
@@ -489,6 +489,11 @@ write_file("X", new, expected_sha256="a3f9…")
 If the file changed in the meantime, the write is **refused without touching
 anything**. That is compare-and-swap. For a new file: `expected_sha256="new"`.
 
+**Every write hands the new sha back**, so a chain needs no re-read in between:
+the `sha256` returned by `write_file` goes straight into the `edit_file` that
+follows it. `append` returns it too. `move_path` does not, and does not need
+to — the content did not change, so the sha you already held still holds.
+
 **3. Nothing is deleted.** There is no `delete` tool. Disposal is `move_path`
 into `Trash/`, and `move_path` never overwrites.
 
@@ -506,17 +511,21 @@ changes from outside were committed separately before yours.
 
 | You want to | Use | Sha? |
 |---|---|---|
-| add lines to a register | `append` | no |
+| add lines to a register or log | `append` | no |
 | change a phrase or a number | `edit_file` | yes |
 | rewrite the file, or create it | `write_file` | yes (`"new"` if new) |
+| write a PDF or a binary | `write_binary` | yes |
 | move, rename, trash | `move_path` | no |
 | know whether something exists, and where | `search` | — |
 | know which files exist | `list_files` | — |
-| compare two trees | `manifest` | — |
+| know whether a tree changed at all | `manifest` | — |
+| know how big a dataset is, how dirty, how many commits | `dataset_status` | — |
+| know when something changed, and get its hash | `history` | — |
 | read text | `read_file` | — |
-| read a PDF or binary | `read_binary` | — |
-| read many at once | `archive` | — |
+| read a PDF or a binary | `read_binary` (needs a sandbox) | — |
+| read a whole tree at once | `archive` (needs a sandbox) | — |
 | read how it was before | `read_at` | — |
+| see what changed between two moments | `diff` | — |
 
 `append` needs no sha because it **never touches existing bytes**: no conflict is
 possible, so there is nothing to protect. It is the right operation for logs and

@@ -52,7 +52,7 @@ from fastmcp.server.middleware import Middleware, MiddlewareContext
 from preflight import cidrs_from_env, describe_cidrs
 from vault import VaultRoot, VaultError
 
-VERSION = "1.8.0"
+VERSION = "1.8.1"
 
 # The ROOT logger stays at WARNING. It used to be INFO, which switched on INFO
 # for every library loaded, not for ours: that is where the noise came from.
