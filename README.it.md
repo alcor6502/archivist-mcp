@@ -85,9 +85,13 @@ dei **tool**: funzioni con un nome, dei parametri tipizzati e una descrizione.
 Claude legge le descrizioni e decide da solo quando chiamarli.
 
 Questo ha una conseguenza che governa tutto il design: **la descrizione di ogni
-tool viene caricata nel contesto di ogni conversazione**, sempre, anche quando non
-ne usi nessuno. Per questo i docstring qui dentro sono densi e i tool non si
-moltiplicano per gusto — ognuno è un costo fisso su ogni chat che fai.
+tool viaggia in testa a ogni richiesta**, sempre, anche quando non ne usi
+nessuno — e arriva *isolata*, letta senza le altre venti sotto gli occhi. Per
+questo i tool non si moltiplicano per gusto, e per questo il lavoro è diviso:
+la descrizione porta solo ciò che evita un danno quando il manuale non è stato
+letto, mentre tutto ciò che richiede il quadro d'insieme sta in
+`reference_guide()`, che si carica quando serve. La documentazione estesa per
+gli umani sta in questo README, che non costa niente a nessuno.
 
 ### FastMCP
 
@@ -531,40 +535,232 @@ da 80 KB è la differenza fra una chiamata leggera e una pesante.
 <details>
 <summary><b>I 21 tool</b></summary>
 
-**Livello vault** — nessuna chiave
+Ogni `path` comincia con un nome di dataset. `key` è accettato da tutti i tool
+di livello dataset e serve solo per quelli protetti: negli esempi è omesso. I
+ritorni sono elencati per chiave. Ogni scrittura può portare in più
+`external_commit_first`, quando modifiche fatte fuori dai tool sono state
+committate prima della tua — è un'informazione, non un errore.
 
-| Tool | Cosa fa |
-|---|---|
-| `vault_status()` | il vault risponde, elenco dataset con open/locked. Nient'altro |
-| `reference_guide()` | la guida rapida, servita dall'immagine |
-| `dataset_create(name)` | crea un dataset aperto e vuoto |
-| `dataset_drop(dataset, expected_manifest)` | cancella un dataset **open**; i locked no |
+### Livello vault — senza chiave
 
-**Livello dataset** — tutti accettano `key`
+**`vault_status()`** — il vault risponde, e quali dataset esistono.
+**Ritorna** `vault · version · guide · datasets[{name, state}]`
 
-| Tool | Cosa fa |
-|---|---|
-| `dataset_status` | file, cestino, git, commit, dimensione del repo |
-| `list_files` | elenco ricorsivo con size e sha di ognuno |
-| `read_file` | testo UTF-8 + sha |
-| `read_binary` | qualunque file in base64, max 2 MB |
-| `read_at` | il file com'era a una revisione |
-| `append` | blocco in coda, max 64 KB, senza sha |
-| `write_file` | file intero, CAS |
-| `edit_file` | sostituzione chirurgica, CAS |
-| `write_binary` | binario da base64, CAS |
-| `move_path` | sposta o rinomina dentro un dataset |
-| `search` | grep server-side, `file:riga:testo` |
-| `manifest` | impronta dell'albero in un numero |
-| `archive` | tar.gz in base64, tutto in una chiamata |
-| `history` | ultime N voci di storia git |
-| `diff` | differenze fra due revisioni |
-| `dataset_restore` | ⚠ riporta l'intero dataset a una revisione |
-| `trash_purge` | svuota il cestino prima di una data |
+```
+vault_status()
+→ {"vault": "ok", "version": "1.7.1",
+   "guide": "call reference_guide() for the manual",
+   "datasets": [{"name": "Example Project", "state": "open"},
+                {"name": "Ledger",          "state": "locked"}]}
+```
 
-I parametri esatti di ogni tool stanno nella sua descrizione, che Claude ha già in
-contesto: qui non si duplicano. Il tool `reference_guide()` restituisce le regole
-e le ricette in forma compatta, per quando una chat si perde.
+**`reference_guide()`** — il manuale, servito dall'immagine.
+**Ritorna** `version · guide`
+
+```
+reference_guide()
+→ {"version": "1.7.1", "guide": "# Archivist MCP — manual\n\n## THE MODEL\n…"}
+```
+
+**`dataset_create(name)`** — un dataset nuovo: aperto, vuoto, col suo git.
+**Ritorna** `dataset · state · git · note`
+
+```
+dataset_create("Scratch")
+```
+
+**`dataset_drop(dataset, expected_manifest)`** — cancella un dataset **aperto**
+e tutto il suo contenuto. `expected_manifest` è il `manifest_sha256` corrente:
+non si butta ciò che non si è guardato. Un dataset con chiave rifiuta.
+**Ritorna** `dropped · files_removed · note`
+
+```
+manifest("Scratch")                       # → manifest_sha256: 7c1e…
+dataset_drop("Scratch", "7c1e…")
+```
+
+### Livello dataset — tutti accettano anche `key=""`
+
+**`dataset_status(dataset)`** — un dataset in dettaglio.
+**Ritorna** `dataset · total_files · md_files · files_in_trash · git ·
+total_commits · git_size_bytes · last_commit`
+
+```
+dataset_status("Example Project")
+→ {"dataset": "Example Project", "total_files": 18, "md_files": 14,
+   "files_in_trash": 2, "git": "clean", "total_commits": 62,
+   "git_size_bytes": 423676,
+   "last_commit": "2781f59 2026-08-08T18:30:51+02:00 edit: Notes.md"}
+```
+
+**`list_files(path)`** — elenco ricorsivo con taglia e sha di ogni file. Il
+nome nudo del dataset elenca tutto il dataset.
+**Ritorna** `base · count · files[{path, size, sha256}]`
+
+```
+list_files("Example Project/01 Notes")
+→ {"base": "Example Project/01 Notes", "count": 2,
+   "files": [{"path": "Example Project/01 Notes/a.md",
+              "size": 412, "sha256": "a3f9…"}, …]}
+```
+
+**`read_file(path)`** — un file di testo UTF-8. Lo `sha256` che restituisce è
+quello che `write_file` e `edit_file` vogliono indietro.
+**Ritorna** `path · size · sha256 · content`
+
+```
+read_file("Example Project/01 Notes/a.md")
+→ {"path": "Example Project/01 Notes/a.md", "size": 412,
+   "sha256": "a3f9…", "content": "# Notes\n…"}
+```
+
+**`read_binary(path)`** — un file qualsiasi come base64. Max 2 MB. Inutile
+senza una sandbox in cui decodificarlo.
+**Ritorna** `path · size · sha256 · content_base64`
+
+```
+read_binary("Example Project/Scans/invoice.pdf")
+```
+
+**`read_at(path, rev)`** — il file com'era a una revisione passata. Sola
+lettura. `rev` è un hash corto da `history`, oppure `"HEAD~3"`. Le revisioni
+sono quelle del dataset, non del vault.
+**Ritorna** `path · rev · size · sha256 · content`
+
+```
+read_at("Example Project/01 Notes/a.md", "HEAD~3")
+```
+
+**`search(pattern, path, regex=False)`** — grep sul server: non scarica
+niente. Solo file di testo; i binari si trovano per nome con `list_files`.
+**Ritorna** `pattern · files_scanned · matches · truncated · lines[]`
+
+```
+search("scadenza", "Example Project")
+→ {"pattern": "scadenza", "files_scanned": 14, "matches": 3,
+   "truncated": false,
+   "lines": ["Example Project/01 Notes/a.md:31: la scadenza è …", …]}
+```
+
+**`manifest(path)`** — l'impronta di un albero in un numero solo. Due manifest
+uguali significano alberi identici. Obbligatorio per `dataset_drop` e
+`dataset_restore`.
+**Ritorna** `base · file_count · total_bytes · manifest_sha256`
+
+```
+manifest("Example Project")
+→ {"base": "Example Project", "file_count": 8, "total_bytes": 147600,
+   "manifest_sha256": "24280b93…"}
+```
+
+**`archive(path, pattern="*.md")`** — tutti i file che corrispondono in UNA
+chiamata, come tar.gz in base64. Sostituisce centinaia di `read_file` in un
+audit; serve una sandbox per estrarlo.
+**Ritorna** `file_count · original_bytes · tgz_bytes · tgz_base64`
+
+```
+archive("Example Project", "*.md")
+```
+
+**`append(path, text)`** — un blocco in coda a un file esistente. Non tocca mai
+i byte già scritti, quindi **non chiede lo sha**: è l'operazione dei log e dei
+registri. Max 64 KB.
+**Ritorna** `path · size · sha256 · commit`
+
+```
+append("Example Project/Log.md", "\n- 2026-08-08 · riconciliato\n")
+→ {"path": "Example Project/Log.md", "size": 2140,
+   "sha256": "b71c…", "commit": "9da9597"}
+```
+
+**`write_file(path, content, expected_sha256)`** — TUTTO il file.
+Compare-and-swap: `expected_sha256` deve combaciare con lo sha corrente, oppure
+`"new"` per un file che non esiste ancora. Se non combacia la scrittura è
+rifiutata senza toccare niente. UTF-8, max 2 MB.
+**Ritorna** `path · size · sha256 · commit`
+
+```
+read_file("Example Project/a.md")          # → sha256: a3f9…
+write_file("Example Project/a.md", "# Notes\nriscritto\n", "a3f9…")
+write_file("Example Project/nuovo.md", "# Fresco\n", "new")
+```
+
+**`write_binary(path, content_base64, expected_sha256)`** — stesso
+compare-and-swap, da base64. Max 2 MB decodificati. Confronta sempre lo sha
+restituito con quello calcolato alla sorgente: il base64 viaggia come testo
+generato.
+**Ritorna** `path · size · sha256 · commit`
+
+```
+write_binary("Example Project/Scans/invoice.pdf", "JVBERi0…", "new")
+```
+
+**`edit_file(path, old_text, new_text, expected_sha256)`** — sostituisce
+`old_text`, che deve comparire **esattamente una volta**, con `new_text`.
+Viaggiano solo i due frammenti, non il file. Stesso compare-and-swap di
+`write_file`.
+**Ritorna** `path · size · sha256 · commit`
+
+```
+read_file("Example Project/a.md")          # → sha256: a3f9…
+edit_file("Example Project/a.md", "retention: 0", "retention: 6", "a3f9…")
+```
+
+**`move_path(src, dst)`** — sposta, rinomina o cestina, **dentro un solo
+dataset**. Non sovrascrive mai. Non esiste un tool per cancellare: spostare in
+`Trash/` è la via di smaltimento, e azzera l'mtime del file così che
+`trash_purge` possa datarlo.
+**Ritorna** `from · to · trashed · commit`
+
+```
+move_path("Example Project/a.md", "Example Project/Trash/a.md")
+→ {"from": "Example Project/a.md", "to": "Example Project/Trash/a.md",
+   "trashed": true, "commit": "0583255"}
+```
+
+**`history(path, n=10)`** — gli ultimi n commit. Il nome nudo del dataset dà la
+storia del dataset; un file dà la sua, seguendo anche i rinomini. L'hash corto
+si passa tale e quale a `read_at` e `diff`.
+**Ritorna** `path · entries[]`
+
+```
+history("Example Project/a.md", 2)
+→ {"path": "Example Project/a.md",
+   "entries": ["2781f59 · 2026-08-08T18:30:51+02:00 · edit: a.md",
+               "0583255 · 2026-08-08T18:22:33+02:00 · edit: a.md"]}
+```
+
+**`diff(rev_a, path, rev_b="HEAD")`** — differenze fra due revisioni. Il nome
+nudo del dataset dà il riepilogo per file; un file dà il suo diff completo.
+Tronca a 60 KB invece di fallire.
+**Ritorna** `dataset · from · to · diff`
+
+```
+diff("HEAD~1", "Example Project")
+diff("HEAD~5", "Example Project/a.md")
+```
+
+**`dataset_restore(dataset, rev, expected_manifest)`** — ⚠ riscrive OGNI file
+del dataset riportandolo a `rev`. Non è distruttivo: è un commit **in avanti**,
+quindi la storia non si perde e il restore stesso si può annullare. Prima
+controlla la revisione con `history`.
+**Ritorna** `dataset · restored_from · commit · file_count · manifest_sha256`
+
+```
+history("Example Project", 5)             # scegli la revisione
+manifest("Example Project")               # → manifest_sha256: 2428…
+dataset_restore("Example Project", "0583255", "2428…")
+```
+
+**`trash_purge(dataset, before)`** — svuota `Trash/` di tutto ciò che è stato
+cestinato **prima** di una data ISO. La data è quella di cestinamento, non
+quella dell'ultima modifica. I contenuti restano nella storia git: toglie
+ingombro, non distrugge informazione.
+**Ritorna** `dataset · before · removed · bytes_freed · files · note`
+
+```
+trash_purge("Example Project", "2026-06-01")
+```
 
 </details>
 
@@ -646,7 +842,7 @@ sono un confine fra progetti, non una difesa contro un attaccante. Quella è OAu
 | File | |
 |---|---|
 | `vault.py` | il motore: `VaultRoot` e `Dataset` |
-| `server.py` | i 21 tool MCP, con i contratti nei docstring |
+| `server.py` | i 21 tool MCP; i parametri nello schema, la prosa nella guida |
 | `preflight.py` | i 10 controlli bloccanti |
 | `reference-guide.md` | la guida compatta servita da `reference_guide()` |
 | `entrypoint.sh` | init, permessi, drop privilegi, preflight, avvio |
