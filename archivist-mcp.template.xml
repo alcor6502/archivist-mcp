@@ -1,80 +1,46 @@
 <?xml version="1.0"?>
 <Container version="2">
   <Name>archivist-mcp</Name>
-  <Repository>archivist-mcp</Repository>
-  <Registry/>
+  <Repository>ghcr.io/alcor6502/archivist-mcp:latest</Repository>
+  <Registry>https://ghcr.io/alcor6502/archivist-mcp</Registry>
   <Network>bridge</Network>
   <MyIP/>
   <MyMAC/>
   <Shell>sh</Shell>
   <Privileged>false</Privileged>
-  <Support/>
-  <Project/>
-  <ReadMe/>
+  <Support>https://github.com/alcor6502/archivist-mcp/issues</Support>
+  <Project>https://github.com/alcor6502/archivist-mcp</Project>
+  <ReadMe>https://github.com/alcor6502/archivist-mcp/blob/main/README.md</ReadMe>
   <Overview>Self-hosted MCP server that exposes a document vault to an LLM client as a connector, with per-dataset git versioning and key-based access control. The vault root holds DATASETS (top-level directories), each with its own git repository: a dataset listed in the key registry is protected and requires its key on every call, one without a line is open. Access via OAuth 2.1 with GitHub login restricted to a single user, published by Tailscale Funnel.</Overview>
   <Category>Productivity: Tools:Utilities</Category>
-  <WebUI>http://[IP]:[PORT:3000]/</WebUI>
-  <TemplateURL/>
-  <Icon/>
+  <WebUI/>
+  <TemplateURL>https://raw.githubusercontent.com/alcor6502/archivist-mcp/main/archivist-mcp.template.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/alcor6502/archivist-mcp/main/archivist-icon.png</Icon>
   <ExtraParams>--restart=unless-stopped</ExtraParams>
   <PostArgs>entrypoint.sh</PostArgs>
   <CPUset/>
-  <DateInstalled>1785835666</DateInstalled>
   <DonateText/>
   <DonateLink/>
   <Requires>A GitHub OAuth application (free) and the Unraid Tailscale plugin with Funnel enabled.</Requires>
-
-  <Config Name="Vault" Target="/vault" Default="" Mode="rw" Type="Path" Display="always" Required="true" Mask="false"
-    Description="The vault ROOT on the server. Every top-level directory in here is a dataset with its own independent git repository; subdirectories are dataset content. Do not put stray files here: the tools cannot reach them, because every path must start with a dataset name. The one exception is keys.txt, the key registry. Tip: make this a ZFS dataset of its own, so vault snapshots are independent from the rest of the share.">/mnt/cache/Claude/Vault/</Config>
-
-  <Config Name="App Data" Target="/data" Default="" Mode="rw" Type="Path" Display="always" Required="true" Mask="false"
-    Description="Persistent service state: already-issued OAuth tokens (FASTMCP_HOME) and logs. It MUST live on a volume that survives container recreation: lose it and the client will ask you to authorise the connector all over again.">/mnt/user/appdata/archivist-mcp/data</Config>
-
-  <Config Name="Tailscale State" Target="/var/lib/tailscale" Default="" Mode="rw" Type="Path" Display="always" Required="true" Mask="false"
-    Description="The Tailscale node identity of this container. Lose it and the node comes back as new: the hostname changes, the Funnel needs re-authorisation and BASE_URL stops answering. One dedicated folder per container.">/mnt/user/appdata/archivist-mcp/ts-state</Config>
-
-  <Config Name="Vault Root" Target="VAULT_ROOT" Default="/vault" Mode="" Type="Variable" Display="always" Required="true" Mask="false"
-    Description="Path of the vault root INSIDE the container. Leave it as /vault: when you move the data you change the mount above, not this variable.">/vault</Config>
-
-  <Config Name="Keys File" Target="KEYS_FILE" Default="/vault/keys.txt" Mode="" Type="Variable" Display="always" Required="false" Mask="false"
-    Description="Registry of dataset access keys. Format: dataset name, a TAB, the key. One line per dataset; blank lines and lines starting with # are comments. A dataset WITHOUT a line here is open to anyone holding the connector; with a line it is protected and the key must be passed on every call. Generate keys however you like (8 alphanumeric characters are plenty, OAuth is already in front); avoid 0/O and 1/l since you will retype them by hand. The file is HOT-RELOADED: add or remove a line from the file editor and it takes effect immediately, no restart. It lives inside the vault but is unreachable from the tools, because its name is not a dataset name.">/vault/keys.txt</Config>
-
-  <Config Name="Git Retention (months)" Target="GIT_RETENTION_MONTHS" Default="0" Mode="" Type="Variable" Display="always" Required="false" Mask="false"
-    Description="Prune git history at boot, dataset by dataset: history older than N months is squashed into a single commit that preserves the content as of that date. 0 = DISABLED (recommended default). Before enabling it, look at git_size_bytes in dataset_status: git is very efficient on text deltas and the space problem often does not exist. When it runs it rewrites the hashes of commits after the threshold, and anything purged from the trash beyond that threshold becomes unrecoverable. It never touches working-tree files: at worst you lose history, never data.">0</Config>
-
-  <Config Name="Public URL" Target="BASE_URL" Default="" Mode="" Type="Variable" Display="always" Required="true" Mask="false"
-    Description="The full public URL the client uses to reach the service, e.g. https://host.your-tailnet.ts.net (no trailing slash). It must be https and must match EXACTLY what is registered in the GitHub OAuth application, scheme included: the callback there must be BASE_URL + /auth/callback. This is the most common first-run mistake.">https://host.your-tailnet.ts.net</Config>
-
-  <Config Name="GitHub Client ID" Target="GITHUB_CLIENT_ID" Default="" Mode="" Type="Variable" Display="always" Required="true" Mask="false"
-    Description="Client ID of the GitHub OAuth application. Create it at github.com under Settings, Developer settings, OAuth Apps, New OAuth App: Homepage = BASE_URL, Authorization callback URL = BASE_URL/auth/callback. USE A NEW APPLICATION PER SERVICE: do not recycle another container's, or the two will fight over the callback.">CHANGEME</Config>
-
-  <Config Name="GitHub Client Secret" Target="GITHUB_CLIENT_SECRET" Default="" Mode="" Type="Variable" Display="always" Required="true" Mask="true"
-    Description="Client Secret of the same OAuth application. GitHub shows it ONCE, at generation time: if you lose it there is no recovery, you generate another and update it here.">CHANGEME</Config>
-
-  <Config Name="Allowed GitHub Login" Target="ALLOWED_GITHUB_LOGIN" Default="" Mode="" Type="Variable" Display="always" Required="true" Mask="false"
-    Description="The only GitHub username allowed in, e.g. yourname. Anyone else who completes the login is refused on every call. This is the real front door of the service: dataset keys separate projects from each other, they do not keep strangers out.">CHANGEME</Config>
-
-  <Config Name="JWT Signing Key" Target="JWT_SIGNING_KEY" Default="" Mode="" Type="Variable" Display="always" Required="true" Mask="true"
-    Description="The key the service uses to sign and encrypt the tokens it issues. GENERATE IT WITH: openssl rand -hex 32 (64 hex characters). It must stay STABLE over time: change it and every issued token becomes invalid, so you must disconnect and reconnect the connector. A different key per service, never reused, never regenerated out of habit. If you lose it, the cure is to regenerate and reconnect.">CHANGEME</Config>
-
-  <Config Name="Port" Target="PORT" Default="3000" Mode="" Type="Variable" Display="always" Required="true" Mask="false"
-    Description="The listening port inside the container, and the same one the Funnel must publish (see Tailscale Serve Port below: the two MUST match, or preflight blocks startup). A different port per service if you run more than one.">3000</Config>
-
-  <Config Name="Anthropic IP Filter" Target="ANTHROPIC_CIDR" Default="160.79.104.0/21" Mode="" Type="Variable" Display="always" Required="false" Mask="false"
-    Description="Defence in depth: accept calls only from the documented egress range of the model provider. EMPTY string disables the filter, useful only while testing locally. It does not replace OAuth, it adds to it.">160.79.104.0/21</Config>
-
-  <Config Name="Bind Host" Target="BIND_HOST" Default="127.0.0.1" Mode="" Type="Variable" Display="advanced" Required="false" Mask="false"
-    Description="The interface the server listens on inside the container. Leave it as 127.0.0.1: legitimate traffic arrives from the Funnel, which runs in the same container. Setting 0.0.0.0 exposes the service to the LAN without the Funnel's filtering.">127.0.0.1</Config>
-
-  <Config Name="Vault UID" Target="VAULT_UID" Default="99" Mode="" Type="Variable" Display="advanced" Required="false" Mask="false"
-    Description="The UID the process runs as after dropping root privileges. On Unraid 99 is nobody, the right owner for share files. Change it only if you know why.">99</Config>
-
-  <Config Name="Vault GID" Target="VAULT_GID" Default="100" Mode="" Type="Variable" Display="advanced" Required="false" Mask="false"
-    Description="The GID the process runs as. On Unraid 100 is users. Together with VAULT_UID it also determines who can read the key registry, which the entrypoint sets to 640.">100</Config>
-
+  <Config Name="Vault" Target="/vault" Default="/mnt/YOUR-POOL/YOUR-SHARE/Vault/" Mode="rw" Description="The vault ROOT on the server. Every top-level directory in here is a dataset with its own independent git repository; subdirectories are dataset content. Do not put stray files here: the tools cannot reach them, because every path must start with a dataset name. The one exception is keys.txt, the key registry. Tip: make this a ZFS dataset of its own, so vault snapshots are independent from the rest of the share." Type="Path" Display="always" Required="true" Mask="false"></Config>
+  <Config Name="App Data" Target="/data" Default="/mnt/user/appdata/archivist-mcp/data" Mode="rw" Description="Persistent service state: already-issued OAuth tokens (FASTMCP_HOME) and logs. It MUST live on a volume that survives container recreation: lose it and the client will ask you to authorise the connector all over again." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/archivist-mcp/data</Config>
+  <Config Name="Tailscale State" Target="/var/lib/tailscale" Default="/mnt/user/appdata/archivist-mcp/ts-state" Mode="rw" Description="The Tailscale node identity of this container. Lose it and the node comes back as new: the hostname changes, the Funnel needs re-authorisation and BASE_URL stops answering. One dedicated folder per container." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/archivist-mcp/ts-state</Config>
+  <Config Name="Vault Root" Target="VAULT_ROOT" Default="/vault" Mode="" Description="Path of the vault root INSIDE the container. Leave it as /vault: when you move the data you change the mount above, not this variable." Type="Variable" Display="always" Required="true" Mask="false">/vault</Config>
+  <Config Name="Keys File" Target="KEYS_FILE" Default="/vault/keys.txt" Mode="" Description="Registry of dataset access keys. Format: dataset name, a TAB, the key. One line per dataset; blank lines and lines starting with # are comments. A dataset WITHOUT a line here is open to anyone holding the connector; with a line it is protected and the key must be passed on every call. Generate keys however you like (8 alphanumeric characters are plenty, OAuth is already in front); avoid 0/O and 1/l since you will retype them by hand. The file is HOT-RELOADED: add or remove a line from the file editor and it takes effect immediately, no restart. It lives inside the vault but is unreachable from the tools, because its name is not a dataset name." Type="Variable" Display="always" Required="false" Mask="false">/vault/keys.txt</Config>
+  <Config Name="Git Retention (months)" Target="GIT_RETENTION_MONTHS" Default="0" Mode="" Description="Prune git history at boot, dataset by dataset: history older than N months is squashed into a single commit that preserves the content as of that date. 0 = DISABLED (recommended default). Before enabling it, look at git_size_bytes in dataset_status: git is very efficient on text deltas and the space problem often does not exist. When it runs it rewrites the hashes of commits after the threshold, and anything purged from the trash beyond that threshold becomes unrecoverable. It never touches working-tree files: at worst you lose history, never data." Type="Variable" Display="always" Required="false" Mask="false">0</Config>
+  <Config Name="Public URL" Target="BASE_URL" Default="https://CHANGEME.your-tailnet.ts.net" Mode="" Description="The full public URL the client uses to reach the service, e.g. https://host.your-tailnet.ts.net (no trailing slash). It must be https and must match EXACTLY what is registered in the GitHub OAuth application, scheme included: the callback there must be BASE_URL + /auth/callback. This is the most common first-run mistake. Startup is BLOCKED while this still reads CHANGEME." Type="Variable" Display="always" Required="true" Mask="false"></Config>
+  <Config Name="GitHub Client ID" Target="GITHUB_CLIENT_ID" Default="CHANGEME" Mode="" Description="Client ID of the GitHub OAuth application. Create it at github.com under Settings, Developer settings, OAuth Apps, New OAuth App: Homepage = BASE_URL, Authorization callback URL = BASE_URL/auth/callback. USE A NEW APPLICATION PER SERVICE: do not recycle another container's, or the two will fight over the callback. Startup is BLOCKED while this still reads CHANGEME." Type="Variable" Display="always" Required="true" Mask="false"></Config>
+  <Config Name="GitHub Client Secret" Target="GITHUB_CLIENT_SECRET" Default="CHANGEME" Mode="" Description="Client Secret of the same OAuth application. GitHub shows it ONCE, at generation time: if you lose it there is no recovery, you generate another and update it here. Startup is BLOCKED while this still reads CHANGEME." Type="Variable" Display="always" Required="true" Mask="true"></Config>
+  <Config Name="Allowed GitHub Login" Target="ALLOWED_GITHUB_LOGIN" Default="CHANGEME-YOUR-GITHUB-USERNAME" Mode="" Description="The only GitHub username allowed in, e.g. yourname. Anyone else who completes the login is refused on every call. This is the real front door of the service: dataset keys separate projects from each other, they do not keep strangers out. Startup is BLOCKED while this still contains CHANGEME." Type="Variable" Display="always" Required="true" Mask="false"></Config>
+  <Config Name="JWT Signing Key" Target="JWT_SIGNING_KEY" Default="CHANGEME" Mode="" Description="The key the service uses to sign and encrypt the tokens it issues. GENERATE IT WITH: openssl rand -hex 32 (64 hex characters). It must stay STABLE over time: change it and every issued token becomes invalid, so you must disconnect and reconnect the connector. A different key per service, never reused, never regenerated out of habit. If you lose it, the cure is to regenerate and reconnect. Startup is BLOCKED while this is shorter than 32 characters." Type="Variable" Display="always" Required="true" Mask="true"></Config>
+  <Config Name="Port" Target="PORT" Default="3000" Mode="" Description="The listening port inside the container, and the same one the Funnel must publish (see Tailscale Serve Port below: the two MUST match, or preflight blocks startup). A different port per service if you run more than one." Type="Variable" Display="always" Required="true" Mask="false">3000</Config>
+  <Config Name="Anthropic IP Filter" Target="ANTHROPIC_CIDR" Default="160.79.104.0/21" Mode="" Description="Defence in depth: accept calls only from the documented egress range of the model provider. EMPTY string disables the filter, useful only while testing locally. It does not replace OAuth, it adds to it." Type="Variable" Display="always" Required="false" Mask="false">160.79.104.0/21</Config>
+  <Config Name="Bind Host" Target="BIND_HOST" Default="127.0.0.1" Mode="" Description="The interface the server listens on inside the container. Leave it as 127.0.0.1: legitimate traffic arrives from the Funnel, which runs in the same container. Setting 0.0.0.0 exposes the service to the LAN without the Funnel's filtering." Type="Variable" Display="advanced" Required="false" Mask="false">127.0.0.1</Config>
+  <Config Name="Vault UID" Target="VAULT_UID" Default="99" Mode="" Description="The UID the process runs as after dropping root privileges. On Unraid 99 is nobody, the right owner for share files. Change it only if you know why." Type="Variable" Display="advanced" Required="false" Mask="false">99</Config>
+  <Config Name="Vault GID" Target="VAULT_GID" Default="100" Mode="" Description="The GID the process runs as. On Unraid 100 is users. Together with VAULT_UID it also determines who can read the key registry, which the entrypoint sets to 640." Type="Variable" Display="advanced" Required="false" Mask="false">100</Config>
   <TailscaleEnabled>true</TailscaleEnabled>
   <TailscaleIsExitNode>false</TailscaleIsExitNode>
-  <TailscaleHostname>archivist</TailscaleHostname>
+  <TailscaleHostname>CHANGEME-TAILSCALE-HOSTNAME</TailscaleHostname>
   <TailscaleExitNodeIP/>
   <TailscaleSSH>false</TailscaleSSH>
   <TailscaleUserspaceNetworking>false</TailscaleUserspaceNetworking>
