@@ -5,6 +5,12 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY vault.py server.py preflight.py entrypoint.sh reference-guide.md ./
 RUN chmod +x entrypoint.sh
+# Python's stdout is block-buffered, stderr is not: the service logs on stderr
+# and entrypoint.sh echoes on stdout, so the two drain at different moments and
+# the order you read is not the order things happened. It also loses the last
+# unflushed block when the container is killed — which is exactly the part of
+# the log you need when something dies badly.
+ENV PYTHONUNBUFFERED=1
 # OAuth store (tokens, registrations) on a persistent volume: survives
 # container recreation. Encryption is derived from JWT_SIGNING_KEY.
 ENV FASTMCP_HOME=/data/fastmcp

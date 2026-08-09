@@ -185,12 +185,18 @@ def dockerfile_env_check() -> None:
     easy to delete by accident, and the only symptom would be the noise quietly
     coming back. This is the tripwire.
 
-    Values verified against fastmcp 3.4.5."""
+    PYTHONUNBUFFERED is not a FastMCP setting and is checked here for the same
+    reason: it has to be in the environment before the interpreter starts, so
+    it cannot live in the code either, and losing it does not fail — it just
+    reorders the log and drops the last block when the container is killed.
+
+    FastMCP values verified against fastmcp 3.4.5."""
     df = (HERE / "Dockerfile").read_text(encoding="utf-8")
     for var, val in (("FASTMCP_SHOW_SERVER_BANNER", "false"),
                      ("FASTMCP_ENABLE_RICH_LOGGING", "false"),
                      ("FASTMCP_CHECK_FOR_UPDATES", "off"),
-                     ("FASTMCP_LOG_LEVEL", "WARNING")):
+                     ("FASTMCP_LOG_LEVEL", "WARNING"),
+                     ("PYTHONUNBUFFERED", "1")):
         ok(f"ENV {var}={val}" in df, f"Dockerfile sets {var}={val}")
 
 
