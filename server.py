@@ -35,6 +35,12 @@ Environment:
                           not defined at all the deprecated ANTHROPIC_CIDR is
                           read, and failing that the documented egress range
   ANTHROPIC_CIDR          DEPRECATED, still honoured: see ALLOWED_CIDRS
+  LOG_LEVEL               level of THIS service's logger only (default INFO).
+                          The root logger, uvicorn.access and fastmcp are set
+                          elsewhere and do not follow it. WARNING silences the
+                          three boot lines and keeps the refusals; DEBUG is
+                          indistinguishable from INFO, because there are no
+                          debug lines to switch on
 """
 from __future__ import annotations
 
