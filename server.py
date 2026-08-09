@@ -1,9 +1,10 @@
 """
-server.py — self-hosted MCP server for a dataset vault. v2
+server.py — self-hosted MCP server for a dataset vault.
 
 Architecture:
-- the server listens on 127.0.0.1:PORT and does NOT know how traffic reaches
-  it (today Tailscale Funnel, tomorrow a reverse proxy: zero lines to change);
+- the server listens on 127.0.0.1:PORT — loopback only, not configurable — and
+  does NOT know how traffic reaches it (today Tailscale Funnel, tomorrow a
+  reverse proxy: zero lines to change);
 - auth: OAuth 2.1 towards the client (DCR/PKCE handled by FastMCP's
   OAuthProxy), login delegated to GitHub, access ALLOWED ONLY to
   ALLOWED_GITHUB_LOGIN;
@@ -35,15 +36,11 @@ Environment:
                           not defined at all the deprecated ANTHROPIC_CIDR is
                           read, and failing that the documented egress range
   ANTHROPIC_CIDR          DEPRECATED, still honoured: see ALLOWED_CIDRS
-  LOG_LEVEL               level of THIS service's logger only (default INFO).
-                          The root logger, uvicorn.access and fastmcp are set
-                          elsewhere and do not follow it. WARNING silences the
-                          boot lines and keeps the refusals. The template offers
-                          INFO and WARNING and nothing else, in both directions:
-                          below INFO there is nothing to switch on, since there
-                          are no debug lines, and above WARNING the refusals go
-                          silent. An unknown value raises here, at import, AFTER
-                          a green preflight
+  LOG_LEVEL               level of THIS logger only, INFO or WARNING (default
+                          INFO). Nothing below INFO: there are no debug lines
+  FASTMCP_HOME            token store; set in the Dockerfile, MUST persist
+  VAULT_UID / VAULT_GID   service user, dropped to by the entrypoint (99/100)
+  PREFLIGHT_SKIP          checks to skip, by name. Testing only
 """
 from __future__ import annotations
 
@@ -98,6 +95,17 @@ RETENTION = int(env("GIT_RETENTION_MONTHS", "0") or 0)
 BASE_URL = env("BASE_URL")
 ALLOWED_LOGIN = env("ALLOWED_GITHUB_LOGIN")
 PORT = int(env("PORT", "3000"))
+# NOT configurable, and that is the design. Legitimate traffic arrives from the
+# Funnel, which runs inside this container; nothing else has a reason to reach
+# the port. It used to be the BIND_HOST variable, which bought one thing only:
+# the ability to open the service to the LAN, bypassing the Funnel's filtering
+# — a setting whose best outcome was that nobody used it.
+#
+# It is a constant rather than two literals because that is how it broke: the
+# log printed 127.0.0.1 as text while the bind followed the variable, so
+# BIND_HOST=0.0.0.0 produced a log naming an address nobody listened on. One
+# name, used by both, cannot drift.
+BIND_ADDR = "127.0.0.1"
 # Resolved in preflight.cidrs_from_env so that the service and the preflight
 # can never disagree about what the filter is. A malformed entry raises here,
 # which is deliberate: it has already blocked the preflight by this point.
@@ -129,7 +137,7 @@ class Gate(Middleware):
     `initialize` and `tools/list` as much as `tools/call`. Until v2.0 it hooked
     `on_call_tool`, and the hole that left was narrow but real: a stranger who
     completed the OAuth flow with their own GitHub account got a valid token,
-    and with it could list the twenty-one tools with their descriptions. Every
+    and with it could list every tool with its description. Every
     call was refused, so no data leaked — but the shape of the surface did, and
     a surface nobody can enumerate is one nobody can study.
 
@@ -359,9 +367,9 @@ def trash_purge(dataset: str, before: str, key: str = "") -> dict:
 
 
 if __name__ == "__main__":
-    log.info("archivist-mcp %s — starting on 127.0.0.1:%s — base_url %s — allowed user: %s "
+    log.info("archivist-mcp %s — starting on %s:%s — base_url %s — allowed user: %s "
              "— IP filter: %s — token store: %s — retention: %s",
-             VERSION, PORT, BASE_URL, ALLOWED_LOGIN, describe_cidrs(ALLOWED_CIDRS),
+             VERSION, BIND_ADDR, PORT, BASE_URL, ALLOWED_LOGIN, describe_cidrs(ALLOWED_CIDRS),
              os.environ.get("FASTMCP_HOME", "(default — NOT persistent!)"),
              f"{RETENTION} months" if RETENTION else "disabled")
-    mcp.run(transport="http", host=os.environ.get("BIND_HOST", "127.0.0.1"), port=PORT)
+    mcp.run(transport="http", host=BIND_ADDR, port=PORT)

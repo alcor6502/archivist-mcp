@@ -17,6 +17,7 @@ from __future__ import annotations
 import ast
 import inspect
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -241,6 +242,93 @@ def dockerfile_env_check() -> None:
                      ("FASTMCP_LOG_LEVEL", "WARNING"),
                      ("PYTHONUNBUFFERED", "1")):
         ok(f"ENV {var}={val}" in df, f"Dockerfile sets {var}={val}")
+
+
+def guide_signature_check() -> None:
+    """The manual travels inside the image and is served by reference_guide(),
+    so it is read by the caller far more often than the code is. A manual that
+    promises a parameter the tool has not got — or, worse, stays silent about a
+    default that narrows what the call does — is a defect this project has
+    already paid for: `archive` filters `*.md` by default, and the guide used to
+    recommend it for audits without saying so, which quietly leaves every PDF
+    out of the audit.
+
+    Prose cannot be checked. A signature can. So the guide carries one block of
+    signatures, verbatim, and this reads both sides: every tool declared with
+    @mcp.tool must appear there with the same parameter names, the same ORDER
+    and the same defaults, and nothing may appear there that is not a tool.
+
+    It also fixes the count problem at its root: the number of tools is never
+    written down anywhere, it is the length of this list."""
+    src = (HERE / "server.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    def rendered(fn: ast.FunctionDef) -> str:
+        pad = [None] * (len(fn.args.args) - len(fn.args.defaults))
+        parts = [a.arg if d is None else f"{a.arg}={ast.unparse(d)}"
+                 for a, d in zip(fn.args.args, pad + list(fn.args.defaults))]
+        return f"{fn.name}({', '.join(parts)})"
+
+    real = [rendered(n) for n in tree.body
+            if isinstance(n, ast.FunctionDef)
+            and any(isinstance(d, ast.Attribute) and d.attr == "tool"
+                    and isinstance(d.value, ast.Name) and d.value.id == "mcp"
+                    for d in n.decorator_list)]
+    ok(bool(real), "the AST finds the tools at all", len(real))
+
+    guide = (HERE / "reference-guide.md").read_text(encoding="utf-8")
+    names = {r.split("(", 1)[0] for r in real}
+    written = [ln.strip() for ln in guide.splitlines()
+               if ln.startswith("    ") and ln.strip().split("(", 1)[0] in names
+               and ln.strip().endswith(")")]
+
+    missing = [r for r in real if r not in written]
+    ok(not missing, "every tool is in the guide with its exact signature", missing)
+
+    # The other direction, which is the one that rots silently: a signature that
+    # stays in the manual after the tool changed under it.
+    stale = [w for w in written if w not in real]
+    ok(not stale, "the guide promises no signature the code does not have", stale)
+
+    # Named in prose but never declared: the reader is sent to a door that is
+    # not there. `status()` is the one that actually happened — it reads like a
+    # tool, it is not one, and the two real ones are vault_status() and
+    # dataset_status(). The lookbehind is what keeps those two from matching.
+    ghosts = re.findall(r"(?<![\w.])(status|drop|create)\s*\(", guide)
+    ok(not ghosts, "the guide names no bare verb that is not a tool", sorted(set(ghosts)))
+
+    # The two READMEs document the same surface at greater length, and they are
+    # what a stranger reads before installing anything. They spell each tool in
+    # bold WITHOUT `key`, which is explained once for all of them, so that one
+    # parameter is dropped before comparing. Quotes are normalised because Python
+    # renders defaults with single quotes and the prose uses double ones: that is
+    # a difference in typography, and a test that fails on typography gets
+    # switched off.
+    bare = [re.sub(r", key='[^']*'", "", r).replace("'", '"') for r in real]
+    for name in ("README.md", "README.it.md"):
+        text = (HERE / name).read_text(encoding="utf-8").replace("'", '"')
+        absent = [s for s in bare if f"**`{s}`**" not in text]
+        ok(not absent, f"{name} spells every tool with its exact signature", absent)
+
+    # The limits are the other kind of number the documents copy by hand, and
+    # the one a caller plans around: told 2 MB when the real ceiling is 1, they
+    # build a call that fails. The prose keeps its human form — nobody wants to
+    # read 2000000 — so the test renders the constant the way a person writes it
+    # and looks for that string. Both files, both languages.
+    import vault as _v
+    limits = [("MAX_READ_BYTES", _v.MAX_READ_BYTES, 2_000_000, "2 MB"),
+              ("MAX_WRITE_BYTES", _v.MAX_WRITE_BYTES, 2_000_000, "2 MB"),
+              ("MAX_BINARY_BYTES", _v.MAX_BINARY_BYTES, 2_000_000, "2 MB"),
+              ("MAX_APPEND_BYTES", _v.MAX_APPEND_BYTES, 64_000, "64 KB"),
+              ("MAX_LIST_FILES", _v.MAX_LIST_FILES, 3_000, "3,000"),
+              ("MAX_SEARCH_HITS", _v.MAX_SEARCH_HITS, 200, "200 lines"),
+              ("MAX_DIFF_BYTES", _v.MAX_DIFF_BYTES, 60_000, "60 KB"),
+              ("MAX_ARCHIVE_BYTES", _v.MAX_ARCHIVE_BYTES, 30_000_000, "30 MB"),
+              ("MAX_ARCHIVE_OUT_BYTES", _v.MAX_ARCHIVE_OUT_BYTES, 5_000_000, "5 MB"),
+              ("MAX_DATASETS", _v.MAX_DATASETS, 200, "datasets in the vault | 200")]
+    for const, value, pinned, shown in limits:
+        ok(value == pinned and shown in guide,
+           f"{const} and the line the guide prints for it still agree", value)
 
 
 def main() -> int:
@@ -568,6 +656,9 @@ def main() -> int:
 
         print("\n[14b] the Gate is wired to the hook it claims")
         gate_hook_check()
+
+        print("\n[14c] the manual says what the code actually offers")
+        guide_signature_check()
 
         print("\n[15] the IP filter list, in both directions")
         cidr_checks()

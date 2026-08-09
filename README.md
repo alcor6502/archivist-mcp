@@ -1,8 +1,8 @@
 # Archivist MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/github/v/tag/alcor6502/archivist-mcp?label=version&color=blue"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-21%20tools-8A63D2.svg">
+<img src="https://img.shields.io/github/v/tag/alcor6502/archivist-mcp?label=version&color=blue"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-server-8A63D2.svg">
 
-**A document vault Claude can read and write, git-versioned on every write,
+**A document vault an LLM can read and write, git-versioned on every write,
 self-hosted on your own server.**
 
 No data leaves your machine except towards the conversation that asked for it.
@@ -104,7 +104,7 @@ reads the descriptions and decides on its own when to call them.
 
 That has a consequence which governs the whole design: **every tool's
 description rides at the head of every request**, always, even when none of them
-is used — and it arrives *isolated*, read without the other twenty in view.
+is used — and it arrives *isolated*, read without the rest of the surface in view.
 Hence the refusal to multiply tools for fun, and hence the division of labour: a
 description carries only what prevents damage when the manual was never read,
 while everything that needs the whole picture lives in `reference_guide()`,
@@ -163,6 +163,15 @@ The container starts as root only to fix permissions, then **drops privileges**
 and runs as `nobody:users` with umask 000, so the files stay usable from SMB
 shares too.
 
+Four settings live in the image as `ENV` rather than in the code, because
+FastMCP reads them when it is *imported* — too early for anything in
+`server.py` to have a say. Three of them just quiet the startup down; the
+fourth, `FASTMCP_CHECK_FOR_UPDATES=off`, removes an **outbound call made at
+every boot** to ask what the latest version is. On a service that pins its
+version on purpose, that call buys nothing and contradicts the sentence at the
+top of this page. A static check makes sure all four are still there: losing
+one would not fail, it would just quietly change the behaviour.
+
 ### Blocking preflight
 
 The preflight checks run at startup. If **a single one** fails, the service **does not
@@ -184,7 +193,7 @@ start and tells you why beats one that starts and misbehaves.
    Tailscale Funnel  ──►  https://<host>.<tailnet>.ts.net
         │  (in the same container)
         ▼
-   127.0.0.1:3000   server.py  ── 21 MCP tools
+   127.0.0.1:3000   server.py  ── the MCP tools
         │                        ├─ GitHub identity filter
         │                        └─ source IP filter
         ▼
@@ -284,11 +293,23 @@ not a dataset name — the same check that stops `..` and `.git` stops it.
 </details>
 
 <details>
-<summary><b>5 · Build the image</b></summary>
+<summary><b>5 · The image</b></summary>
+
+Two routes, and the template takes the first.
+
+**Use the published image.** Every `v*` tag runs the suite and then publishes to
+`ghcr.io/alcor6502/archivist-mcp`; a tag that does not pass never becomes an
+image. `archivist-mcp.xml` already points there, so there is nothing to build.
+
+**Or build it yourself**, from a clone on the server:
 
 ```sh
-docker build --no-cache -t archivist-mcp .
+docker build --no-cache -t archivist-mcp /path/to/the/clone
 ```
+
+Then change `Repository` in the template to `archivist-mcp`, or Unraid pulls the
+published image over the one you just built and nothing tells you. Do not build
+on an Apple Silicon Mac: the image comes out arm64.
 
 ⚠ **`--no-cache` is not pedantry.** Docker's build cache has been known to
 report `CACHED` for a layer whose file had changed. You lose an hour testing the
@@ -334,6 +355,29 @@ hand. Every field carries its own description in the UI; here is the summary.
 | `PORT` | `3000` |
 | `ALLOWED_CIDRS` | `160.79.104.0/21 # documented egress of the model provider` |
 
+Updating from an earlier version: there is nothing to do about `ALLOWED_CIDRS`.
+The previous name `ANTHROPIC_CIDR` is deprecated but still honoured, so a
+container that already runs keeps working untouched.
+
+**Under Show more settings**
+
+| Variable | Value |
+|---|---|
+| `LOG_LEVEL` | `INFO`, or `WARNING` for a quiet log. Nothing else: see below |
+| `VAULT_UID` / `VAULT_GID` | `99` / `100` — `nobody:users`, the right owner for share files |
+
+`LOG_LEVEL` governs this service's logger and nothing else: the root logger, the
+access log and FastMCP are set elsewhere. `INFO` prints, once, what was found at
+boot — the datasets and their state, the key registry, and the line with
+version, public URL, allowed user and IP filter — which is what you read to
+confirm that an update actually took. `WARNING` silences those and leaves the
+refusals. The dropdown offers no more than that on purpose: below `INFO` there
+is nothing to switch on, and above `WARNING` the refusals go silent, which is
+the one line that tells a stranger turned away apart from a broken deployment.
+
+The service listens on loopback inside the container, and that is not a setting.
+Legitimate traffic arrives from the Funnel, which runs in the same container.
+
 **Tailscale**: Enabled `true`, Hostname `<host>`, Serve `funnel`, Serve Port
 **equal to `PORT`**, State Dir `/var/lib/tailscale`.
 
@@ -346,8 +390,8 @@ old configuration; only Apply recreates it from the updated template.
 <summary><b>7 · First start and connecting</b></summary>
 
 In the container log you should see, in order: git init per dataset, the
-permission pass, the privilege drop, **preflight 10/10**, and then the server
-starting.
+permission pass, the privilege drop, the **preflight all green**, and then the
+server starting.
 
 If preflight blocks, the message names the check and the reason. It is not a
 warning: the service did not start.
@@ -385,6 +429,25 @@ Skip that and you will see the old tools and conclude the deployment failed.
 
 Changes to internal behaviour (limits, formats, logic) do not alter the surface:
 recreating the container is enough.
+
+</details>
+
+<details>
+<summary><b>9 · Updating</b></summary>
+
+A release is a `v*` tag. The workflow runs the suite first and only then builds
+and publishes, so a tag that does not pass never becomes an image.
+
+The registry does not knock: Unraid finds out when asked. **Check for Updates**
+on the Docker page, then apply the update it offers. Read the startup line in
+the log afterwards — it carries the version, and that is how you know the new
+image is the one running rather than the old one restarting.
+
+If the update changed the tool surface, do step 8 as well.
+
+**The way back** costs one field: the previous tag is still on the registry, so
+put it in `Repository` in place of `:latest` and Apply. Nothing else moves —
+the vault, the tokens and the Tailscale identity all live outside the image.
 
 </details>
 
@@ -492,7 +555,7 @@ itself is gone.
 ## Usage guide
 
 <details>
-<summary><b>The five rules</b></summary>
+<summary><b>The rules</b></summary>
 
 **1. Every tool returns a verdict, not a dump.** The result is a small object
 holding facts: hashes, counts, bytes, the commit id. Content travels only when
@@ -559,7 +622,7 @@ file that is the difference between a light call and a heavy one.
 </details>
 
 <details>
-<summary><b>The 21 tools</b></summary>
+<summary><b>The tools</b></summary>
 
 Every dataset-level tool takes `dataset` first, and `path` relative to it; an
 empty `path` means the whole dataset. `key` is accepted by all of them and is
@@ -849,13 +912,13 @@ copy across datasets: read_file("A", "x.md") → write_file("B", "x.md", …, "n
 | `path is relative to the dataset, not absolute` | drop the leading `/` |
 | `CONFLICT: expected sha ...` | re-read, reconcile, retry |
 | `the file already exists` | you used `"new"` on an existing file |
-| `the file does not exist: ... "new"` | the opposite |
+| `the file does not exist` | the opposite: pass `"new"` |
 | `old_text NOT found` | re-read and copy the exact fragment |
 | `old_text found N times` | widen the context until it is unique |
 | `path not allowed` | there is a `..` or `.git` in the path |
 | `destination already exists` | `move_path` never overwrites |
 | `more than 3000 files` | go one level deeper |
-| `block too large (max 64000)` | `append` is not for rewrites |
+| `block too large` | `append` is not for rewrites |
 
 A failing tool never leaves a partial write.
 
@@ -880,7 +943,7 @@ between projects, not a defence against an attacker. That is what OAuth is for.
 | File | |
 |---|---|
 | `vault.py` | the engine: `VaultRoot` and `Dataset` |
-| `server.py` | the 21 MCP tools; parameters in the schema, prose in the guide |
+| `server.py` | the MCP tools; parameters in the schema, prose in the guide |
 | `preflight.py` | the blocking startup checks, and the IP-filter parser |
 | `reference-guide.md` | the compact guide served by `reference_guide()` |
 | `entrypoint.sh` | init, permissions, privilege drop, preflight, start |

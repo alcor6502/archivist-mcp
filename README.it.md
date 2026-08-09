@@ -1,19 +1,21 @@
 # Archivist MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/github/v/tag/alcor6502/archivist-mcp?label=version&color=blue"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-21%20tools-8A63D2.svg">
+<img src="https://img.shields.io/github/v/tag/alcor6502/archivist-mcp?label=version&color=blue"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-server-8A63D2.svg">
 
-**Un magazzino di documenti che Claude può leggere e scrivere, versionato con
+**Un magazzino di documenti che un LLM può leggere e scrivere, versionato con
 git a ogni scrittura, self-hosted a casa tua.**
 
 Nessun dato esce dal tuo server se non verso la conversazione che l'ha chiesto.
 Ogni modifica è un commit. Niente si cancella per sbaglio, e quello che si
 cancella si recupera.
 
+🇬🇧 [Read in English](README.md)
+
 ---
 
 ## Perché esiste
 
-Chi lavora con Claude su qualcosa di serio si scontra presto con lo stesso muro:
+Chi lavora con un LLM su qualcosa di serio si scontra presto con lo stesso muro:
 **le conversazioni non ricordano.** Ogni chat riparte da zero, e il materiale che
 dovrebbe accumularsi — decisioni, dati, note di lavoro — resta sparso fra
 allegati ricaricati ogni volta e chat vecchie che non ritrovi più.
@@ -23,8 +25,8 @@ condivisa risolve metà del problema e crea l'altra metà:
 
 | | Cartella sincronizzata | Archivist |
 |---|---|---|
-| Claude legge i file | vanno ricaricati a mano | li legge quando gli servono |
-| Claude scrive i file | no | sì, con commit |
+| Il modello legge i file | vanno ricaricati a mano | li legge quando gli servono |
+| Il modello scrive i file | no | sì, con commit |
 | Due chat che scrivono insieme | l'ultima vince, in silenzio | la seconda viene **rifiutata** e avvisata |
 | "Com'era questo file martedì?" | dipende dal cestino del servizio | `read_at`, sempre |
 | "Cosa è cambiato" | niente | storia git completa |
@@ -95,13 +97,13 @@ stesse che ti servono se vuoi adattarlo.
 
 ### MCP — Model Context Protocol
 
-Il protocollo con cui Claude parla con strumenti esterni. Un server MCP espone
+Il protocollo con cui il modello parla con strumenti esterni. Un server MCP espone
 dei **tool**: funzioni con un nome, dei parametri tipizzati e una descrizione.
-Claude legge le descrizioni e decide da solo quando chiamarli.
+Il modello legge le descrizioni e decide da solo quando chiamarli.
 
 Questo ha una conseguenza che governa tutto il design: **la descrizione di ogni
 tool viaggia in testa a ogni richiesta**, sempre, anche quando non ne usi
-nessuno — e arriva *isolata*, letta senza le altre venti sotto gli occhi. Per
+nessuno — e arriva *isolata*, letta senza il resto della superficie sotto gli occhi. Per
 questo i tool non si moltiplicano per gusto, e per questo il lavoro è diviso:
 la descrizione porta solo ciò che evita un danno quando il manuale non è stato
 letto, mentre tutto ciò che richiede il quadro d'insieme sta in
@@ -112,7 +114,7 @@ gli umani sta in questo README, che non costa niente a nessuno.
 
 L'implementazione Python del protocollo. Gestisce il trasporto HTTP, la
 serializzazione degli schemi e — la parte che vale davvero — l'intera danza
-**OAuth 2.1 con Dynamic Client Registration e PKCE**, che è quello che Claude
+**OAuth 2.1 con Dynamic Client Registration e PKCE**, che è quello che un client
 pretende da un connettore remoto. Scriverla a mano sarebbe stato il grosso del
 lavoro.
 
@@ -156,11 +158,21 @@ accorge e committa quelle modifiche **a parte**, con un messaggio onesto, prima
 di eseguire la propria. I commit dei tool restano puri e la storia non mente
 nemmeno per sbaglio.
 
-### Docker su Unraid
+### Docker
 
 Il container parte come root solo per sistemare i permessi, poi **lascia i
 privilegi** e gira come `nobody:users` con umask 000, così i file restano
 accessibili anche dalle share SMB.
+
+Quattro impostazioni stanno nell'immagine come `ENV` invece che nel codice,
+perché FastMCP le legge quando viene *importato* — troppo presto perché
+`server.py` possa dire la sua. Tre servono solo a far stare zitto l'avvio; la
+quarta, `FASTMCP_CHECK_FOR_UPDATES=off`, toglie una **chiamata in uscita a ogni
+boot** per chiedere qual è l'ultima versione. Su un servizio che pinna la
+propria versione di proposito, quella chiamata non compra niente e contraddice
+la frase in cima a questa pagina. Un controllo statico verifica che ci siano
+ancora tutte e quattro: perderne una non fallirebbe, cambierebbe soltanto il
+comportamento in silenzio.
 
 ### Preflight bloccante
 
@@ -177,15 +189,15 @@ rifiuta di partire dicendoti perché, di uno che parte e funziona male.
 ## Architettura
 
 ```
-   Claude (server Anthropic)
+   Il modello (in cloud)
         │  HTTPS + OAuth 2.1 (DCR + PKCE)
         ▼
    Tailscale Funnel  ──►  https://<host>.<tailnet>.ts.net
         │  (nello stesso container)
         ▼
-   127.0.0.1:3000   server.py  ── 21 tool MCP
+   127.0.0.1:3000   server.py  ── i tool MCP
         │                        ├─ filtro identità GitHub
-        │                        └─ filtro IP sorgente (lista)
+        │                        └─ filtro IP sorgente
         ▼
    vault.py  ── VaultRoot (dataset, chiavi)  ──►  Dataset (file + git)
         │
@@ -274,8 +286,8 @@ che le ricopierai a mano.
 `640` con owner `99:100`: il servizio legge, il resto del mondo no. **Non**
 root-only — il servizio non gira come root e non riuscirebbe ad aprirlo.
 
-Il file viene **riletto a caldo**: aggiungi o togli una riga dall'editor di
-Unraid e ha effetto subito, senza riavviare niente.
+Il file viene **riletto a caldo**: aggiungi o togli una riga da un file manager
+e ha effetto subito, senza riavviare niente.
 
 Sta dentro il vault ma è irraggiungibile dai tool, perché il suo nome non è
 quello di un dataset — lo ferma lo stesso controllo che ferma `..` e `.git`.
@@ -283,13 +295,24 @@ quello di un dataset — lo ferma lo stesso controllo che ferma `..` e `.git`.
 </details>
 
 <details>
-<summary><b>5 · Costruire l'immagine</b></summary>
+<summary><b>5 · L'immagine</b></summary>
+
+Due strade, e il template prende la prima.
+
+**Usare l'immagine pubblicata.** Ogni tag `v*` fa girare la suite e poi pubblica
+su `ghcr.io/alcor6502/archivist-mcp`; un tag che non passa non diventa
+un'immagine. `archivist-mcp.xml` punta già lì, quindi non c'è niente da
+costruire.
+
+**Oppure costruirla**, da un clone sul server:
 
 ```sh
-mkdir -p /mnt/user/appdata/archivist-mcp/src
-# copia qui i file del pacchetto, poi:
-docker build --no-cache -t archivist-mcp /mnt/user/appdata/archivist-mcp/src
+docker build --no-cache -t archivist-mcp /percorso/del/clone
 ```
+
+Poi cambia `Repository` nel template in `archivist-mcp`, altrimenti Unraid tira
+giù l'immagine pubblicata sopra quella che hai appena costruito, e non te lo
+dice nessuno. Non costruirla su un Mac Apple Silicon: verrebbe arm64.
 
 ⚠ **`--no-cache` non è pedanteria.** La cache di Docker ha già mentito almeno una
 volta, dichiarando `CACHED` uno strato il cui file era cambiato. Ci si perde
@@ -335,6 +358,30 @@ Ogni campo ha la sua descrizione nell'interfaccia; qui il riassunto.
 | `PORT` | `3000` |
 | `ALLOWED_CIDRS` | `160.79.104.0/21 # documented egress of the model provider` |
 
+Se aggiorni da una versione precedente non devi fare niente su `ALLOWED_CIDRS`:
+il nome precedente `ANTHROPIC_CIDR` è deprecato ma ancora onorato, quindi un
+container già in esercizio continua a funzionare senza toccarlo.
+
+**Sotto Show more settings**
+
+| Variabile | Valore |
+|---|---|
+| `LOG_LEVEL` | `INFO`, oppure `WARNING` per un log silenzioso. Nient'altro: vedi sotto |
+| `VAULT_UID` / `VAULT_GID` | `99` / `100` — `nobody:users`, il proprietario giusto per i file di share |
+
+`LOG_LEVEL` governa il logger di questo servizio e nient'altro: il logger root,
+il log degli accessi e FastMCP sono impostati altrove. `INFO` stampa, una volta,
+quello che ha trovato all'avvio — i dataset con il loro stato, il registro delle
+chiavi, e la riga con versione, URL pubblico, utente ammesso e filtro IP: è
+quella che si legge per confermare che un aggiornamento è andato a segno.
+`WARNING` le silenzia e lascia i rifiuti. Il menù non offre altro di proposito:
+sotto `INFO` non c'è niente da accendere, e sopra `WARNING` spariscono i
+rifiuti, che sono l'unica riga capace di distinguere un estraneo respinto da un
+deployment rotto.
+
+Il servizio ascolta sul loopback dentro il container, e non è una manopola: il
+traffico legittimo arriva dal Funnel, che gira nello stesso container.
+
 **Tailscale**: Enabled `true`, Hostname `<host>`, Serve `funnel`, Serve Port
 **uguale a `PORT`**, State Dir `/var/lib/tailscale`.
 
@@ -347,13 +394,13 @@ configurazione vecchia; solo Apply lo ricrea leggendo il template aggiornato.
 <summary><b>7 · Primo avvio e collegamento</b></summary>
 
 Nei log del container devi vedere, in ordine: l'init dei repo git per dataset, la
-sistemazione dei permessi, il drop dei privilegi, il **preflight 10/10**, e infine
-l'avvio del server.
+sistemazione dei permessi, il drop dei privilegi, il **preflight tutto verde**, e
+infine l'avvio del server.
 
 Se il preflight blocca, il messaggio dice quale controllo e perché. Non è un
 avviso: il servizio non è partito.
 
-Poi, in Claude: **Impostazioni → Connettori → Aggiungi connettore personalizzato**,
+Poi, nel client: **Impostazioni → Connettori → Aggiungi connettore personalizzato**,
 URL `https://<host>.<tailnet>.ts.net/mcp`. Si apre il login GitHub, autorizzi, e i
 tool compaiono.
 
@@ -380,12 +427,32 @@ in contesto.
 Ci sono **tre livelli di cache**: il server, il connettore e la sessione di chat.
 
 Dopo qualunque cambiamento alla superficie dei tool — nomi, parametri, docstring —
-serve **disconnettere e riconnettere il connettore** in Claude, e collaudare **in
+serve **disconnettere e riconnettere il connettore**, e collaudare **in
 una chat nuova**. Se salti questo passo vedrai i tool vecchi e penserai che il
 deploy non abbia funzionato.
 
 Le modifiche interne al comportamento (limiti, formati, logica) non cambiano la
 superficie: basta ricreare il container.
+
+</details>
+
+<details>
+<summary><b>9 · Aggiornare</b></summary>
+
+Un rilascio è un tag `v*`. Il workflow fa girare prima la suite e solo dopo
+costruisce e pubblica, quindi un tag che non passa non diventa un'immagine.
+
+Il registry non bussa: Unraid lo scopre se glielo si chiede. **Check for
+Updates** nella pagina Docker, poi si applica l'aggiornamento proposto. Dopo,
+si legge la riga di avvio nel log: porta la versione, ed è così che si sa che
+sta girando l'immagine nuova e non quella vecchia che è ripartita.
+
+Se l'aggiornamento ha cambiato la superficie dei tool, serve anche il punto 8.
+
+**La via di ritorno** costa un campo: il tag precedente è ancora sul registry,
+quindi lo si mette in `Repository` al posto di `:latest` e si fa Apply. Non si
+muove nient'altro — il vault, i token e l'identità Tailscale vivono tutti fuori
+dall'immagine.
 
 </details>
 
@@ -406,7 +473,7 @@ superficie: basta ricreare il container.
 ⚠ Il template che Unraid salva in
 `/boot/config/plugins/dockerMan/templates-user/` contiene i segreti **in chiaro**
 anche per i campi mascherati. Quel backup è materiale sensibile: la copia
-condivisibile è il template sanitizzato del pacchetto.
+condivisibile è il template sanitizzato di questo repo.
 
 </details>
 
@@ -415,7 +482,7 @@ condivisibile è il template sanitizzato del pacchetto.
 
 - **La cache di Docker mente.** Sempre `--no-cache` dopo aver toccato i sorgenti.
 - **Restart ≠ Apply.** Restart riusa la configurazione vecchia.
-- **`mkstemp` crea a 600 ignorando l'umask.** Il codice fa `chmod 666` esplicito
+- **`mkstemp` crea a 0600 ignorando l'umask.** Il codice fa `chmod 666` esplicito
   dopo ogni scrittura atomica, altrimenti i file nuovi non sarebbero scrivibili da
   SMB.
 - **`git` e il *dubious ownership*.** L'entrypoint dichiara `safe.directory` prima
@@ -442,17 +509,17 @@ Il preflight dice quale controllo è fallito. I più frequenti:
 
 | Controllo | Cosa guardare |
 |---|---|
-| `dataset` | il mount del vault è sbagliato, o punta a una cartella vuota |
+| `datasets` | il mount del vault è sbagliato, o punta a una cartella vuota |
 | `git` | i repository non ci sono ancora: rilancia, li crea il boot |
-| `chiavi` | `keys.txt` non è leggibile da `99:100`, o una riga non ha il TAB |
-| `oauth` | una variabile è ancora `CAMBIAMI`, o `BASE_URL` non è https |
+| `keys` | `keys.txt` non è leggibile da `99:100`, o una riga non ha il TAB |
+| `oauth` | una variabile è ancora `CHANGEME`, o `BASE_URL` non è https |
 | `token_store` | `FASTMCP_HOME` non è sotto `/data`: i token non sopravvivrebbero |
 | `funnel` | il Funnel non è attivo, o pubblica una porta diversa da `PORT` |
-| `chiave_nodo` | la chiave del nodo ha una scadenza attiva |
-| `dns_pubblico` | l'hostname di `BASE_URL` non risolve |
+| `node_key` | la chiave del nodo ha una scadenza attiva |
+| `public_dns` | l'hostname di `BASE_URL` non risolve |
 
 Per collaudare saltando i controlli di rete:
-`PREFLIGHT_SKIP="funnel,chiave_nodo,dns_pubblico"`. Mai in esercizio.
+`PREFLIGHT_SKIP="funnel,node_key,public_dns"`. Mai in esercizio.
 
 </details>
 
@@ -495,7 +562,7 @@ andato.
 ## Guida d'uso
 
 <details>
-<summary><b>Le cinque regole</b></summary>
+<summary><b>Le regole</b></summary>
 
 **1. Ogni tool restituisce un verdetto, non un dump.** Il ritorno è un oggetto
 piccolo con dentro i fatti: sha, conteggi, byte, hash del commit. Il contenuto
@@ -565,7 +632,7 @@ da 80 KB è la differenza fra una chiamata leggera e una pesante.
 </details>
 
 <details>
-<summary><b>I 21 tool</b></summary>
+<summary><b>I tool</b></summary>
 
 Ogni tool di livello dataset prende `dataset` per primo, e `path` relativo a
 quello; un `path` vuoto significa tutto il dataset. `key` è accettato da tutti e
@@ -893,7 +960,7 @@ sono un confine fra progetti, non una difesa contro un attaccante. Quella è OAu
 | File | |
 |---|---|
 | `vault.py` | il motore: `VaultRoot` e `Dataset` |
-| `server.py` | i 21 tool MCP; i parametri nello schema, la prosa nella guida |
+| `server.py` | i tool MCP; i parametri nello schema, la prosa nella guida |
 | `preflight.py` | i controlli bloccanti d'avvio, e il parser del filtro IP |
 | `reference-guide.md` | la guida compatta servita da `reference_guide()` |
 | `entrypoint.sh` | init, permessi, drop privilegi, preflight, avvio |
