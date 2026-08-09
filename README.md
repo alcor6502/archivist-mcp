@@ -1,6 +1,6 @@
 # Archivist MCP <img align="right" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 
-<img src="https://img.shields.io/badge/version-2.0.0-blue.svg"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-21%20tools-8A63D2.svg">
+<img src="https://img.shields.io/github/v/tag/alcor6502/archivist-mcp?label=version&color=blue"> <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white"> <img src="https://img.shields.io/badge/Unraid-7-F15A2C.svg"> <img src="https://img.shields.io/badge/MCP-21%20tools-8A63D2.svg">
 
 **A document vault Claude can read and write, git-versioned on every write,
 self-hosted on your own server.**
@@ -300,7 +300,7 @@ keys, dropping protected datasets — and they are the ones that matter most.
 <details>
 <summary><b>6 · The container</b></summary>
 
-Import `archivist-mcp.template.xml` into Unraid, or create the container by
+Import `archivist-mcp.xml` into Unraid, or create the container by
 hand. Every field carries its own description in the UI; here is the summary.
 
 **Paths**
@@ -568,7 +568,7 @@ before yours — that is information, not an error.
 
 ```
 vault_status()
-→ {"vault": "ok", "version": "2.0.0",
+→ {"vault": "ok", "version": "…",
    "guide": "call reference_guide() for the manual",
    "datasets": [{"name": "Example Project", "state": "open"},
                 {"name": "Ledger",          "state": "locked"}]}
@@ -579,7 +579,7 @@ vault_status()
 
 ```
 reference_guide()
-→ {"version": "2.0.0", "guide": "# Archivist MCP — manual\n\n## THE MODEL\n…"}
+→ {"version": "…", "guide": "# Archivist MCP — manual\n\n## THE MODEL\n…"}
 ```
 
 **`dataset_create(name)`** — a new dataset: open, empty, its own git.
@@ -877,7 +877,7 @@ between projects, not a defence against an attacker. That is what OAuth is for.
 | `reference-guide.md` | the compact guide served by `reference_guide()` |
 | `entrypoint.sh` | init, permissions, privilege drop, preflight, start |
 | `Dockerfile` · `requirements.txt` | the image |
-| `archivist-mcp.template.xml` | Unraid template, every field documented |
+| `archivist-mcp.xml` | Unraid template, every field documented |
 | `test_vault.py` | the engine checks, no network needed |
 
 ## Licence and credits

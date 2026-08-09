@@ -155,7 +155,7 @@ Written with `X` for the dataset. `key` goes on every call to a locked one.
 | `the file does not exist` | the opposite: pass `"new"` |
 | `old_text NOT found` | re-read and copy the fragment exactly, spaces and newlines included |
 | `old_text found N times` | widen the context until it is unique |
-| `path not allowed` | there is a `..` or a `.git` in the path |
+| `path not allowed` | a segment is `..`, `.git`, or a lockfile: those names never appear in a path |
 | `destination already exists` | `move_path` never overwrites: choose another name |
 | `more than 3000 files` | go one level deeper with `path` |
 | `block too large` | `append` is not for rewrites: `write_file` |

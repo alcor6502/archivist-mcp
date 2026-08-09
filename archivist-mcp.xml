@@ -14,7 +14,7 @@
   <Overview>Self-hosted MCP server that exposes a document vault to an LLM client as a connector, with per-dataset git versioning and key-based access control. The vault root holds DATASETS (top-level directories), each with its own git repository: a dataset listed in the key registry is protected and requires its key on every call, one without a line is open. Access via OAuth 2.1 with GitHub login restricted to a single user, published by Tailscale Funnel.</Overview>
   <Category>Productivity: Tools:Utilities</Category>
   <WebUI/>
-  <TemplateURL>https://raw.githubusercontent.com/alcor6502/archivist-mcp/main/archivist-mcp.template.xml</TemplateURL>
+  <TemplateURL>https://raw.githubusercontent.com/alcor6502/archivist-mcp/main/archivist-mcp.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/alcor6502/archivist-mcp/main/archivist-icon.png</Icon>
   <ExtraParams>--restart=unless-stopped</ExtraParams>
   <PostArgs>entrypoint.sh</PostArgs>
