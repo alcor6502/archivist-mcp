@@ -52,7 +52,7 @@ from fastmcp.server.middleware import Middleware, MiddlewareContext
 from preflight import cidrs_from_env, describe_cidrs
 from vault import VaultRoot, VaultError
 
-VERSION = "2.0.1"
+VERSION = "2.1.0"
 
 # The ROOT logger stays at WARNING. It used to be INFO, which switched on INFO
 # for every library loaded, not for ours: that is where the noise came from.
@@ -113,15 +113,39 @@ mcp = FastMCP("archivist-mcp", auth=auth)
 
 
 class Gate(Middleware):
-    """Two filters, before anything else: the GitHub identity and the source IP."""
+    """Two filters, before anything else: the GitHub identity and the source IP.
+    The XFF header is filled in by the Funnel, which is the trusted proxy.
+
+    It hooks `on_request`, which covers EVERY message that expects an answer —
+    `initialize` and `tools/list` as much as `tools/call`. Until v2.0 it hooked
+    `on_call_tool`, and the hole that left was narrow but real: a stranger who
+    completed the OAuth flow with their own GitHub account got a valid token,
+    and with it could list the twenty-one tools with their descriptions. Every
+    call was refused, so no data leaked — but the shape of the surface did, and
+    a surface nobody can enumerate is one nobody can study.
+
+    Not `on_message`, which is one level wider: it also covers NOTIFICATIONS,
+    which are fire-and-forget. Raising there has no channel to answer on, so it
+    buys undefined behaviour instead of security — a notification reads nothing.
+
+    The refusals are LOGGED, and that is not decoration. Once the gate covers
+    the handshake, a refused stranger and a broken deployment produce the same
+    symptom at the client: "the connector will not connect". The log line is the
+    only thing that tells the two apart."""
+
+    HOOK = "on_request"   # pinned by a static check: a typo here disables the
+                          # gate in silence, because the base class supplies a
+                          # default for every hook name that does exist.
 
     def __init__(self) -> None:
         self.nets = [ipaddress.ip_network(c) for c, _ in ALLOWED_CIDRS]
 
-    async def on_call_tool(self, ctx: MiddlewareContext, call_next):
+    async def on_request(self, ctx: MiddlewareContext, call_next):
         tok = get_access_token()
         login = (tok.claims.get("login") if tok and tok.claims else None)
         if login != ALLOWED_LOGIN:
+            log.warning("refused %s: GitHub login %r is not %r",
+                        ctx.method, login, ALLOWED_LOGIN)
             raise ValueError("user not authorised")
         if self.nets:
             req = get_http_request()
@@ -132,6 +156,8 @@ class Gate(Middleware):
                 if ip is None or not any(ip in n for n in self.nets):
                     raise ValueError("origin not allowed")
             except ValueError:
+                log.warning("refused %s: source %r outside the allowed ranges",
+                            ctx.method, src)
                 raise ValueError("origin not allowed")
         return await call_next(ctx)
 

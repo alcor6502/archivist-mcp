@@ -124,6 +124,14 @@ The service has no users of its own: it delegates login to GitHub and then
 **refuses anyone who is not the single configured username**. Anyone on GitHub
 can *attempt* to log in; the refusal comes from the server, not from GitHub.
 
+Since **v2.1 the refusal covers every request, the handshake included**: a
+stranger who authenticates with their own GitHub account does not open a session
+at all, and never sees that the tools exist. Until v2.0 the filter ran on tool
+calls only, so a valid but unauthorised token could still list the tools with
+their descriptions — no data, but the shape of the surface. Refusals are logged
+with the method and the reason, because from the client a refused stranger and a
+broken deployment produce the same symptom: the connector will not connect.
+
 Why GitHub rather than a password: a password on an exposed service is a secret
 living in plaintext somewhere with no revocation. An OAuth identity has expiry,
 revocation and no client-side secret.

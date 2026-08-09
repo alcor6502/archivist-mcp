@@ -179,6 +179,49 @@ def single_door_check() -> None:
     ok(checked >= 14, "the single-door check covered the path-taking tools", checked)
 
 
+def gate_hook_check() -> None:
+    """The Gate is wired by NAMING a hook, and that is the whole danger: the
+    Middleware base class ships a pass-through default for every hook it knows,
+    so `on_requst` — one letter short — is not an error. It is a method nobody
+    ever calls, and the gate is off. Nothing fails, nothing logs, and the server
+    happily answers a stranger. There is no runtime test that would notice,
+    because the tests never build a FastMCP server: this reads the source.
+
+    Two things are pinned, and they are different things. `HOOK` pins the
+    DECISION — `on_request`, chosen in v2.1 over the narrower `on_call_tool`
+    (which let a stranger enumerate the tools) and over the wider `on_message`
+    (which also covers notifications, where raising has no channel to answer
+    on). The method set pins the WIRING: exactly one hook, and its name equal
+    to HOOK. Change the decision and this test has to be changed too, on
+    purpose — which is the point."""
+    tree = ast.parse((HERE / "server.py").read_text(encoding="utf-8"))
+    gate = next((n for n in tree.body
+                 if isinstance(n, ast.ClassDef) and n.name == "Gate"), None)
+    if gate is None:
+        ok(False, "server.py defines the Gate middleware")
+        return
+
+    declared = next((s.value.value for s in gate.body
+                     if isinstance(s, ast.Assign)
+                     and any(getattr(t, "id", "") == "HOOK" for t in s.targets)
+                     and isinstance(s.value, ast.Constant)), None)
+    ok(declared == "on_request", "Gate.HOOK pins the decision: on_request", declared)
+
+    hooks = {n.name for n in gate.body
+             if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))
+             and n.name.startswith("on_")}
+    ok(hooks == {declared}, "the Gate hooks exactly what HOOK names", sorted(hooks))
+
+    src = (HERE / "server.py").read_text(encoding="utf-8")
+    ok("mcp.add_middleware(Gate())" in src, "the Gate is actually registered")
+    # A refused request and a broken deployment look identical at the client.
+    # The log line is the only thing that tells them apart, so it is part of
+    # the contract, not of the comfort.
+    body = ast.get_source_segment(src, gate) or ""
+    ok(body.count("log.warning") >= 2,
+       "both refusals are logged, identity and origin", body.count("log.warning"))
+
+
 def dockerfile_env_check() -> None:
     """FastMCP reads its settings when it is IMPORTED, so they cannot be set
     from inside server.py — they live in the Dockerfile as ENV. That makes them
@@ -522,6 +565,9 @@ def main() -> int:
 
         print("\n[14] the Dockerfile still quiets FastMCP down")
         dockerfile_env_check()
+
+        print("\n[14b] the Gate is wired to the hook it claims")
+        gate_hook_check()
 
         print("\n[15] the IP filter list, in both directions")
         cidr_checks()

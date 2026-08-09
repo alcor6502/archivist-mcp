@@ -122,6 +122,14 @@ Il servizio non ha utenti propri: delega il login a GitHub e poi **rifiuta
 chiunque non sia l'unico username configurato**. Chiunque su GitHub può *tentare*
 il login; il no lo dice il server, non GitHub.
 
+Dalla **v2.1 il rifiuto copre ogni richiesta, handshake compreso**: un estraneo
+che si autentica col proprio account GitHub non apre nemmeno la sessione, e non
+vede che i tool esistono. Fino alla v2.0 il filtro girava solo sulle chiamate ai
+tool, quindi un token valido ma non autorizzato poteva comunque elencarli con le
+loro descrizioni — nessun dato, ma la forma della superficie. I rifiuti vengono
+loggati con metodo e ragione, perché dal client un estraneo respinto e un
+deployment rotto danno lo stesso sintomo: il connettore non si collega.
+
 Perché GitHub e non una password: una password su un servizio esposto è un
 segreto che vive in chiaro da qualche parte e non ha revoca. Un'identità OAuth ha
 scadenza, revoca e nessun segreto lato client.
