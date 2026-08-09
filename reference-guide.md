@@ -163,8 +163,7 @@ Each has a right answer that already exists.
   `dataset` and moves inside it; there is no second dataset to move to.
   `read_file` in one, `write_file` in the other.
 - **Do not put the dataset name at the head of `path`.** It is refused, and the
-  message names the prefix to drop. Repeating it is the shape of a caller
-  written against an older version of this server.
+  message names the prefix to drop. The dataset travels in `dataset`, once.
 - **Do not retry a `CONFLICT` unchanged.** The refusal is information: someone
   wrote after you read. Re-read, reconcile, then retry.
 - **Do not paste a whole file into `edit_file` as `old_text`.** If the fragment
