@@ -297,18 +297,17 @@ def guide_signature_check() -> None:
     ghosts = re.findall(r"(?<![\w.])(status|drop|create)\s*\(", guide)
     ok(not ghosts, "the guide names no bare verb that is not a tool", sorted(set(ghosts)))
 
-    # The two READMEs document the same surface at greater length, and they are
-    # what a stranger reads before installing anything. They spell each tool in
-    # bold WITHOUT `key`, which is explained once for all of them, so that one
+    # The README documents the same surface at greater length, and it is what a
+    # stranger reads before installing anything. It spells each tool in bold
+    # WITHOUT `key`, which is explained once for all of them, so that one
     # parameter is dropped before comparing. Quotes are normalised because Python
     # renders defaults with single quotes and the prose uses double ones: that is
     # a difference in typography, and a test that fails on typography gets
     # switched off.
     bare = [re.sub(r", key='[^']*'", "", r).replace("'", '"') for r in real]
-    for name in ("README.md", "README.it.md"):
-        text = (HERE / name).read_text(encoding="utf-8").replace("'", '"')
-        absent = [s for s in bare if f"**`{s}`**" not in text]
-        ok(not absent, f"{name} spells every tool with its exact signature", absent)
+    readme = (HERE / "README.md").read_text(encoding="utf-8").replace("'", '"')
+    absent = [s for s in bare if f"**`{s}`**" not in readme]
+    ok(not absent, "README.md spells every tool with its exact signature", absent)
 
     # The limits are the other kind of number the documents copy by hand, and
     # the one a caller plans around: told 2 MB when the real ceiling is 1, they

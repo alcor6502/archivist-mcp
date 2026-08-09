@@ -9,7 +9,12 @@ No data leaves your machine except towards the conversation that asked for it.
 Every change is a commit. Nothing is deleted by accident, and what is deleted
 can be recovered.
 
-🇮🇹 [Leggi in italiano](README.it.md)
+*An Italian translation was maintained until `v2.1.0` and is still readable at
+that tag. It was dropped rather than left to rot: the sweep that ended it found
+seven divergences, and all seven were on the Italian side — including a command
+that skipped nothing because the names it passed had been translated too. Two
+files of prose cannot be kept honest by a test, and one that is wrong is worse
+than one that is missing, because it gets believed.*
 
 ---
 
