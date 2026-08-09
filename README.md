@@ -376,7 +376,7 @@ access log and FastMCP are set elsewhere. `INFO` prints, once, what was found at
 boot — the datasets and their state, the key registry, and the line with
 version, public URL, allowed user and IP filter — which is what you read to
 confirm that an update actually took. `WARNING` silences those and leaves the
-refusals. The dropdown offers no more than that on purpose: below `INFO` there
+refusals. The list is closed on purpose: below `INFO` there
 is nothing to switch on, and above `WARNING` the refusals go silent, which is
 the one line that tells a stranger turned away apart from a broken deployment.
 
@@ -451,8 +451,9 @@ image is the one running rather than the old one restarting.
 If the update changed the tool surface, do step 8 as well.
 
 **The way back** costs one field: the previous tag is still on the registry, so
-put it in `Repository` in place of `:latest` and Apply. Nothing else moves —
-the vault, the tokens and the Tailscale identity all live outside the image.
+put it in `Repository` in place of `:latest` and Apply. It is a change of
+surface like any other, so step 8 applies to it too. Nothing else moves: the
+vault, the tokens and the Tailscale identity all live outside the image.
 
 </details>
 
@@ -613,9 +614,15 @@ changes from outside were committed separately before yours.
 | know when something changed, and get its hash | `history` | — |
 | read text | `read_file` | — |
 | read a PDF or a binary | `read_binary` (needs a sandbox) | — |
-| read a whole tree at once | `archive` (needs a sandbox) | — |
+| read a whole tree at once | `archive` (needs a sandbox, mind `pattern`) | — |
 | read how it was before | `read_at` | — |
 | see what changed between two moments | `diff` | — |
+| make a new, empty dataset | `dataset_create` | — |
+| roll a whole dataset back to a revision | `dataset_restore` | the manifest |
+| empty `Trash/` before a date | `trash_purge` | — |
+| destroy a dataset | `dataset_drop` | the manifest |
+| which datasets exist, and which are locked | `vault_status` | — |
+| the manual itself | `reference_guide` | — |
 
 `append` needs no sha because it **never touches existing bytes**: no conflict is
 possible, so there is nothing to protect. It is the right operation for logs and
@@ -879,6 +886,7 @@ trash_purge("Example Project", "2026-06-01")
 | `diff` | 60 KB (truncates, does not fail) |
 | `archive` input | 30 MB uncompressed |
 | `archive` output | 5 MB of tgz |
+| datasets in the vault | 200 |
 
 The binary limits are calibrated on actual consumption: a file larger than 2 MB
 is not usable inside a conversation anyway. A talking refusal beats a silent
@@ -899,8 +907,11 @@ create a document:    write_file(X, path, content, "new")
 archive something:    move_path(X, "doc.md", "Trash/doc.md")
 find something:       search(X, "term") → read_file on the right file only
 recover content:      history → read_at(X, path, hash) → write_file
-compare two moments:  manifest before, manifest after — equal means nothing moved
-full audit:           manifest → list_files → archive → verify hashes → manifest
+did anything move:    manifest before, manifest after — equal means no
+compare two moments:  diff(X, "HEAD~5", path="a.md", rev_b="HEAD")
+full audit:           manifest → list_files → archive(X, pattern="*") → manifest
+find by expression:   search(X, "^## ", regex=True)
+destroy a dataset:    manifest → dataset_drop(X, manifest_sha256)
 copy across datasets: read_file("A", "x.md") → write_file("B", "x.md", …, "new")
 ```
 
@@ -920,10 +931,13 @@ copy across datasets: read_file("A", "x.md") → write_file("B", "x.md", …, "n
 | `the file does not exist` | the opposite: pass `"new"` |
 | `old_text NOT found` | re-read and copy the exact fragment |
 | `old_text found N times` | widen the context until it is unique |
-| `path not allowed` | there is a `..` or `.git` in the path |
+| `path not allowed` | a segment is `..`, `.git`, or a lockfile: those names never appear in a path |
 | `destination already exists` | `move_path` never overwrites |
 | `more than 3000 files` | go one level deeper |
 | `block too large` | `append` is not for rewrites |
+| `too many datasets` | the vault is full at 200: nothing to widen |
+| `has a key and cannot be dropped` | take its line out of the key registry on the server first |
+| `CONFLICT: expected manifest ...` | someone wrote after you looked: re-read the manifest, then retry |
 
 A failing tool never leaves a partial write.
 

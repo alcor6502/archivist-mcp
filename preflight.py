@@ -95,6 +95,31 @@ def cidrs_from_env() -> list[tuple[str, str]]:
     return parse_cidrs(raw)
 
 
+LOG_LEVELS = ("INFO", "WARNING")
+
+
+def log_level_from_env() -> tuple[str, str | None]:
+    """The log level as configured, resolved in one place only — same reason
+    cidrs_from_env lives here: what the service does and what the preflight
+    reports must come from one expression, not two that agree today.
+
+    Returns the level to use and, when the value had to be corrected, the value
+    that was given, so the caller can say so out loud. A silent fallback on a
+    knob someone deliberately turned is how you get told the feature is broken.
+
+    Why correct at all instead of raising: logging.setLevel() raises on an
+    unknown level, and it runs at IMPORT — after a clean preflight, which is the
+    worst place in the whole startup for a typo to land. The template offers a
+    closed list, but a container built by hand has no template and the field is
+    optional, so "defined and empty" is a gesture a person actually makes."""
+    given = os.environ.get("LOG_LEVEL", "").strip().upper()
+    if not given:
+        return "INFO", None
+    if given in LOG_LEVELS:
+        return given, None
+    return "INFO", given
+
+
 def describe_cidrs(parsed: list[tuple[str, str]]) -> str:
     """What was UNDERSTOOD, not what was given. The way this breaks is mute: a
     comma in place of a semicolon and a range disappears without a word."""

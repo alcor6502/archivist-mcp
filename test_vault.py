@@ -244,6 +244,44 @@ def dockerfile_env_check() -> None:
         ok(f"ENV {var}={val}" in df, f"Dockerfile sets {var}={val}")
 
 
+def log_level_checks() -> None:
+    """logging.setLevel() raises on an unknown level, and it runs at import —
+    after the preflight has printed a clean sheet. So the one way to get a
+    container that dies in a loop with no useful message was to leave the
+    optional LOG_LEVEL field empty, which the Unraid dropdown does not prevent
+    and a hand-built container has no dropdown for at all.
+
+    Both directions: the two real levels survive untouched, and everything else
+    falls back to INFO while REPORTING what it rejected. The reporting is the
+    part worth testing — a knob that silently ignores you is how you get told
+    the feature is broken."""
+    from preflight import log_level_from_env
+    for value, expect_level, expect_rejected in (
+            (None, "INFO", None),          # not defined at all
+            ("", "INFO", None),            # defined and empty: the crash case
+            ("   ", "INFO", None),         # whitespace only
+            ("INFO", "INFO", None),
+            ("WARNING", "WARNING", None),
+            ("warning", "WARNING", None),  # case is typography, not intent
+            (" info ", "INFO", None),
+            ("DEBUG", "INFO", "DEBUG"),    # inert here: there are no debug lines
+            ("ERROR", "INFO", "ERROR"),    # would silence the gate's refusals
+            ("WARN", "INFO", "WARN"),      # the plausible typo
+            ("INF0", "INFO", "INF0")):
+        old = os.environ.pop("LOG_LEVEL", None)
+        try:
+            if value is not None:
+                os.environ["LOG_LEVEL"] = value
+            got = log_level_from_env()
+        finally:
+            os.environ.pop("LOG_LEVEL", None)
+            if old is not None:
+                os.environ["LOG_LEVEL"] = old
+        ok(got == (expect_level, expect_rejected),
+           f"LOG_LEVEL={value!r} resolves to {expect_level} "
+           f"{'and says what it rejected' if expect_rejected else 'silently'}", got)
+
+
 def guide_signature_check() -> None:
     """The manual travels inside the image and is served by reference_guide(),
     so it is read by the caller far more often than the code is. A manual that
@@ -263,32 +301,58 @@ def guide_signature_check() -> None:
     src = (HERE / "server.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
 
-    def rendered(fn: ast.FunctionDef) -> str:
+    def rendered(fn) -> str:
         pad = [None] * (len(fn.args.args) - len(fn.args.defaults))
         parts = [a.arg if d is None else f"{a.arg}={ast.unparse(d)}"
                  for a, d in zip(fn.args.args, pad + list(fn.args.defaults))]
         return f"{fn.name}({', '.join(parts)})"
 
+    def is_tool(fn) -> bool:
+        # Both spellings, because both work: @mcp.tool is an Attribute and
+        # @mcp.tool(name=…) is a Call wrapping it. Matching only the first would
+        # skip a tool in silence, which is the exact failure this test exists to
+        # prevent — it would go missing from the manual and nothing would fail.
+        for d in fn.decorator_list:
+            node = d.func if isinstance(d, ast.Call) else d
+            if (isinstance(node, ast.Attribute) and node.attr == "tool"
+                    and isinstance(node.value, ast.Name) and node.value.id == "mcp"):
+                return True
+        return False
+
     real = [rendered(n) for n in tree.body
-            if isinstance(n, ast.FunctionDef)
-            and any(isinstance(d, ast.Attribute) and d.attr == "tool"
-                    and isinstance(d.value, ast.Name) and d.value.id == "mcp"
-                    for d in n.decorator_list)]
-    ok(bool(real), "the AST finds the tools at all", len(real))
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and is_tool(n)]
+
+    # `mcp.tool` appears once per tool in the source and nowhere else. If the AST
+    # walk and a plain count of the decorator disagree, the walk is missing some
+    # and every check below is being run on a subset.
+    ok(len(real) == src.count("@mcp.tool"),
+       "the AST sees every tool the file declares", f"{len(real)} vs {src.count('@mcp.tool')}")
 
     guide = (HERE / "reference-guide.md").read_text(encoding="utf-8")
-    names = {r.split("(", 1)[0] for r in real}
-    written = [ln.strip() for ln in guide.splitlines()
-               if ln.startswith("    ") and ln.strip().split("(", 1)[0] in names
-               and ln.strip().endswith(")")]
+
+    # Anchored to the block, not scattered over the file. Scanning the whole
+    # manual would let a recipe line pose as a signature, and — worse — would
+    # keep passing if the block itself were deleted.
+    block = guide.split("## EVERY CALL, IN FULL", 1)
+    ok(len(block) == 2, "the manual still has the block of signatures")
+    body = block[1].split("\n## ", 1)[0] if len(block) == 2 else ""
+    written = [ln.strip() for ln in body.splitlines()
+               if ln.startswith("    ") and ln.strip().endswith(")")]
 
     missing = [r for r in real if r not in written]
     ok(not missing, "every tool is in the guide with its exact signature", missing)
 
-    # The other direction, which is the one that rots silently: a signature that
-    # stays in the manual after the tool changed under it.
+    # The other direction, which is the one that rots silently: a line left in
+    # the manual for a tool that was renamed or deleted. This compares the whole
+    # block, so such a line has nowhere to hide — filtering it by the names the
+    # code still has would have made this check unable to see it.
     stale = [w for w in written if w not in real]
     ok(not stale, "the guide promises no signature the code does not have", stale)
+
+    # The manual states that `key` is always last, and a caller passing it
+    # positionally depends on that being true. It is a promise, so it is checked.
+    misplaced = [r for r in real if "key=" in r and not r.endswith("key='')")]
+    ok(not misplaced, "`key` really is the last parameter everywhere", misplaced)
 
     # Named in prose but never declared: the reader is sent to a door that is
     # not there. `status()` is the one that actually happened — it reads like a
@@ -311,23 +375,28 @@ def guide_signature_check() -> None:
 
     # The limits are the other kind of number the documents copy by hand, and
     # the one a caller plans around: told 2 MB when the real ceiling is 1, they
-    # build a call that fails. The prose keeps its human form — nobody wants to
-    # read 2000000 — so the test renders the constant the way a person writes it
-    # and looks for that string. Both files, both languages.
+    # build a call that fails. The number is RENDERED from the constant into the
+    # form a person writes, and then the whole table ROW is looked for — row and
+    # all, because "2 MB" on its own is satisfied three times over by a single
+    # occurrence, and a wrong row would sail through. There is no second copy of
+    # any number here: change vault.py and this expects the new value.
     import vault as _v
-    limits = [("MAX_READ_BYTES", _v.MAX_READ_BYTES, 2_000_000, "2 MB"),
-              ("MAX_WRITE_BYTES", _v.MAX_WRITE_BYTES, 2_000_000, "2 MB"),
-              ("MAX_BINARY_BYTES", _v.MAX_BINARY_BYTES, 2_000_000, "2 MB"),
-              ("MAX_APPEND_BYTES", _v.MAX_APPEND_BYTES, 64_000, "64 KB"),
-              ("MAX_LIST_FILES", _v.MAX_LIST_FILES, 3_000, "3,000"),
-              ("MAX_SEARCH_HITS", _v.MAX_SEARCH_HITS, 200, "200 lines"),
-              ("MAX_DIFF_BYTES", _v.MAX_DIFF_BYTES, 60_000, "60 KB"),
-              ("MAX_ARCHIVE_BYTES", _v.MAX_ARCHIVE_BYTES, 30_000_000, "30 MB"),
-              ("MAX_ARCHIVE_OUT_BYTES", _v.MAX_ARCHIVE_OUT_BYTES, 5_000_000, "5 MB"),
-              ("MAX_DATASETS", _v.MAX_DATASETS, 200, "datasets in the vault | 200")]
-    for const, value, pinned, shown in limits:
-        ok(value == pinned and shown in guide,
-           f"{const} and the line the guide prints for it still agree", value)
+    mb = lambda n: f"{n // 1_000_000} MB"
+    kb = lambda n: f"{n // 1_000} KB"
+    ok(_v.MAX_READ_BYTES == _v.MAX_WRITE_BYTES,
+       "reads and writes share one ceiling, as the single table row claims")
+    rows = [("text file", mb(_v.MAX_READ_BYTES)),
+            ("binary", mb(_v.MAX_BINARY_BYTES)),
+            ("`append` block", kb(_v.MAX_APPEND_BYTES)),
+            ("`list_files`", f"{_v.MAX_LIST_FILES:,} files"),
+            ("`search`", f"{_v.MAX_SEARCH_HITS} lines"),
+            ("`diff`", kb(_v.MAX_DIFF_BYTES)),
+            ("`archive`", f"{mb(_v.MAX_ARCHIVE_BYTES)} in, "
+                          f"{mb(_v.MAX_ARCHIVE_OUT_BYTES)} tgz out"),
+            ("datasets in the vault", f"{_v.MAX_DATASETS}")]
+    for label, shown in rows:
+        ok(f"| {label} | {shown} |" in guide,
+           f"the guide's row for {label} still states what the code enforces", shown)
 
 
 def main() -> int:
@@ -658,6 +727,9 @@ def main() -> int:
 
         print("\n[14c] the manual says what the code actually offers")
         guide_signature_check()
+
+        print("\n[14d] the log level cannot kill the service at import")
+        log_level_checks()
 
         print("\n[15] the IP filter list, in both directions")
         cidr_checks()

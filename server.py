@@ -37,7 +37,8 @@ Environment:
                           read, and failing that the documented egress range
   ANTHROPIC_CIDR          DEPRECATED, still honoured: see ALLOWED_CIDRS
   LOG_LEVEL               level of THIS logger only, INFO or WARNING (default
-                          INFO). Nothing below INFO: there are no debug lines
+                          INFO). Nothing below INFO: there are no debug lines.
+                          Anything else falls back to INFO and says so
   FASTMCP_HOME            token store; set in the Dockerfile, MUST persist
   VAULT_UID / VAULT_GID   service user, dropped to by the entrypoint (99/100)
   PREFLIGHT_SKIP          checks to skip, by name. Testing only
@@ -55,10 +56,10 @@ from fastmcp.server.auth.providers.github import GitHubProvider
 from fastmcp.server.dependencies import get_access_token, get_http_request
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 
-from preflight import cidrs_from_env, describe_cidrs
+from preflight import cidrs_from_env, describe_cidrs, log_level_from_env
 from vault import VaultRoot, VaultError
 
-VERSION = "2.1.0"
+VERSION = "2.2.1"
 
 # The ROOT logger stays at WARNING. It used to be INFO, which switched on INFO
 # for every library loaded, not for ours: that is where the noise came from.
@@ -66,7 +67,15 @@ VERSION = "2.1.0"
 logging.basicConfig(level=logging.WARNING,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("archivist-mcp")
-log.setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
+# Resolved in preflight.log_level_from_env for the same reason as the IP filter:
+# one expression, not two that agree today. The closed list lives THERE and not
+# only in the Unraid template, because a container built by hand has no template
+# — and setLevel() raises on an unknown value, at import, after a clean
+# preflight, which is the worst place in the startup for a typo to land.
+_LEVEL, _REJECTED = log_level_from_env()
+log.setLevel(_LEVEL)
+if _REJECTED:
+    log.warning("LOG_LEVEL=%r is not INFO or WARNING — using INFO", _REJECTED)
 
 # uvicorn's access log is one line per request; a request carries a path, and a
 # path carries dataset and document names. Left on, the log slowly becomes a

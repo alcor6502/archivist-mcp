@@ -34,12 +34,31 @@ jobs:
 
       - run: python3 test_vault.py
 
+      # The tag and the VERSION constant are two places holding the same number,
+      # and on v2.2.0 they diverged: the image was the new one — the manual it
+      # served proved it — and vault_status() still answered 2.1.0. Nothing was
+      # broken, but the single line a deployment is verified by was a lie, which
+      # is worse than a fault that announces itself. The twin paid for exactly
+      # this in its v1.0.2, and nothing here would have caught it.
+      #
+      # Only on a tag: workflow_dispatch has no version to compare against.
+      - name: the version constant matches the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          code=$(python3 -c "import re,pathlib; print(re.search(r'^VERSION = \"([^\"]+)\"', pathlib.Path('server.py').read_text(), re.M).group(1))")
+          echo "tag: $tag — server.py: $code"
+          if [ "$tag" != "$code" ]; then
+            echo "::error::tag $tag but server.py says $code — bump VERSION before tagging"
+            exit 1
+          fi
+
   image:
     needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write        # l'unico permesso necessario
+      packages: write        # the only permission needed
     steps:
       - uses: actions/checkout@v7
 

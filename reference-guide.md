@@ -38,8 +38,9 @@ key registry on the server, never from a tool.
 ## EVERY CALL, IN FULL
 
 Names, order and defaults, exactly as the server declares them. A static check
-compares this block against the code at every build, so it cannot drift: if the
-two ever disagree, the build fails rather than the guide lying.
+compares this block against the code before any image is published, so it
+cannot drift: if the two ever disagree, the release fails rather than the guide
+lying.
 
     vault_status()
     reference_guide()
