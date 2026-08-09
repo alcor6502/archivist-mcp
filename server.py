@@ -38,9 +38,12 @@ Environment:
   LOG_LEVEL               level of THIS service's logger only (default INFO).
                           The root logger, uvicorn.access and fastmcp are set
                           elsewhere and do not follow it. WARNING silences the
-                          three boot lines and keeps the refusals; DEBUG is
-                          indistinguishable from INFO, because there are no
-                          debug lines to switch on
+                          boot lines and keeps the refusals. The template offers
+                          INFO and WARNING and nothing else, in both directions:
+                          below INFO there is nothing to switch on, since there
+                          are no debug lines, and above WARNING the refusals go
+                          silent. An unknown value raises here, at import, AFTER
+                          a green preflight
 """
 from __future__ import annotations
 
