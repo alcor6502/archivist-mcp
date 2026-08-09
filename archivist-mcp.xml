@@ -17,6 +17,7 @@
   <TemplateURL>https://raw.githubusercontent.com/alcor6502/archivist-mcp/main/archivist-mcp.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/alcor6502/archivist-mcp/main/archivist-icon.png</Icon>
   <ExtraParams>--restart=unless-stopped</ExtraParams>
+  <PostArgs/>
   <CPUset/>
   <DonateText/>
   <DonateLink/>
