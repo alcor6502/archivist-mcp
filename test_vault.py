@@ -270,48 +270,118 @@ def lock_discipline_check() -> None:
     ok(writers >= 6, "the check found the writers it is meant to police", writers)
 
 
+def _engine_pkg_dir():
+    """Where the INSTALLED engine lives, or None. The checks that used to read
+    the local Gate and the local decorator now read the engine's files: the pin
+    in requirements.txt decides what those files say, so a stale or doctored
+    engine goes red here instead of misbehaving in a chat."""
+    import importlib.util
+    spec = importlib.util.find_spec("mcp_common_engine")
+    return Path(spec.origin).parent if spec and spec.origin else None
+
+
+def _sole_import(tree, name: str, module: str) -> None:
+    """The name is bound exactly once, by ONE module-level `from <module>
+    import <name>`, and never bound to anything else afterwards.
+
+    Python gives the name to whatever was bound last, in silence. A second
+    `class Gate` further down, `Gate = _NoGate` on the line above the
+    registration, `tool = mcp.tool` before the first `@tool` — each leaves the
+    true binding in place for a reader to find and hands the running server
+    the other one. All of them were executed on one twin or the other, and
+    every suite stayed green until this shape of check existed."""
+    imports = [n for n in tree.body if isinstance(n, ast.ImportFrom)
+               and n.module == module
+               and any((a.asname or a.name) == name for a in n.names)]
+    ok(len(imports) == 1,
+       f"server.py imports `{name}` from {module}, exactly once, at module level",
+       len(imports))
+    other = []
+    for n in ast.walk(tree):
+        hit = False
+        if isinstance(n, (ast.Import, ast.ImportFrom)) and n not in imports:
+            hit = any((a.asname or a.name.split(".")[0]) == name for a in n.names)
+        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            hit = n.name == name
+        elif isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign,
+                            ast.NamedExpr, ast.For)):
+            hit = any(isinstance(x, ast.Name) and x.id == name
+                      and isinstance(x.ctx, ast.Store) for x in ast.walk(n))
+        elif isinstance(n, ast.Global):
+            hit = name in n.names
+        if hit:
+            other.append(ast.unparse(n)[:50])
+    ok(not other, f"and the name `{name}` is never bound to anything else", other)
+
+
 def gate_hook_check() -> None:
-    """The Gate is wired by NAMING a hook, and that is the whole danger: the
-    Middleware base class ships a pass-through default for every hook it knows,
-    so `on_requst` — one letter short — is not an error. It is a method nobody
-    ever calls, and the gate is off. Nothing fails, nothing logs, and the server
-    happily answers a stranger. There is no runtime test that would notice,
-    because the tests never build a FastMCP server: this reads the source.
+    """The Gate lives in the engine since 2.5.0, and it is wired by NAMING a
+    hook: the Middleware base class ships a pass-through default for every hook
+    it knows, so `on_requst` — one letter short — is not an error. It is a
+    method nobody ever calls, and the gate is off. Nothing fails, nothing logs,
+    and the server happily answers a stranger. No runtime test would notice,
+    because the tests never build a FastMCP server: this reads the source —
+    server.py for the seam, the INSTALLED engine for the class. The checks that
+    guarded the local class did not retire with it; they changed address.
 
-    Two things are pinned, and they are different things. `HOOK` pins the
-    DECISION — `on_request`, chosen in v2.1 over the narrower `on_call_tool`
-    (which let a stranger enumerate the tools) and over the wider `on_message`
-    (which also covers notifications, where raising has no channel to answer
-    on). The method set pins the WIRING: exactly one hook, and its name equal
-    to HOOK. Change the decision and this test has to be changed too, on
-    purpose — which is the point."""
+    What stays ours is the seam: WHICH Gate arrives, that it is registered
+    exactly once, and that it is built with OUR config injected — the engine
+    reads no module globals of anybody's, so forgetting a keyword here is a
+    gate with somebody else's filter."""
     tree = ast.parse((HERE / "server.py").read_text(encoding="utf-8"))
-    gate = next((n for n in tree.body
-                 if isinstance(n, ast.ClassDef) and n.name == "Gate"), None)
-    if gate is None:
-        ok(False, "server.py defines the Gate middleware")
-        return
 
-    declared = next((s.value.value for s in gate.body
-                     if isinstance(s, ast.Assign)
-                     and any(getattr(t, "id", "") == "HOOK" for t in s.targets)
-                     and isinstance(s.value, ast.Constant)), None)
-    ok(declared == "on_request", "Gate.HOOK pins the decision: on_request", declared)
+    _sole_import(tree, "Gate", "mcp_common_engine.gate")
+
+    # Read from the AST, never from the text. `"mcp.add_middleware(" in src`
+    # stays green on a commented-out registration — the single most likely way
+    # that line ever disappears: somebody comments it out while chasing
+    # something else. A comment does not exist in the tree.
+    registered = [n for n in ast.walk(tree)
+                  if isinstance(n, ast.Call)
+                  and ast.unparse(n.func) == "mcp.add_middleware"]
+    ok(len(registered) == 1, "the Gate is registered, exactly once", len(registered))
+    if registered:
+        arg = registered[0].args[0] if registered[0].args else None
+        ok(isinstance(arg, ast.Call) and ast.unparse(arg.func) == "Gate",
+           "and what is registered is a Gate(...) call, not a stand-in",
+           ast.unparse(arg)[:60] if arg is not None else "no argument")
+        kw = ({k.arg: ast.unparse(k.value) for k in arg.keywords}
+              if isinstance(arg, ast.Call) else {})
+        ok(kw == {"log": "log", "allowed_login": "ALLOWED_LOGIN",
+                  "allowed_cidrs": "ALLOWED_CIDRS"},
+           "built with OUR logger, OUR login and OUR filter, injected — the "
+           "engine reads no globals, so a missing keyword is not a default, "
+           "it is a TypeError at boot or a gate around the wrong door", kw)
+
+    pkg = _engine_pkg_dir()
+    ok(pkg is not None, "mcp_common_engine is installed where the suite runs")
+    if pkg is None:
+        return
+    gtree = ast.parse((pkg / "gate.py").read_text(encoding="utf-8"))
+    gates = [n for n in gtree.body
+             if isinstance(n, ast.ClassDef) and n.name == "Gate"]
+    ok(len(gates) == 1, "the engine defines Gate exactly once", len(gates))
+    if len(gates) != 1:
+        return
+    gate = gates[0]
+    ok(any(ast.unparse(b) == "Middleware" for b in gate.bases),
+       "the engine's Gate subclasses Middleware, which is what makes a hook a hook",
+       [ast.unparse(b) for b in gate.bases])
+
+    # ALL the assignments, not the first: a second `HOOK = ...` underneath is
+    # what wins at runtime.
+    assigned = [s.value.value for s in gate.body
+                if isinstance(s, ast.Assign)
+                and any(getattr(t, "id", "") == "HOOK" for t in s.targets)
+                and isinstance(s.value, ast.Constant)]
+    declared = assigned[-1] if assigned else None
+    ok(assigned == ["on_request"],
+       "Gate.HOOK pins the decision: on_request, assigned exactly once", assigned)
 
     hooks = {n.name for n in gate.body
              if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))
              and n.name.startswith("on_")}
     ok(hooks == {declared}, "the Gate hooks exactly what HOOK names", sorted(hooks))
-
-    # Read from the AST, never from the text. `"mcp.add_middleware(Gate())" in
-    # src` stays green on `#mcp.add_middleware(Gate())` — which is the single
-    # most likely way that line ever disappears: somebody comments it out while
-    # chasing something else. A comment does not exist in the tree.
-    registered = [n for n in ast.walk(tree)
-                  if isinstance(n, ast.Call)
-                  and ast.unparse(n.func) == "mcp.add_middleware"
-                  and n.args and ast.unparse(n.args[0]) == "Gate()"]
-    ok(len(registered) == 1, "the Gate is registered, exactly once", len(registered))
 
     hook = next((n for n in gate.body
                  if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))
@@ -333,46 +403,37 @@ def gate_hook_check() -> None:
 
         # A refused request and a broken deployment look identical at the
         # client. The log line is the only thing that tells them apart, so it
-        # is part of the contract, not of the comfort. Counted on the tree, for
-        # the same reason as above: a commented-out call would satisfy text.
+        # is part of the contract, not of the comfort.
         warns = [n for n in ast.walk(hook) if isinstance(n, ast.Call)
-                 and ast.unparse(n.func) == "log.warning"]
+                 and ast.unparse(n.func) == "self.log.warning"]
         ok(len(warns) >= 2,
            "both refusals are logged, identity and origin", len(warns))
+        ok(all(any(ast.unparse(a) == "ctx.method" for a in w.args) for w in warns),
+           "and each refusal names the method it turned away")
 
 
 def tool_conversion_check() -> None:
     """Every tool goes through the @tool decorator, and the decorator really
-    converts.
+    converts. Since 2.5.0 the decorator is built by the ENGINE's make_tool;
+    what stays here is the BINDING — which class is a refusal and which is a
+    fault is the one thing the engine cannot know.
 
-    This is the same trade as the single-door check: the guarantee rests on how
-    server.py is WRITTEN, and nothing at runtime would notice a tool that
-    skipped it. One tool left on a bare @mcp.tool is one tool whose designed
-    refusals still print twenty-five lines of traceback at ERROR — and being
-    the one nobody thought about, it is the one that never gets tested. The
-    log of 2026-Aug-09 is what this exists to keep from coming back: three
-    refusals, three tracebacks, two of them CONFLICTs on edit_file, which is
-    the CAS doing its job and being logged as a fault.
+    The check changed SUBJECT with the move, exactly as the engine's docstring
+    demands, and it was rewritten BEFORE the copies were stripped. The old law
+    was "one `def tool`, never rebound" — and `tool = make_tool(...)` is an
+    ASSIGNMENT, the very shape that law forbade, because `tool = mcp.tool`
+    registers every tool naked while every counter keeps agreeing. The new
+    law: the name `tool` is bound exactly once, at module level, to a call of
+    make_tool from the engine, with OUR classes, and to nothing else, ever.
 
-    The decorator's own shape is pinned too, because each piece of it is load
-    bearing and each one is silent when removed:
-      - `functools.wraps` is what keeps the MCP schema intact. FastMCP builds
-        name, docstring and signature from the function and follows
-        __wrapped__ to find them; without it the whole surface changes and
-        every client has to reconnect.
-      - `from None` is the point of the exercise: a chained traceback is
-        exactly what we are taking out of the log.
-      - `log_level` below ERROR is the other half. Converting to ToolError and
-        leaving the level at ERROR would change the number of lines and
-        nothing else.
-      - our OWN log line, at INFO, because FastMCP's does not reach the
-        container's log at all: the Dockerfile sets FASTMCP_LOG_LEVEL=WARNING,
-        so an INFO record from fastmcp.server.server is dropped before it is
-        printed. Without this line the change trades twenty-five lines for
-        none. INFO and not WARNING is a decision, not a detail: WARNING is
-        where the Gate logs a stranger turned away, and mixing a CONFLICT in
-        there costs the one signal that tells a refused stranger from a broken
-        deployment.
+    The wrapper's shape — functools.wraps, `from None`, the INFO line, the
+    fault branch FIRST — is still pinned piece by piece, read from the
+    INSTALLED engine's refusals.py: the pin in requirements.txt decides what
+    those files say, so a stale or doctored engine goes red here instead of
+    misbehaving in a chat. The log of 2026-Aug-09 is what all of it exists to
+    keep from coming back: three refusals, three tracebacks of twenty-five
+    lines, two of them CONFLICTs on edit_file — the CAS doing its job, logged
+    as a fault.
 
     A tool that lost its decorator ALTOGETHER is caught elsewhere and on
     purpose: it stops being a tool, so guide_signature_check() sees its
@@ -381,52 +442,92 @@ def tool_conversion_check() -> None:
     src = (HERE / "server.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
 
-    # ONE `def tool`, and nowhere else in the file. A second one further down
-    # wins for every function defined after it — and they are ALL defined after
-    # it, so three lines left behind while chasing something else would empty
-    # the whole MCP surface with the suite green.
-    convs = [n for n in ast.walk(tree)
-             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-             and n.name == "tool"]
-    ok(len(convs) == 1, "server.py defines the @tool decorator exactly once",
-       len(convs))
-    if not convs:
-        return
-    conv = convs[0]
+    _sole_import(tree, "make_tool", "mcp_common_engine.refusals")
 
-    # WHAT it registers, and WHICH function that name really points at.
-    #
-    # Reading the decorator with ast.walk only asks that the pieces be WRITTEN
-    # somewhere inside it. Move the try/except into a nested function nobody
-    # calls, reduce the wrapper to `return fn(...)`, and every check below
-    # passes on a conversion that does not exist. So the order is: find the
-    # registration, take the NAME it hands over, and analyse THAT function.
-    registers = [n for n in ast.walk(conv) if isinstance(n, ast.Call)
-                 and ast.unparse(n.func) == "mcp.tool"]
-    ok(len(registers) == 1, "and registers with mcp.tool exactly once", len(registers))
-    registered = (ast.unparse(registers[0].args[0])
-                  if registers and registers[0].args else "")
-    ok(registered.isidentifier(),
-       "handing it a function by name, not an expression", registered or "no argument")
+    # The name `tool` is bound EXACTLY once, and every kind of binding counts:
+    # def, class, import, assignment in any form, global, walrus, for-target.
+    # Python gives the name to whatever was bound last, without saying so.
+    binds = []
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) \
+                and n.name == "tool":
+            binds.append(n)
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            if any((a.asname or a.name.split(".")[0]) == "tool" for a in n.names):
+                binds.append(n)
+        elif isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign,
+                            ast.NamedExpr, ast.For)):
+            if any(isinstance(x, ast.Name) and x.id == "tool"
+                   and isinstance(x.ctx, ast.Store) for x in ast.walk(n)):
+                binds.append(n)
+        elif isinstance(n, ast.Global) and "tool" in n.names:
+            binds.append(n)
+    ok(len(binds) == 1, "`tool` is bound exactly once in server.py",
+       [ast.unparse(n)[:60] for n in binds])
+    bind = binds[0] if len(binds) == 1 else None
+    ok(isinstance(bind, ast.Assign) and bind in tree.body,
+       "and that binding is the one assignment, at module level",
+       ast.unparse(bind)[:60] if bind is not None else "absent")
+    if isinstance(bind, ast.Assign):
+        val = bind.value
+        ok(isinstance(val, ast.Call) and isinstance(val.func, ast.Name)
+           and val.func.id == "make_tool",
+           "and it is a call of make_tool — `tool = mcp.tool` is the naked door",
+           ast.unparse(val)[:60])
+        if isinstance(val, ast.Call):
+            pos = [ast.unparse(a) for a in val.args]
+            kw = {k.arg: ast.unparse(k.value) for k in val.keywords}
+            ok(pos == ["mcp", "log"]
+               and kw == {"refusal": "VaultError", "fault": "VaultFault"},
+               "with our server, our logger, VaultError as the refusal and "
+               "VaultFault as the fault — swapped, every fault takes the "
+               "quiet path", f"{pos} {kw}")
 
-    # And the name must not be re-pointed on the way. `guarded = fn` one line
-    # above the return is this very check's own defect, wearing the name the
-    # check looks for.
-    rebound = [ast.unparse(t) for s in ast.walk(conv) if isinstance(s, ast.Assign)
-               for t in s.targets if isinstance(t, ast.Name) and t.id == registered]
-    ok(not rebound, f"and `{registered or '?'}` is never reassigned", rebound)
+    # `mcp.tool` is never called in server.py at all now: the one legitimate
+    # call lives inside the engine's make_tool. Any occurrence here is a tool
+    # that converts nothing.
+    naked = [ast.unparse(n)[:60] for n in ast.walk(tree) if isinstance(n, ast.Call)
+             and ast.unparse(n.func) == "mcp.tool"]
+    ok(not naked, "`mcp.tool` is never called in server.py — the one call "
+                  "lives inside the engine's make_tool", naked)
 
-    inner = next((n for n in ast.walk(conv)
-                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-                  and n.name == registered), None)
-    ok(inner is not None, f"and `{registered or '?'}` is a function defined inside it")
-    if inner is None:
-        return
+    # THE WRAPPER, read from the installed engine — not from a local copy that
+    # no longer exists, and not trusted to the tag's name alone.
+    pkg = _engine_pkg_dir()
+    ok(pkg is not None, "mcp_common_engine is installed where the suite runs")
+    guarded = None
+    if pkg is not None:
+        rtree = ast.parse((pkg / "refusals.py").read_text(encoding="utf-8"))
+        makes = [n for n in rtree.body
+                 if isinstance(n, ast.FunctionDef) and n.name == "make_tool"]
+        ok(len(makes) == 1, "the engine defines make_tool exactly once", len(makes))
+        factory = makes[0] if makes else None
+        if factory is not None:
+            guarded = next((n for n in ast.walk(factory)
+                            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                            and n.name == "guarded"), None)
+            ok(guarded is not None, "the engine's factory defines its wrapper, `guarded`")
+            rebound = [ast.unparse(n) for n in ast.walk(factory)
+                       if isinstance(n, ast.Assign)
+                       and any(getattr(t, "id", "") == "guarded" for t in n.targets)]
+            ok(not rebound, "`guarded` is only ever the def, never reassigned —"
+               " `guarded = fn` is this very check's own defect, wearing the "
+               "name the check looks for", rebound)
+            registers = [n for n in ast.walk(factory) if isinstance(n, ast.Call)
+                         and ast.unparse(n.func) == "mcp.tool"]
+            ok(len(registers) == 1 and registers[0].args
+               and ast.unparse(registers[0].args[0]) == "guarded",
+               "and it registers the WRAPPED function, not the bare one",
+               [ast.unparse(n)[:40] for n in registers])
 
     # From here on, everything is read out of the function that is REGISTERED.
     # One try, in its body — not somewhere in the subtree, which is how a dead
-    # branch gets to answer for a live one.
-    tries = [s for s in inner.body if isinstance(s, ast.Try)]
+    # branch gets to answer for a live one. In the engine the two classes are
+    # the factory's PARAMETERS, `fault` and `refusal`; the binding above is
+    # what makes them VaultFault and VaultError here.
+    if guarded is None:
+        return
+    tries = [s for s in guarded.body if isinstance(s, ast.Try)]
     ok(len(tries) == 1, "which wraps the call in exactly one try/except", len(tries))
     if not tries:
         return
@@ -436,22 +537,18 @@ def tool_conversion_check() -> None:
 
     handlers = tries[0].handlers
     caught = [ast.unparse(h.type) if h.type is not None else "*" for h in handlers]
-    ok("VaultError" in caught, "the decorator catches VaultError", caught)
+    ok("refusal" in caught, "the wrapper catches the refusal class", caught)
 
     # The ORDER, which is the whole distinction and is invisible once written:
-    # VaultFault SUBCLASSES VaultError, so `except VaultError` placed first
-    # would swallow every fault into the quiet path and nothing would look
-    # wrong. Python has no warning for this; the test is the warning.
-    # The ORDER, which is the whole distinction and is invisible once written:
-    # VaultFault SUBCLASSES VaultError, so `except VaultError` placed first
-    # would swallow every fault into the quiet path and nothing would look
-    # wrong. Python has no warning for this; the test is the warning. Taken
-    # from the handlers of the ONE try above, not from the first match in the
-    # subtree — a decoy handler written higher up would answer for it.
-    ok(caught[:1] == ["VaultFault"],
-       "and it catches VaultFault FIRST, or the subclass never gets its turn",
+    # the fault SUBCLASSES the refusal, so the refusal caught first would
+    # swallow every fault into the quiet path and nothing would look wrong.
+    # Python has no warning for this; the test is the warning. Taken from the
+    # handlers of the ONE try above, not from the first match in the subtree —
+    # a decoy handler written higher up would answer for it.
+    ok(caught[:1] == ["fault"],
+       "and it catches the fault FIRST, or the subclass never gets its turn",
        caught)
-    fault_h = [h for h in handlers if ast.unparse(h.type or ast.Constant(0)) == "VaultFault"]
+    fault_h = [h for h in handlers if ast.unparse(h.type or ast.Constant(0)) == "fault"]
     ok(fault_h and all(isinstance(s, ast.Raise) and s.exc is None
                        for h in fault_h for s in h.body),
        "and it lets a fault rise untouched: traceback at ERROR, as before 2.3.0")
@@ -474,7 +571,7 @@ def tool_conversion_check() -> None:
     # `raise X from None` parses as cause=Constant(None) — not as no cause at
     # all, which is what a bare `raise X` gives you. Read from the handler that
     # actually converts.
-    conv_h = [h for h in handlers if ast.unparse(h.type or ast.Constant(0)) == "VaultError"]
+    conv_h = [h for h in handlers if ast.unparse(h.type or ast.Constant(0)) == "refusal"]
     ok(conv_h and all(any(isinstance(n, ast.Raise) and isinstance(n.cause, ast.Constant)
                           and n.cause.value is None for n in ast.walk(h))
                       for h in conv_h),
@@ -488,9 +585,9 @@ def tool_conversion_check() -> None:
        "at INFO: WARNING is the Gate's height, and a CONFLICT is not a warning",
        sorted({ast.unparse(n.func) for n in logged}))
 
-    ok(any(ast.unparse(d) == "functools.wraps(fn)" for d in inner.decorator_list),
+    ok(any(ast.unparse(d) == "functools.wraps(fn)" for d in guarded.decorator_list),
        "and functools.wraps ON THE REGISTERED FUNCTION, or it loses its schema",
-       [ast.unparse(d) for d in inner.decorator_list])
+       [ast.unparse(d) for d in guarded.decorator_list])
 
     # ---- the census, over the WHOLE tree ----
     def names_tool(d) -> bool:
@@ -506,8 +603,6 @@ def tool_conversion_check() -> None:
     bare = [n.name for n in ast.walk(tree) if is_func(n)
             and any(ast.unparse(d).startswith("mcp.tool") for d in n.decorator_list)]
     ok(not bare, "no tool is registered with a bare @mcp.tool", bare)
-    ok(len(registers) == 1 and not bare,
-       "`mcp.tool` is reached from exactly one place in the file")
 
     # The decorator is NEVER called as a function. This one expression closes
     # two doors at once: `@tool()` with brackets, which dies at import with a
@@ -625,6 +720,83 @@ def tool_conversion_check() -> None:
     misfiled = [ln.strip() for ln in esrc.splitlines()
                 if "verification failed" in ln and "raise VaultFault" not in ln]
     ok(not misfiled, "every post-write read-back failure is a VaultFault", misfiled)
+
+
+def engine_adoption_check() -> None:
+    """The engine is pinned to a tag, and the pin is what is installed.
+
+    Two repositories pinning a third can pin different tags, and then
+    "identical" quietly becomes "identical if both of them updated". The cure
+    is to compare the number where somebody already looks: here, against the
+    package that actually installed, and on the startup line, next to our own
+    version. Both halves are checked, because each one alone is a number
+    nobody reads twice."""
+    req = (HERE / "requirements.txt").read_text(encoding="utf-8")
+
+    # The tarball form, not git+: the image carries no git dependency for pip,
+    # and a public tarball needs none. One pin, one tag.
+    pins = re.findall(r"^mcp-common-engine @ https://github\.com/alcor6502/"
+                      r"mcp-common-engine/archive/refs/tags/v(\d+\.\d+\.\d+)"
+                      r"\.tar\.gz\s*$", req, re.MULTILINE)
+    ok(len(pins) == 1,
+       "requirements.txt pins the engine to ONE tag, in the tarball form", pins)
+
+    # fastmcp's version is pinned in the ENGINE's pyproject, where the code
+    # that depends on its routing lives. A second pin here would be the same
+    # number in two places, with the expiry date that comes with it.
+    ok(not re.search(r"^fastmcp", req, re.MULTILINE),
+       "fastmcp is not pinned a second time in requirements.txt")
+
+    import importlib.util
+    ok(importlib.util.find_spec("mcp_common_engine") is not None,
+       "mcp_common_engine imports where the suite runs")
+    import mcp_common_engine as eng
+    ok(pins == [eng.VERSION],
+       f"and the engine installed here IS that tag: {eng.VERSION}",
+       f"pin {pins} vs installed {eng.VERSION}")
+
+    tree = ast.parse((HERE / "server.py").read_text(encoding="utf-8"))
+
+    # The startup line carries the engine's version next to our own — the cure
+    # the engine's README names for the drift its pin makes possible.
+    main_block = next((n for n in tree.body if isinstance(n, ast.If)
+                       and ast.unparse(n.test) == "__name__ == '__main__'"), None)
+    ok(main_block is not None, "server.py has the __main__ block")
+    if main_block is not None:
+        infos = [c for c in ast.walk(main_block) if isinstance(c, ast.Call)
+                 and ast.unparse(c.func) == "log.info"]
+        ok(any(any(isinstance(a, ast.Name) and a.id == "ENGINE_VERSION"
+                   for a in c.args) for c in infos),
+           "and the startup line carries ENGINE_VERSION next to VERSION")
+
+    # preflight.py reaches the engine through its ROOT only: the root import
+    # drags no fastmcp in, by the engine's own contract, and that is what lets
+    # a preflight run — and report — on an image where fastmcp is broken.
+    ptree = ast.parse((HERE / "preflight.py").read_text(encoding="utf-8"))
+    pmods = {n.module for n in ast.walk(ptree)
+             if isinstance(n, ast.ImportFrom) and n.module
+             and n.module.startswith("mcp_common_engine")}
+    ok(pmods == {"mcp_common_engine"},
+       "preflight.py imports from the engine's root only — gate and refusals "
+       "would drag fastmcp into the one file that must run without it", pmods)
+
+    # And the moved names are not quietly redefined here: a local def wins
+    # over the import for everything below it, and the twins would drift again
+    # behind an engine nobody actually runs.
+    moved = {"is_placeholder", "parse_cidrs", "cidrs_from_env",
+             "describe_cidrs", "log_level_from_env", "check"}
+    redefined = [n.name for n in ast.walk(ptree)
+                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                 and n.name in moved]
+    ok(not redefined, "none of the moved helpers is redefined in preflight.py",
+       redefined)
+
+    # The CI test job installs what the suite now imports, from the SAME pin:
+    # --no-deps, because the suite needs no FastMCP — that property is what
+    # lets it run in under a minute, and it is not one to give up.
+    wf = (HERE / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
+    ok("pip install --no-deps -r requirements.txt" in wf,
+       "the CI test job installs the engine from the same pin, --no-deps")
 
 
 def dockerfile_env_check() -> None:
@@ -1343,6 +1515,9 @@ def main() -> int:
 
         print("\n[14b2] every tool's refusals go through the converter")
         tool_conversion_check()
+
+        print("\n[14bis] the engine is pinned, installed, and announced")
+        engine_adoption_check()
 
         print("\n[14c] the manual says what the code actually offers")
         guide_signature_check()

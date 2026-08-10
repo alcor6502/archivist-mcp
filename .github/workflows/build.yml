@@ -32,6 +32,11 @@ jobs:
         with:
           python-version: '3.12'
 
+      # The common engine, from the SAME pin the image will use — one number,
+      # one place. --no-deps on purpose: the suite needs no FastMCP, which is
+      # exactly why it can run here in under a minute.
+      - run: pip install --no-deps -r requirements.txt
+
       - run: python3 test_vault.py
 
       # The tag and the VERSION constant are two places holding the same number,

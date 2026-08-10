@@ -1,1 +1,7 @@
-fastmcp==3.4.5
+# The common engine — gate, refusal conversion, config helpers, preflight
+# harness — pinned to a TAG: a tag is a number a check can compare, and
+# test_vault compares it with what actually installed. The tarball form,
+# not git+: a public tarball needs no git at pip time. fastmcp is pinned
+# INSIDE the engine (==3.4.5), where the code that depends on its routing
+# lives — one number, one place.
+mcp-common-engine @ https://github.com/alcor6502/mcp-common-engine/archive/refs/tags/v1.0.0.tar.gz

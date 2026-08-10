@@ -46,23 +46,28 @@ Environment:
 """
 from __future__ import annotations
 
-import functools
-import ipaddress
 import logging
 import os
 import sys
 from pathlib import Path
 
 from fastmcp import FastMCP
-from fastmcp.exceptions import ToolError
 from fastmcp.server.auth.providers.github import GitHubProvider
-from fastmcp.server.dependencies import get_access_token, get_http_request
-from fastmcp.server.middleware import Middleware, MiddlewareContext
 
-from preflight import cidrs_from_env, describe_cidrs, log_level_from_env
+# The engine: gate, refusal conversion, config helpers — the parts the twins
+# had written twice, pinned by tag in requirements.txt. Config comes from the
+# engine's ROOT (same expression the preflight reads, so the two can never
+# disagree); Gate and make_tool from their own modules, which is where the
+# reasoning lives — where the gate hooks and why not one level narrower, why
+# the conversion cannot live in a middleware, why converting without writing
+# your own log line produces NO line rather than one.
+from mcp_common_engine import (VERSION as ENGINE_VERSION, cidrs_from_env,
+                               describe_cidrs, log_level_from_env)
+from mcp_common_engine.gate import Gate
+from mcp_common_engine.refusals import make_tool
 from vault import VaultRoot, VaultError, VaultFault
 
-VERSION = "2.4.0"
+VERSION = "2.5.0"
 
 # The ROOT logger stays at WARNING. It used to be INFO, which switched on INFO
 # for every library loaded, not for ours: that is where the noise came from.
@@ -70,11 +75,12 @@ VERSION = "2.4.0"
 logging.basicConfig(level=logging.WARNING,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("archivist-mcp")
-# Resolved in preflight.log_level_from_env for the same reason as the IP filter:
-# one expression, not two that agree today. The closed list lives THERE and not
-# only in the Unraid template, because a container built by hand has no template
-# — and setLevel() raises on an unknown value, at import, after a clean
-# preflight, which is the worst place in the startup for a typo to land.
+# Resolved in the engine's log_level_from_env for the same reason as the IP
+# filter: one expression, read by this file and by the preflight, not two that
+# agree today. The closed list lives THERE and not only in the Unraid template,
+# because a container built by hand has no template — and setLevel() raises on
+# an unknown value, at import, after a clean preflight, which is the worst
+# place in the startup for a typo to land.
 _LEVEL, _REJECTED = log_level_from_env()
 log.setLevel(_LEVEL)
 if _REJECTED:
@@ -118,7 +124,7 @@ PORT = int(env("PORT", "3000"))
 # BIND_HOST=0.0.0.0 produced a log naming an address nobody listened on. One
 # name, used by both, cannot drift.
 BIND_ADDR = "127.0.0.1"
-# Resolved in preflight.cidrs_from_env so that the service and the preflight
+# Resolved in the engine's cidrs_from_env so that the service and the preflight
 # can never disagree about what the filter is. A malformed entry raises here,
 # which is deliberate: it has already blocked the preflight by this point.
 ALLOWED_CIDRS = cidrs_from_env()
@@ -141,157 +147,32 @@ auth = GitHubProvider(
 mcp = FastMCP("archivist-mcp", auth=auth)
 
 
-def tool(fn):
-    """Register a tool, and turn its refusals into something the log can tell
-    apart from a fault.
-
-    A VaultError is a DESIGNED refusal: a wrong key, a CONFLICT, a path
-    outside the dataset, a file that is not there, a block over the ceiling.
-    Not every error the engine raises is one — git failing on a commit, a
-    short read, a write whose read-back does not match are FAULTS, and they
-    carry VaultFault, which is caught first and left alone. That distinction
-    is not decoration: without it this decorator would have taken a full disk
-    and made it a line starting with the word "refused", which is the defect
-    it exists to close, inverted.
-
-    Left as a plain exception, a refusal is logged by FastMCP through
-    logger.exception. The log of 2026-Aug-09 is what
-    settled it: three refusals, three tracebacks of some twenty-five lines,
-    all under `ERROR: Error calling tool` — and two of the three were CONFLICTs
-    on edit_file, which is the CAS doing exactly its job, two writers on one
-    document and the second turned away with a message telling it what to do.
-    The system working, logged as a failure. The level is ERROR, so
-    LOG_LEVEL=WARNING does not silence them either: they are always there, and
-    after a week of them nobody reads tracebacks any more — the next real fault
-    arrives disguised as routine.
-
-    Raised as ToolError the traceback goes away: FastMCP logs FastMCPError
-    with exc_info=False, at the level the exception carries. A bug still gets
-    the full traceback at ERROR, which is what a bug deserves.
-
-    But FastMCP's own line does not survive the container either, and this was
-    measured rather than assumed: the Dockerfile sets FASTMCP_LOG_LEVEL=WARNING
-    — for the noise, and rightly — so an INFO record from fastmcp.server.server
-    is dropped before it is printed. Converting alone therefore does not turn
-    twenty-five lines into one: it turns them into none, and a refusal that
-    leaves no trace at all is a different bargain from the one being made here.
-    So the line is OURS. It goes on the archivist-mcp logger, which follows
-    LOG_LEVEL and defaults to INFO, and it says more than FastMCP's ever did —
-    which tool, and why it refused:
-
-        INFO archivist-mcp: refused edit_file: CONFLICT: expected sha …
-
-    Deliberately INFO and not WARNING. WARNING is where the Gate logs a
-    stranger turned away, and that line is contractual precisely because it is
-    the only thing that tells a refused stranger from a broken deployment. A
-    CONFLICT — the system working — must not sit at the same height.
-
-    The line carries the message, which carries paths — and uvicorn's access
-    log was switched off a few lines above for exactly that reason. The two are
-    not the same bargain, and the difference is worth writing down: an access
-    log records everything that was READ, and becomes a register of what was
-    looked at and when. This records only what was REFUSED, which is rare, is
-    the thing you are trying to diagnose, and is useless as a register because
-    it is precisely the calls that did not happen. Anyone who disagrees has one
-    knob and it is documented: LOG_LEVEL=WARNING takes the line away.
-
-    THE TRAP, and it cost the codifier an hour: doing this in a Middleware does
-    not work. call_tool applies the middleware chain OUTSIDE and logs INSIDE —
-    the outer call delegates to itself with run_middleware=False, and that
-    inner call is where the try/except lives. By the time a middleware sees the
-    exception, logger.exception has already run. The conversion has to happen
-    inside the tool function, which is here.
-
-    A second reason, and it is a risk rather than a fact: a plain exception is
-    subject to FastMCP's error masking. Today the messages reach the chat
-    intact — the CONFLICT text reads word for word — but that rests on a
-    default. The day it flips, every talking error in the table would arrive as
-    "an error occurred". ToolError messages are passed through by contract.
-
-    functools.wraps is what keeps the MCP contract intact — name, docstring and
-    signature are what FastMCP builds the schema from, and it follows
-    __wrapped__. Verified against fastmcp 3.4.5 by dumping all 21 schemas
-    before and after: parameters, defaults and required lists came out
-    identical, so no client has to reconnect.
-
-    The Gate is NOT part of this and stays as it is: it raises ValueError, its
-    refusals are about identity and origin, and they are logged at WARNING on
-    purpose — a refused stranger and a broken deployment look the same at the
-    client, and that line is the only thing that tells them apart.
-
-    The conversion lives HERE and never in vault.py: the engine must stay
-    importable without FastMCP, which is what lets the suite run with no
-    network, no Docker and no OAuth. test_vault checks that every tool goes
-    through this door, since nothing at runtime would notice one that did
-    not."""
-    @functools.wraps(fn)
-    def guarded(*args, **kwargs):
-        try:
-            return fn(*args, **kwargs)
-        except VaultFault:
-            # A fault is not a refusal, and the ORDER of these two branches is
-            # the whole distinction: VaultFault subclasses VaultError, so
-            # swapping them would swallow every fault into the quiet path.
-            # Left to rise, it keeps the traceback at ERROR — which is what a
-            # broken machine deserves, and it is how it behaved before 2.3.0.
-            raise
-        except VaultError as e:
-            log.info("refused %s: %s", fn.__name__, e)
-            raise ToolError(str(e), log_level=logging.INFO) from None
-    return mcp.tool(guarded)
+# The decorator that turns a designed refusal into ToolError plus ONE log
+# line of our own lives in the engine (mcp_common_engine/refusals.py), with
+# the reasoning: where the trap is (a middleware sees the exception after
+# logger.exception has run), why the fault branch is caught FIRST, and why
+# converting without your own line trades twenty-five lines for none. What
+# stays here is the BINDING, because it is the one thing the engine cannot
+# know: which class is a refusal and which is a fault. Two decisions of ours
+# ride on it and are worth restating at the seam:
+#   - the line goes out at INFO, not WARNING: WARNING is the Gate's height,
+#     and a CONFLICT — the CAS doing its job — must not sit at the same
+#     height as a stranger turned away;
+#   - the line carries the message, which carries paths. uvicorn's access log
+#     was switched off above for exactly that reason; this records only what
+#     was REFUSED, which is rare and is the thing being diagnosed. The knob
+#     is documented: LOG_LEVEL=WARNING takes the line away.
+tool = make_tool(mcp, log, refusal=VaultError, fault=VaultFault)
 
 
-class Gate(Middleware):
-    """Two filters, before anything else: the GitHub identity and the source IP.
-    The XFF header is filled in by the Funnel, which is the trusted proxy.
-
-    It hooks `on_request`, which covers EVERY message that expects an answer —
-    `initialize` and `tools/list` as much as `tools/call`. Until v2.0 it hooked
-    `on_call_tool`, and the hole that left was narrow but real: a stranger who
-    completed the OAuth flow with their own GitHub account got a valid token,
-    and with it could list every tool with its description. Every
-    call was refused, so no data leaked — but the shape of the surface did, and
-    a surface nobody can enumerate is one nobody can study.
-
-    Not `on_message`, which is one level wider: it also covers NOTIFICATIONS,
-    which are fire-and-forget. Raising there has no channel to answer on, so it
-    buys undefined behaviour instead of security — a notification reads nothing.
-
-    The refusals are LOGGED, and that is not decoration. Once the gate covers
-    the handshake, a refused stranger and a broken deployment produce the same
-    symptom at the client: "the connector will not connect". The log line is the
-    only thing that tells the two apart."""
-
-    HOOK = "on_request"   # pinned by a static check: a typo here disables the
-                          # gate in silence, because the base class supplies a
-                          # default for every hook name that does exist.
-
-    def __init__(self) -> None:
-        self.nets = [ipaddress.ip_network(c) for c, _ in ALLOWED_CIDRS]
-
-    async def on_request(self, ctx: MiddlewareContext, call_next):
-        tok = get_access_token()
-        login = (tok.claims.get("login") if tok and tok.claims else None)
-        if login != ALLOWED_LOGIN:
-            log.warning("refused %s: GitHub login %r is not %r",
-                        ctx.method, login, ALLOWED_LOGIN)
-            raise ValueError("user not authorised")
-        if self.nets:
-            req = get_http_request()
-            src = (req.headers.get("x-forwarded-for", "").split(",")[0].strip()
-                   or (req.client.host if req.client else ""))
-            try:
-                ip = ipaddress.ip_address(src) if src else None
-                if ip is None or not any(ip in n for n in self.nets):
-                    raise ValueError("origin not allowed")
-            except ValueError:
-                log.warning("refused %s: source %r outside the allowed ranges",
-                            ctx.method, src)
-                raise ValueError("origin not allowed")
-        return await call_next(ctx)
-
-
-mcp.add_middleware(Gate())
+# The Gate — GitHub identity plus source-IP filter, hooked on `on_request` —
+# lives in the engine (mcp_common_engine/gate.py), with the reasoning about
+# the hook level and the two things it deliberately does not cover. Config is
+# INJECTED: the engine reads no module globals, so what this line hands over
+# is exactly what the startup line prints and the preflight reports. The XFF
+# header is filled in by the Funnel, which is the trusted proxy.
+mcp.add_middleware(Gate(log=log, allowed_login=ALLOWED_LOGIN,
+                        allowed_cidrs=ALLOWED_CIDRS))
 
 _GUIDE = Path(__file__).with_name("reference-guide.md")
 
@@ -483,9 +364,14 @@ def trash_purge(dataset: str, before: str, key: str = "") -> dict:
 
 
 if __name__ == "__main__":
-    log.info("archivist-mcp %s — starting on %s:%s — base_url %s — allowed user: %s "
-             "— IP filter: %s — token store: %s — retention: %s",
-             VERSION, BIND_ADDR, PORT, BASE_URL, ALLOWED_LOGIN, describe_cidrs(ALLOWED_CIDRS),
+    # The engine's version rides next to our own, and it is a cure, not a
+    # decoration: two repositories pinning a third can pin different tags, and
+    # "identical to the twin" quietly becomes "identical if both updated".
+    # This line is where somebody already looks after every Apply.
+    log.info("archivist-mcp %s (engine %s) — starting on %s:%s — base_url %s — "
+             "allowed user: %s — IP filter: %s — token store: %s — retention: %s",
+             VERSION, ENGINE_VERSION, BIND_ADDR, PORT, BASE_URL, ALLOWED_LOGIN,
+             describe_cidrs(ALLOWED_CIDRS),
              os.environ.get("FASTMCP_HOME", "(default — NOT persistent!)"),
              f"{RETENTION} months" if RETENTION else "disabled")
     mcp.run(transport="http", host=BIND_ADDR, port=PORT)
