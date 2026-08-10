@@ -67,7 +67,7 @@ from mcp_common_engine.gate import Gate
 from mcp_common_engine.refusals import make_tool
 from vault import VaultRoot, VaultError, VaultFault
 
-VERSION = "2.5.0"
+VERSION = "2.5.1"
 
 # The ROOT logger stays at WARNING. It used to be INFO, which switched on INFO
 # for every library loaded, not for ours: that is where the noise came from.
@@ -224,7 +224,7 @@ def dataset_status(dataset: str, key: str = "") -> dict:
 @tool
 def list_files(dataset: str, path: str = "", key: str = "") -> dict:
     """Files under `path` with size and sha256, recursive. Same sha means same
-    file. Empty path: the whole dataset."""
+    file. Empty path: the whole dataset. An empty folder does not appear."""
     ds, rel = vault.open(dataset, path, key)
     return ds.list_files(rel)
 

@@ -707,7 +707,9 @@ dataset_status("Example Project")
 ```
 
 **`list_files(dataset, path="")`** — recursive listing with size and sha per
-file. An empty path lists the whole dataset.
+file. An empty path lists the whole dataset. An **empty folder does not
+appear**: git does not keep empty directories, so nothing here can — keep a file
+in a folder that has to stay visible.
 **Returns** `dataset · base · count · files[{path, size, sha256}]`
 (on a single file: `dataset · file · size · sha256`)
 

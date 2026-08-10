@@ -36,6 +36,31 @@ A dataset is born only from `dataset_create` (or by hand on the server) — writ
 a path never creates one — and it becomes locked only when a line is added to the
 key registry on the server, never from a tool.
 
+## FILES, NOT FOLDERS
+
+There is **no tool that makes a directory**, and it is not an omission. This
+vault keeps what git keeps, and git does not keep empty directories: one would
+survive until the next `dataset_restore` or the next clone and then be gone.
+
+So directories are never made on purpose — they appear as a side effect of
+writing a file inside them, and every listing here is a listing of **files**.
+The consequence is worth stating plainly, because it surprises people:
+
+> **An empty folder does not appear anywhere.** Not in `list_files`, not in
+> `manifest`, not in `archive`. It is not hidden — as far as everything that
+> reads this vault is concerned, it is not there.
+
+That matters most for a folder with a **job**: an inbox where material is
+dropped and then processed away, a staging area, anything that is regularly
+emptied. The moment its last file leaves, the folder stops being visible, and
+the next reader cannot tell "the inbox is there and empty, nothing to do" from
+"the inbox does not exist, I am in the wrong place".
+
+**Keep a file in it.** A folder that must stay visible holds one — and the good
+one to hold is a small `README.md` saying what lands there and who processes it.
+It costs one file, it is what git needs anyway, and it turns a folder that
+vanishes into a folder that explains itself.
+
 ## EVERY CALL, IN FULL
 
 Names, order and defaults, exactly as the server declares them. A static check
