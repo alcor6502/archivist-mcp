@@ -488,7 +488,24 @@ class Dataset:
         return data
 
     def _lock(self):
-        fh = open(self._lockfile, "w")
+        """The dataset lock. A fresh open() every time on purpose: flock is tied
+        to the open file description, so two threads sharing one handle would
+        share the lock and serialise nothing.
+
+        The directory can be gone by the time we get here — `drop` takes the
+        dataset away, lockfile included, and a caller who resolved this dataset a
+        moment earlier still holds a handle to it. That race cannot be closed
+        without a global lock on every write, which the dataset design turned
+        down for good reasons. What CAN be fixed is the shape of the failure: a
+        bare FileNotFoundError reaches the log as a fault, with a page of
+        traceback, when the truth is an ordinary refusal — someone dropped the
+        dataset while you were holding the door."""
+        try:
+            fh = open(self._lockfile, "w")
+        except (FileNotFoundError, NotADirectoryError):
+            raise VaultError(
+                f"dataset {self.name!r} is no longer there: it was dropped or removed "
+                "while this call was in flight. Re-read the dataset list and retry.") from None
         fcntl.flock(fh, fcntl.LOCK_EX)
         return fh
 
@@ -508,23 +525,38 @@ class Dataset:
         return r.stdout
 
     def ensure_git(self) -> str:
-        if not (self.root / ".git").is_dir():
-            self._git("init", "-q")
+        """Adoption: give the dataset a repository if it has none, and commit
+        whatever appeared while the server was down.
+
+        Under the lock like every other writer. It was NOT, until 2.4.0, and the
+        reasoning that left it out was sound and still wrong: it runs at boot and
+        on create, so at most once in a dataset's life and never while anything
+        else is going on. But "never while anything else is going on" is a
+        property of today's callers, not of this function — it commits, and a
+        committer outside the lock is a rule with an exception, which is the kind
+        of thing that stops being true quietly. The cost is one flock at boot.
+
+        Order matters where both locks are taken: root first, then dataset —
+        `create` holds the root lock when it lands here, and `drop` takes them in
+        that same order, so no two callers can meet head-on."""
+        with self._lock():
+            if not (self.root / ".git").is_dir():
+                self._git("init", "-q")
+                self._git("config", "user.name", "archivist-mcp")
+                self._git("config", "user.email", "archivist-mcp@localhost")
+                gi = self.root / ".gitignore"
+                if not gi.exists():
+                    gi.write_text(f".DS_Store\n{LOCKFILE}\n", encoding="utf-8")
+                self._git("add", "-A")
+                self._git("commit", "-q", "--allow-empty", "-m", "archivist-mcp: initial commit")
+                return "git repository created, initial commit done"
             self._git("config", "user.name", "archivist-mcp")
             self._git("config", "user.email", "archivist-mcp@localhost")
-            gi = self.root / ".gitignore"
-            if not gi.exists():
-                gi.write_text(f".DS_Store\n{LOCKFILE}\n", encoding="utf-8")
-            self._git("add", "-A")
-            self._git("commit", "-q", "--allow-empty", "-m", "archivist-mcp: initial commit")
-            return "git repository created, initial commit done"
-        self._git("config", "user.name", "archivist-mcp")
-        self._git("config", "user.email", "archivist-mcp@localhost")
-        if self._git("status", "--porcelain").strip():
-            self._git("add", "-A")
-            self._git("commit", "-q", "-m", "external: changes made while the server was down")
-            return "repository present; external changes committed at boot"
-        return "git repository present"
+            if self._git("status", "--porcelain").strip():
+                self._git("add", "-A")
+                self._git("commit", "-q", "-m", "external: changes made while the server was down")
+                return "repository present; external changes committed at boot"
+            return "git repository present"
 
     def _commit_external_if_dirty(self) -> str | None:
         """If the repo is dirty BEFORE a tool operation, those changes came
@@ -846,7 +878,22 @@ class Dataset:
                 "file_count": len(lines), "total_bytes": total,
                 "manifest_sha256": _sha(blob)}
 
-    def archive(self, rel: str = "", pattern: str = "*.md") -> dict:
+    def archive(self, rel: str = "", pattern: str = "*.md", max_chars: int = 0) -> dict:
+        """`max_chars` is the CALLER's ceiling, and it exists because this server
+        cannot know the one that actually matters. The tgz travels as base64
+        inside a tool result, and every client puts a cap on how big a tool
+        result may be; above that cap the client does not truncate, it parks the
+        whole thing in a file and hands over a path — which is useful when that
+        file lands where the caller's code can read it, and useless when it does
+        not. The server knows neither the cap nor where the spill lands. The
+        caller knows both.
+
+        So: 0 (the default) means no ceiling of yours, take the server's. Any
+        positive number means REFUSE rather than produce something bigger, and
+        say how big it would have been — one round trip, nothing wasted, and no
+        constant belonging to somebody else's system baked in here."""
+        if max_chars < 0:
+            raise VaultError("max_chars cannot be negative: use 0 for no ceiling")
         base = self._resolve(rel, must_exist=True)
         buf = io.BytesIO()
         n, total = 0, 0
@@ -869,6 +916,16 @@ class Dataset:
         gz = buf.getvalue()
         if len(gz) > MAX_ARCHIVE_OUT_BYTES:
             raise VaultError(f"tgz is {len(gz)} bytes (max {MAX_ARCHIVE_OUT_BYTES}): narrow path or pattern")
+        # Computed, not measured: base64 is 4 characters for every 3 bytes,
+        # rounded up, and b64encode adds no line breaks. Refusing BEFORE the
+        # encoding means the caller's ceiling costs nothing to enforce — which
+        # is the whole point of asking for it rather than sending and hoping.
+        chars = 4 * ((len(gz) + 2) // 3)
+        if max_chars and chars > max_chars:
+            raise VaultError(
+                f"the archive would be {chars} characters of base64, over the {max_chars} "
+                f"you asked for ({n} files, {total} bytes in): narrow `path` or `pattern`, "
+                "or raise max_chars if your client can take it")
         # Member names are dataset-relative, like every other path that comes
         # back: extracting the tgz reproduces the tree as the dataset holds it,
         # not a directory named after the dataset.
@@ -986,37 +1043,42 @@ class Dataset:
 
         This rewrites the hashes of commits after the threshold. It NEVER
         touches the working tree: in the worst case history is lost, never data.
-        Called only at boot, and only when GIT_RETENTION_MONTHS > 0.
+        Called only at boot, and only when GIT_RETENTION_MONTHS > 0 — and under
+        the lock since 2.4.0, for the same reason as `ensure_git`: "only at
+        boot" is a fact about the caller, not about a function that rewrites
+        history. A static check now requires the lock of anything that commits,
+        so the rule has no exceptions left to forget.
         """
-        if self._git("status", "--porcelain").strip():
-            raise VaultError("working tree not clean: pruning postponed")
-        days = int(months) * 30
-        cutoff = self._git("rev-list", "-1", f"--before={days} days ago", "HEAD",
-                           check=False).strip()
-        if not cutoff:
-            return f"pruning not needed (no commits older than {months} months)"
-        first = self._git("rev-list", "--max-parents=0", "HEAD", check=False).strip().splitlines()
-        if first and cutoff.startswith(first[0][:len(cutoff)]):
-            return "pruning not needed (the threshold falls on the initial commit)"
-        before_n = int(self._git("rev-list", "--count", "HEAD", check=False).strip() or 0)
-        tree = self._git("rev-parse", f"{cutoff}^{{tree}}").strip()
-        date = self._git("log", "-1", "--format=%cs", cutoff).strip()
-        base = subprocess.run(
-            ["git", "-C", str(self.root), "commit-tree", tree, "-m",
-             f"archivist-mcp: history truncated, content as of {date}"],
-            capture_output=True, text=True, timeout=60)
-        if base.returncode != 0:
-            raise VaultError(f"commit-tree failed: {base.stderr.strip()[:200]}")
-        new_base = base.stdout.strip()
-        branch = self._git("rev-parse", "--abbrev-ref", "HEAD").strip()
-        r = subprocess.run(["git", "-C", str(self.root), "rebase", "--onto", new_base, cutoff, branch],
-                           capture_output=True, text=True, timeout=600)
-        if r.returncode != 0:
-            subprocess.run(["git", "-C", str(self.root), "rebase", "--abort"],
-                           capture_output=True, timeout=60)
-            raise VaultError(f"rebase failed, history intact: {r.stderr.strip()[:200]}")
-        self._git("reflog", "expire", "--expire=now", "--all", check=False)
-        self._git("gc", "--prune=now", "-q", check=False, timeout=600)
-        after_n = int(self._git("rev-list", "--count", "HEAD", check=False).strip() or 0)
-        return (f"history pruned: {before_n} -> {after_n} commits "
-                f"({months}-month threshold, content as of {date})")
+        with self._lock():
+            if self._git("status", "--porcelain").strip():
+                raise VaultError("working tree not clean: pruning postponed")
+            days = int(months) * 30
+            cutoff = self._git("rev-list", "-1", f"--before={days} days ago", "HEAD",
+                               check=False).strip()
+            if not cutoff:
+                return f"pruning not needed (no commits older than {months} months)"
+            first = self._git("rev-list", "--max-parents=0", "HEAD", check=False).strip().splitlines()
+            if first and cutoff.startswith(first[0][:len(cutoff)]):
+                return "pruning not needed (the threshold falls on the initial commit)"
+            before_n = int(self._git("rev-list", "--count", "HEAD", check=False).strip() or 0)
+            tree = self._git("rev-parse", f"{cutoff}^{{tree}}").strip()
+            date = self._git("log", "-1", "--format=%cs", cutoff).strip()
+            base = subprocess.run(
+                ["git", "-C", str(self.root), "commit-tree", tree, "-m",
+                 f"archivist-mcp: history truncated, content as of {date}"],
+                capture_output=True, text=True, timeout=60)
+            if base.returncode != 0:
+                raise VaultError(f"commit-tree failed: {base.stderr.strip()[:200]}")
+            new_base = base.stdout.strip()
+            branch = self._git("rev-parse", "--abbrev-ref", "HEAD").strip()
+            r = subprocess.run(["git", "-C", str(self.root), "rebase", "--onto", new_base, cutoff, branch],
+                               capture_output=True, text=True, timeout=600)
+            if r.returncode != 0:
+                subprocess.run(["git", "-C", str(self.root), "rebase", "--abort"],
+                               capture_output=True, timeout=60)
+                raise VaultError(f"rebase failed, history intact: {r.stderr.strip()[:200]}")
+            self._git("reflog", "expire", "--expire=now", "--all", check=False)
+            self._git("gc", "--prune=now", "-q", check=False, timeout=600)
+            after_n = int(self._git("rev-list", "--count", "HEAD", check=False).strip() or 0)
+            return (f"history pruned: {before_n} -> {after_n} commits "
+                    f"({months}-month threshold, content as of {date})")

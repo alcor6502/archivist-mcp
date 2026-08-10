@@ -25,7 +25,8 @@ If it does not answer, stop and say so — do not try the other tools.
 
 **`key` is always the LAST parameter**, after the optional ones. Several tools
 have optionals you may not know about — `search` has `regex`, `history` has `n`,
-`archive` has `pattern`, `diff` has `rev_b` — so a key passed by position lands
+`archive` has `pattern` and `max_chars`, `diff` has `rev_b` — so a key passed by
+position lands
 in the wrong slot and the call fails for a reason that has nothing to do with
 the key. Pass it by name and the question never arises.
 
@@ -55,7 +56,7 @@ lying.
     move_path(dataset, src, dst, key='')
     search(dataset, pattern, path='', regex=False, key='')
     manifest(dataset, path='', key='')
-    archive(dataset, path='', pattern='*.md', key='')
+    archive(dataset, path='', pattern='*.md', max_chars=0, key='')
     read_binary(dataset, path, key='')
     write_binary(dataset, path, content_base64, expected_sha256, key='')
     read_at(dataset, path, rev, key='')
@@ -152,7 +153,8 @@ Each has a right answer that already exists.
 - **Do not read a directory file by file to audit it.** `archive` once — with
   `pattern='*'` if the audit has to see everything, since the default is
   Markdown only — or `manifest` if all you need to know is whether anything
-  changed.
+  changed. A **whole dataset** in one archive is the case to think about first:
+  see the note below on the ceiling that is not this server's.
 - **Do not read files looking for something.** `search` first, then `read_file`
   on the one file that matched. `search` reads text only: a PDF that does not
   come up is not missing — find binaries by name with `list_files`.
@@ -179,8 +181,57 @@ Each has a right answer that already exists.
 | `list_files` | 3,000 files | go one level deeper with `path` |
 | `search` | 200 lines | narrow `path`, or make the pattern precise |
 | `diff` | 60 KB | truncates rather than failing |
-| `archive` | 30 MB in, 5 MB tgz out | narrow `path` or `pattern` |
+| `archive` | 30 MB in, 5 MB tgz out | narrow `path` or `pattern` — **and read the next section: the ceiling that stops you first is your client's** |
 | datasets in the vault | 200 | there is no way past: it is a ceiling, not a page size |
+
+## `archive` AND THE ONE CEILING THAT IS NOT THIS SERVER'S
+
+Every limit in the table above is enforced here, by this server, and every one
+of them fails loudly. There is one more that is not ours, does not appear in the
+table, and is the one you will meet first on a large archive: **the cap your own
+client puts on the size of a tool result.**
+
+Above that cap a client does not truncate. It writes the whole result to a file
+and hands the model a path instead of the data. Whether that is excellent or
+useless depends on something this server cannot see:
+
+| | the result lands | what happens |
+|---|---|---|
+| **A** — under the cap | in the message | works, and costs context |
+| **B** — over it, file lands where your code runs | in your sandbox | works, and costs **no** context |
+| **C** — over it, file lands elsewhere | outside your reach | the data exists and you cannot get it |
+
+Case **B** is the good one, and it is why the 5 MB ceiling here is generous
+rather than mean: the archive never crosses the context at all. Case **C** is
+the trap, and it is not "cloud versus local" — it is only ever about *where the
+spill lands*.
+
+**The test, once, and then you know.** The first time a result comes back as a
+**path** instead of data — it happens on its own, a `read_file` on a long
+document will do it — run `ls <that path>` where your code runs. **There** →
+you are in case B: archive freely, up to the server's own 5 MB. **Not there** →
+case C: keep archives small.
+
+Until you have run that test, the safe setting is `max_chars=20000`, which works
+everywhere.
+
+**`max_chars` is how you tell this server your ceiling.** It is 0 by default,
+meaning "no ceiling of mine". Give it a number and the archive is **refused**
+rather than produced, and the refusal says how many characters it would have
+been — so one round trip tells you the size instead of losing you the payload:
+
+    archive(X, pattern='*', max_chars=20000)
+      → the archive would be 317768 characters of base64, over the 20000 you
+        asked for (101 files, 246467 bytes in): narrow `path` or `pattern`
+
+In case B you do not need it. In case C it is the difference between finding out
+and guessing.
+
+**One more thing, and it is the reason this note is in the manual rather than in
+a docstring:** the cap belongs to the transport, not to `archive`. Any large
+result meets it — `read_file` on a long document, `diff` over a distant
+revision, `list_files` on a big tree. `archive` is only where it can cancel the
+*purpose* of the tool rather than one call.
 
 ## WHAT TO EXPECT
 
@@ -204,6 +255,9 @@ name and last.
     find something:       search(X, "term") → read_file on the match only
     find by expression:   search(X, "^## ", regex=True)
     full audit:           manifest → list_files → archive(X, pattern='*') → manifest
+                          a WHOLE dataset only once you know you are in case B;
+                          otherwise archive(X, path="…", pattern='*') folder by
+                          folder, or pass max_chars and let it tell you the size
     what changed lately:  history(X, n=30) → diff(X, hash) → read_at
     compare two moments:  diff(X, "HEAD~5", path="a.md", rev_b="HEAD")
     recover content:      history → read_at(X, path, hash) → write_file
@@ -233,3 +287,6 @@ name and last.
 | `CONFLICT: expected manifest ...` | someone wrote after you looked: re-read the manifest, then retry |
 | `block too large` | `append` is not for rewrites: `write_file` |
 | `file too large` | above 2 MB, move it over SMB/scp |
+| `the archive would be N characters of base64, over the ...` | your own `max_chars` stopped it before it was built: narrow `path` or `pattern`, or raise the number if your client can take it |
+| `max_chars cannot be negative` | 0 means no ceiling of yours; there is no other way to switch it off |
+| `dataset ... is no longer there` | it was dropped while your call was in flight: `vault_status` again, then retry |

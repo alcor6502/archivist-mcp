@@ -620,7 +620,7 @@ changes from outside were committed separately before yours.
 | know when something changed, and get its hash | `history` | — |
 | read text | `read_file` | — |
 | read a PDF or a binary | `read_binary` (needs a sandbox) | — |
-| read a whole tree at once | `archive` (needs a sandbox, mind `pattern`) | — |
+| read a whole tree at once | `archive` (needs a sandbox, mind `pattern`, mind the client's ceiling) | — |
 | read how it was before | `read_at` | — |
 | see what changed between two moments | `diff` | — |
 | make a new, empty dataset | `dataset_create` | — |
@@ -767,15 +767,23 @@ manifest("Example Project")
    "total_bytes": 147600, "manifest_sha256": "24280b93…"}
 ```
 
-**`archive(dataset, path="", pattern="*.md")`** — every matching file in ONE
-call, as a base64 tar.gz. Replaces hundreds of `read_file` calls in an audit;
-needs a sandbox to extract it in. Member names inside the tgz are
-dataset-relative, so extracting reproduces the dataset's own tree.
+**`archive(dataset, path="", pattern="*.md", max_chars=0)`** — every matching
+file in ONE call, as a base64 tar.gz. Replaces hundreds of `read_file` calls in
+an audit; needs a sandbox to extract it in. Member names inside the tgz are
+dataset-relative, so extracting reproduces the dataset's own tree. A big archive
+may not reach the caller at all — **that ceiling is the client's, not this
+server's**, and `max_chars` is how a caller declares it: 0 means "no ceiling of
+mine", any positive number refuses instead of producing what will not travel,
+and says how large it would have been. See *`archive` and the one ceiling that
+is not this server's*, below.
 **Returns** `dataset · base · file_count · original_bytes · tgz_bytes ·
 tgz_base64`
 
 ```
 archive("Example Project", "", "*.md")
+archive("Example Project", "", "*", max_chars=20000)
+→ the archive would be 317768 characters of base64, over the 20000 you asked
+  for (101 files, 246467 bytes in): narrow `path` or `pattern`
 ```
 
 **`append(dataset, path, text)`** — a block at the end of an existing file. It
@@ -902,6 +910,51 @@ the vault acts as the archivist.
 </details>
 
 <details>
+<summary><b><code>archive</code> and the one ceiling that is not this server's</b></summary>
+
+Every limit in the table above is enforced by this server, and every one of them
+fails loudly. There is one more that is not ours, does not appear in the table,
+and is the one a large archive meets first: **the cap the client puts on the
+size of a tool result.**
+
+Above that cap a client does not truncate. It writes the whole result to a file
+and hands the model a path instead of the data. Whether that is excellent or
+useless depends on something this server cannot see:
+
+| | the result lands | what happens |
+|---|---|---|
+| **A** — under the cap | in the message | works, and costs context |
+| **B** — over it, file lands where the caller's code runs | in the sandbox | works, and costs **no** context |
+| **C** — over it, file lands elsewhere | outside reach | the data exists and cannot be got |
+
+Case **B** is the good one, and it is why the 5 MB ceiling here is generous
+rather than mean: the archive never crosses the context at all. Case **C** is
+the trap, and it is not "cloud versus local" — it is only ever about *where the
+spill lands*.
+
+**The test, once, and then it is known.** The first time a result comes back as
+a **path** instead of data — it happens on its own, a `read_file` on a long
+document will do it — run `ls <that path>` where the caller's code runs.
+**There** → case B: archive freely, up to the server's own 5 MB. **Not there** →
+case C: keep archives small.
+
+Until that test has been run, the safe setting is `max_chars=20000`, which works
+everywhere.
+
+**`max_chars` is how a caller declares its ceiling.** 0 by default, meaning "no
+ceiling of mine". Given a number, the archive is **refused** rather than
+produced, and the refusal says how many characters it would have been — so one
+round trip reports the size instead of losing the payload.
+
+**Why this is documented here and not only in a docstring:** the cap belongs to
+the transport, not to `archive`. Any large result meets it — `read_file` on a
+long document, `diff` over a distant revision, `list_files` on a big tree.
+`archive` is only where it can cancel the *purpose* of the tool rather than one
+call.
+
+</details>
+
+<details>
 <summary><b>Recipes</b></summary>
 
 Written with `X` for the dataset.
@@ -916,6 +969,8 @@ recover content:      history → read_at(X, path, hash) → write_file
 did anything move:    manifest before, manifest after — equal means no
 compare two moments:  diff(X, "HEAD~5", path="a.md", rev_b="HEAD")
 full audit:           manifest → list_files → archive(X, pattern="*") → manifest
+                      a WHOLE dataset only in case B; otherwise folder by
+                      folder, or pass max_chars and let it report the size
 find by expression:   search(X, "^## ", regex=True)
 destroy a dataset:    manifest → dataset_drop(X, manifest_sha256)
 copy across datasets: read_file("A", "x.md") → write_file("B", "x.md", …, "new")

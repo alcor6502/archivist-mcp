@@ -180,6 +180,96 @@ def single_door_check() -> None:
     ok(checked >= 14, "the single-door check covered the path-taking tools", checked)
 
 
+def lock_discipline_check() -> None:
+    """Everything that COMMITS does it under the dataset lock.
+
+    Until 2.4.0 this was a rule with two exceptions, `ensure_git` and
+    `prune_history`, and the argument for both was the same and sounded good:
+    they run at boot, so nothing else is going on. That is a fact about today's
+    CALLERS, not about the functions — and it is the kind of fact that stops
+    being true without anyone touching the function that relied on it. A rule
+    with exceptions cannot be checked; this one now has none, so it can.
+
+    Reads are deliberately NOT required to lock. `status`, `history`, `diff`
+    and the rest would gain nothing and would lose the property that a reader
+    never waits behind a writer.
+
+    The check is positional, not lexical: it is not enough that the method
+    mentions the lock somewhere. Every mutating call must be INSIDE the `with`,
+    because taking the lock for one half of a method and committing outside it
+    is precisely the shape of the bug — and it reads, at a glance, like the
+    correct code."""
+    src = (HERE / "vault.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    ds = next((n for n in tree.body
+               if isinstance(n, ast.ClassDef) and n.name == "Dataset"), None)
+    ok(ds is not None, "vault.py still declares a Dataset class")
+    if ds is None:
+        return
+
+    # git verbs that CHANGE the repository. Anything read-only — status, log,
+    # rev-list, rev-parse, cat-file — is absent on purpose.
+    WRITES = {"init", "add", "commit", "commit-tree", "rebase", "reset",
+              "read-tree", "checkout", "reflog", "gc", "am", "cherry-pick"}
+    # The primitives ARE the operation; they are called from inside the lock by
+    # everything above them, and requiring them to take it too would deadlock —
+    # flock is per open file description, and _lock() opens a new one each time.
+    PRIMITIVES = {"_git", "_commit", "_commit_external_if_dirty", "_lock",
+                  "_atomic_write"}
+
+    def mutating_calls_outside_the_lock(fn) -> list[str]:
+        covered = set()
+        for node in ast.walk(fn):
+            if isinstance(node, ast.With) and any(
+                    isinstance(i.context_expr, ast.Call)
+                    and isinstance(i.context_expr.func, ast.Attribute)
+                    and i.context_expr.func.attr == "_lock"
+                    for i in node.items):
+                for sub in ast.walk(node):
+                    covered.add(id(sub))
+        bad = []
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.Call):
+                continue
+            f = node.func
+            if not (isinstance(f, ast.Attribute)
+                    and isinstance(f.value, ast.Name) and f.value.id == "self"):
+                continue
+            what = None
+            if f.attr in ("_commit", "_commit_external_if_dirty"):
+                what = f.attr
+            elif (f.attr == "_git" and node.args
+                  and isinstance(node.args[0], ast.Constant)
+                  and node.args[0].value in WRITES):
+                what = f"_git({node.args[0].value!r})"
+            if what and id(node) not in covered:
+                bad.append(what)
+        return bad
+
+    writers = 0
+    for fn in ds.body:
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if fn.name in PRIMITIVES:
+            continue
+        bad = mutating_calls_outside_the_lock(fn)
+        touches = bad or any(
+            isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+            and isinstance(n.func.value, ast.Name) and n.func.value.id == "self"
+            and (n.func.attr in ("_commit", "_commit_external_if_dirty")
+                 or (n.func.attr == "_git" and n.args
+                     and isinstance(n.args[0], ast.Constant)
+                     and n.args[0].value in WRITES))
+            for n in ast.walk(fn))
+        if not touches:
+            continue
+        writers += 1
+        ok(not bad, f"Dataset.{fn.name} commits only under the lock", bad)
+    # If a refactor ever moves the writers out of this class, every check above
+    # would pass by finding nothing. Count them, so silence has to be earned.
+    ok(writers >= 6, "the check found the writers it is meant to police", writers)
+
+
 def gate_hook_check() -> None:
     """The Gate is wired by NAMING a hook, and that is the whole danger: the
     Middleware base class ships a pass-through default for every hook it knows,
@@ -938,6 +1028,41 @@ def main() -> int:
         ok(all(not n.startswith("Example Project") for n in names),
            "tar member names are dataset-relative", names[:2])
 
+        print("\n[6b] max_chars — the caller's ceiling, which the server cannot know")
+        # The number in the refusal has to be the REAL one. A caller told
+        # "too big" without a size narrows blind and comes back twice; told a
+        # rounded estimate, it narrows to something that still does not fit.
+        # base64 is four characters per three bytes and b64encode adds no
+        # newlines, so the figure is computable exactly — and is computed
+        # BEFORE the encoding, which is the point of asking for the ceiling
+        # instead of producing the payload and hoping.
+        exact = len(a["tgz_base64"])
+        # Caught rather than called bare: a ceiling that refuses what exactly
+        # fits is an off-by-one, and an off-by-one has to arrive as a NAMED
+        # failure. Left bare, the refusal would raise through this line and end
+        # the suite on a traceback that names no line at all.
+        try:
+            ok(ds.archive("", "*.md", max_chars=exact)["tgz_bytes"] > 0,
+               "max_chars exactly equal to the size lets it through", exact)
+        except VaultError as e:
+            ok(False, "max_chars exactly equal to the size lets it through",
+               f"refused at exactly {exact}: {e}")
+        must_fail("max_chars one character short",
+                  lambda: ds.archive("", "*.md", max_chars=exact - 1))
+        ok(ds.archive("", "*.md", max_chars=0)["file_count"] == a["file_count"],
+           "0 means no ceiling of the caller's")
+        # A negative is not a smaller ceiling and it is not "off": it is a
+        # caller who has got the sense of the parameter backwards, and the
+        # cheapest thing to do is say so. Falling back to "no ceiling" would
+        # hand back MORE than was asked for, silently.
+        must_fail("a negative max_chars", lambda: ds.archive("", "*.md", max_chars=-1))
+        try:
+            ds.archive("", "*.md", max_chars=10)
+            ok(False, "the refusal states the size it would have been")
+        except VaultError as e:
+            ok(str(exact) in str(e),
+               "the refusal states the size it would have been", e)
+
         print("\n[7] trash and purge")
         mv = ds.move_path("new.md", "Trash/new.md")
         ok(mv["trashed"] is True, "move into Trash is marked")
@@ -997,6 +1122,71 @@ def main() -> int:
             ok(False, "create over an existing directory is refused", f"raw FileExistsError: {e}")
         shutil.rmtree(Path(root) / "Ghost")
 
+        print("\n[10d] the window `drop` leaves open is a refusal, not a traceback")
+        # A caller that resolved a dataset a moment before it was dropped still
+        # holds a handle to a directory that is no longer there. Closing that
+        # race would take a global lock on every write — the very thing the
+        # dataset design turned down. Making it SAY so costs nothing, and the
+        # difference is whether the log records a refusal or a page of
+        # traceback under the word FAULT.
+        v.create("Doomed")
+        doomed = v.open_by_name("Doomed", "")
+        v.drop("Doomed", doomed.manifest("")["manifest_sha256"])
+        try:
+            doomed.write_file("x.md", "hi\n", "new")
+            ok(False, "a write on a dataset dropped underneath is refused")
+        except VaultError as e:
+            ok("no longer there" in str(e),
+               "a write on a dataset dropped underneath is refused", e)
+        except Exception as e:
+            ok(False, "a write on a dataset dropped underneath is refused",
+               f"raw {type(e).__name__}: {e}")
+
+        print("\n[10e] the lock, with two real processes")
+        # Everything else about the lock is proved by construction or by
+        # reading. This is the only check that puts two operating-system
+        # processes on the same file at the same time — which is the situation
+        # flock exists for, and the one a single-process test cannot stage.
+        v.create("Concurrent")
+        cds = v.open_by_name("Concurrent", "")
+        cds.write_file("log.md", "start\n", "new")
+        ROUNDS = 12
+        pid = os.fork()
+        if pid == 0:
+            # The child MUST leave through os._exit: a normal exit would flush
+            # the stdout buffer it inherited and print this suite's output a
+            # second time, and would run the parent's teardown on the way out.
+            rc = 0
+            try:
+                for i in range(ROUNDS):
+                    cds.append("log.md", f"child {i}\n")
+            except Exception:
+                rc = 1
+            os._exit(rc)
+        parent_failed = 0
+        try:
+            for i in range(ROUNDS):
+                cds.append("log.md", f"parent {i}\n")
+        except Exception:
+            parent_failed = 1
+        _, status_word = os.waitpid(pid, 0)
+        ok(os.WEXITSTATUS(status_word) == 0 and not parent_failed,
+           "neither process was refused while the other held the lock",
+           (os.WEXITSTATUS(status_word), parent_failed))
+        body = cds.read_file("log.md")["content"]
+        # The real question is not whether they both survived but whether
+        # anything was LOST: an append that read the file before the other
+        # process wrote, and wrote back over it, would show up here as a
+        # missing block and nowhere else.
+        ok(body.count("child ") == ROUNDS and body.count("parent ") == ROUNDS,
+           "every block from both processes survived",
+           (body.count("child "), body.count("parent ")))
+        ok(cds.status()["git"] == "clean",
+           "the repository is clean after two writers", cds.status()["git"])
+        ok(cds.status()["total_commits"] >= 2 * ROUNDS,
+           "every write got its own commit", cds.status()["total_commits"])
+        v.drop("Concurrent", cds.manifest("")["manifest_sha256"])
+
         print("\n[10c] placeholders the preflight must catch")
         import preflight
         for bad in ("CHANGEME", "CHANGE_ME", "change-me", "change me", "CamBiaMi",
@@ -1038,6 +1228,45 @@ def main() -> int:
         ok(old.status()["total_commits"] < n_before, "history gets shorter")
         ok(old.manifest("")["manifest_sha256"] == before_sha, "CONTENT NEVER CHANGES")
         ok("not needed" in old.prune_history(6), "a second prune is a no-op")
+
+        print("\n[12c] pruning a history that is not small")
+        # Six commits proved the mechanism. They did not prove it on anything
+        # resembling a real repository, and pruning is the one operation here
+        # that rewrites history rather than adding to it: if it is going to
+        # behave differently at scale, it will be on the rebase.
+        #
+        # The commits are made in ONE shell rather than by four hundred
+        # subprocess calls from Python: the loop is the cost, not the work, and
+        # a suite that takes a minute stops being run.
+        os.makedirs(Path(root) / "Long")
+        v.boot(0)
+        long_ds = Dataset(Path(root) / "Long", "Long")
+        _old_date = "2024-01-15T12:00:00"
+        _script = (
+            'set -e; cd "$1"; '
+            'for i in $(seq 1 200); do '
+            '  echo "line $i" >> f.md; git add -A; '
+            '  GIT_AUTHOR_DATE="$2" GIT_COMMITTER_DATE="$2" git commit -q -m "old $i"; '
+            'done; '
+            'echo recent > recent.md; git add -A; git commit -q -m recent'
+        )
+        _r = subprocess.run(["sh", "-c", _script, "sh", str(Path(root) / "Long"), _old_date],
+                            capture_output=True, text=True)
+        ok(_r.returncode == 0, "two hundred commits were made", _r.stderr[:200])
+        n_before = long_ds.status()["total_commits"]
+        ok(n_before > 200, "a history of some size to prune", n_before)
+        sha_before = long_ds.manifest("")["manifest_sha256"]
+        msg = long_ds.prune_history(6)
+        n_after = long_ds.status()["total_commits"]
+        ok(n_after < n_before // 10, "the prefix really is squashed", (n_before, n_after, msg))
+        # The one guarantee that matters, and the one a rebase could break
+        # without anything else noticing: history is what gets shorter, never
+        # content.
+        ok(long_ds.manifest("")["manifest_sha256"] == sha_before,
+           "CONTENT NEVER CHANGES, at two hundred commits either")
+        ok(long_ds.status()["git"] == "clean", "the working tree survives the rebase")
+        ok(long_ds.read_file("f.md")["content"].count("line ") == 200,
+           "every line of the pruned-away history is still in the file")
 
         print("\n[12b] a refusal and a fault are different things")
         # server.py treats them differently — one quiet line, or a full
@@ -1102,6 +1331,9 @@ def main() -> int:
         print("\n[13] static server.py <-> vault.py consistency")
         static_api_check()
         single_door_check()
+
+        print("\n[13b] everything that commits does it under the lock")
+        lock_discipline_check()
 
         print("\n[14] the Dockerfile still quiets FastMCP down")
         dockerfile_env_check()

@@ -62,7 +62,7 @@ from fastmcp.server.middleware import Middleware, MiddlewareContext
 from preflight import cidrs_from_env, describe_cidrs, log_level_from_env
 from vault import VaultRoot, VaultError, VaultFault
 
-VERSION = "2.3.1"
+VERSION = "2.4.0"
 
 # The ROOT logger stays at WARNING. It used to be INFO, which switched on INFO
 # for every library loaded, not for ours: that is where the noise came from.
@@ -412,11 +412,15 @@ def manifest(dataset: str, path: str = "", key: str = "") -> dict:
 
 
 @tool
-def archive(dataset: str, path: str = "", pattern: str = "*.md", key: str = "") -> dict:
+def archive(dataset: str, path: str = "", pattern: str = "*.md",
+            max_chars: int = 0, key: str = "") -> dict:
     """Every file matching `pattern` under `path` in ONE call, as a base64
-    tar.gz. Needs a sandbox to extract it in."""
+    tar.gz. Needs a sandbox to extract it in. A big one may not reach you at
+    all — that ceiling is your client's, not this server's: read the guide
+    before archiving a whole dataset. `max_chars` refuses instead of producing
+    what will not travel."""
     ds, rel = vault.open(dataset, path, key)
-    return ds.archive(rel, pattern)
+    return ds.archive(rel, pattern, max_chars)
 
 
 @tool
