@@ -382,7 +382,9 @@ silence is the gate's refusals, and any **fault**, which keeps its full
 traceback at `ERROR` because a broken machine is not a refusal. The list is
 closed on purpose: below `INFO` there is nothing to switch on, and above
 `WARNING` the gate's refusals go silent too, and that is the one line that
-tells a stranger turned away apart from a broken deployment.
+tells a stranger turned away apart from a broken deployment. `WARN` is
+honoured as `WARNING` — it is Python's own alias, not a typo, and whoever
+writes it wants less noise, so correcting it to `INFO` would hand back more.
 
 The service listens on loopback inside the container, and that is not a setting.
 Legitimate traffic arrives from the Funnel, which runs in the same container.

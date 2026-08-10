@@ -213,14 +213,42 @@ def gate_hook_check() -> None:
              and n.name.startswith("on_")}
     ok(hooks == {declared}, "the Gate hooks exactly what HOOK names", sorted(hooks))
 
-    src = (HERE / "server.py").read_text(encoding="utf-8")
-    ok("mcp.add_middleware(Gate())" in src, "the Gate is actually registered")
-    # A refused request and a broken deployment look identical at the client.
-    # The log line is the only thing that tells them apart, so it is part of
-    # the contract, not of the comfort.
-    body = ast.get_source_segment(src, gate) or ""
-    ok(body.count("log.warning") >= 2,
-       "both refusals are logged, identity and origin", body.count("log.warning"))
+    # Read from the AST, never from the text. `"mcp.add_middleware(Gate())" in
+    # src` stays green on `#mcp.add_middleware(Gate())` — which is the single
+    # most likely way that line ever disappears: somebody comments it out while
+    # chasing something else. A comment does not exist in the tree.
+    registered = [n for n in ast.walk(tree)
+                  if isinstance(n, ast.Call)
+                  and ast.unparse(n.func) == "mcp.add_middleware"
+                  and n.args and ast.unparse(n.args[0]) == "Gate()"]
+    ok(len(registered) == 1, "the Gate is registered, exactly once", len(registered))
+
+    hook = next((n for n in gate.body
+                 if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))
+                 and n.name == declared), None)
+    ok(hook is not None, f"the {declared} hook is there to be read")
+    if hook is not None:
+        # Wiring is not working. Every name above can be right and the gate
+        # still be off: `return await call_next(ctx)` moved to the TOP of the
+        # hook lets everything through with the body sitting there, unreachable
+        # and reassuring. So the go-ahead is pinned by POSITION: once, and last.
+        passes = [n for n in ast.walk(hook) if isinstance(n, ast.Call)
+                  and ast.unparse(n.func) == "call_next"]
+        ok(len(passes) == 1, "the hook lets a request through in exactly one place",
+           len(passes))
+        last = hook.body[-1]
+        ok(isinstance(last, ast.Return) and "call_next" in ast.unparse(last),
+           "and it is the LAST thing it does, after both filters",
+           ast.unparse(last).split("\n")[0])
+
+        # A refused request and a broken deployment look identical at the
+        # client. The log line is the only thing that tells them apart, so it
+        # is part of the contract, not of the comfort. Counted on the tree, for
+        # the same reason as above: a commented-out call would satisfy text.
+        warns = [n for n in ast.walk(hook) if isinstance(n, ast.Call)
+                 and ast.unparse(n.func) == "log.warning"]
+        ok(len(warns) >= 2,
+           "both refusals are logged, identity and origin", len(warns))
 
 
 def tool_conversion_check() -> None:
@@ -263,21 +291,73 @@ def tool_conversion_check() -> None:
     src = (HERE / "server.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
 
-    conv = next((n for n in tree.body
-                 if isinstance(n, ast.FunctionDef) and n.name == "tool"), None)
-    if conv is None:
-        ok(False, "server.py defines the @tool decorator")
+    # ONE `def tool`, and nowhere else in the file. A second one further down
+    # wins for every function defined after it — and they are ALL defined after
+    # it, so three lines left behind while chasing something else would empty
+    # the whole MCP surface with the suite green.
+    convs = [n for n in ast.walk(tree)
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+             and n.name == "tool"]
+    ok(len(convs) == 1, "server.py defines the @tool decorator exactly once",
+       len(convs))
+    if not convs:
         return
-    ok(True, "server.py defines the @tool decorator")
+    conv = convs[0]
 
-    handlers = [h for h in ast.walk(conv) if isinstance(h, ast.ExceptHandler)]
-    caught = [ast.unparse(h.type) for h in handlers if h.type is not None]
-    ok("VaultError" in caught, "the decorator catches VaultError", sorted(caught))
+    # WHAT it registers, and WHICH function that name really points at.
+    #
+    # Reading the decorator with ast.walk only asks that the pieces be WRITTEN
+    # somewhere inside it. Move the try/except into a nested function nobody
+    # calls, reduce the wrapper to `return fn(...)`, and every check below
+    # passes on a conversion that does not exist. So the order is: find the
+    # registration, take the NAME it hands over, and analyse THAT function.
+    registers = [n for n in ast.walk(conv) if isinstance(n, ast.Call)
+                 and ast.unparse(n.func) == "mcp.tool"]
+    ok(len(registers) == 1, "and registers with mcp.tool exactly once", len(registers))
+    registered = (ast.unparse(registers[0].args[0])
+                  if registers and registers[0].args else "")
+    ok(registered.isidentifier(),
+       "handing it a function by name, not an expression", registered or "no argument")
+
+    # And the name must not be re-pointed on the way. `guarded = fn` one line
+    # above the return is this very check's own defect, wearing the name the
+    # check looks for.
+    rebound = [ast.unparse(t) for s in ast.walk(conv) if isinstance(s, ast.Assign)
+               for t in s.targets if isinstance(t, ast.Name) and t.id == registered]
+    ok(not rebound, f"and `{registered or '?'}` is never reassigned", rebound)
+
+    inner = next((n for n in ast.walk(conv)
+                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                  and n.name == registered), None)
+    ok(inner is not None, f"and `{registered or '?'}` is a function defined inside it")
+    if inner is None:
+        return
+
+    # From here on, everything is read out of the function that is REGISTERED.
+    # One try, in its body — not somewhere in the subtree, which is how a dead
+    # branch gets to answer for a live one.
+    tries = [s for s in inner.body if isinstance(s, ast.Try)]
+    ok(len(tries) == 1, "which wraps the call in exactly one try/except", len(tries))
+    if not tries:
+        return
+    ok(any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "fn"
+           for n in ast.walk(tries[0].body[0] if tries[0].body else tries[0])),
+       "and the thing inside the try is the original function")
+
+    handlers = tries[0].handlers
+    caught = [ast.unparse(h.type) if h.type is not None else "*" for h in handlers]
+    ok("VaultError" in caught, "the decorator catches VaultError", caught)
 
     # The ORDER, which is the whole distinction and is invisible once written:
     # VaultFault SUBCLASSES VaultError, so `except VaultError` placed first
     # would swallow every fault into the quiet path and nothing would look
     # wrong. Python has no warning for this; the test is the warning.
+    # The ORDER, which is the whole distinction and is invisible once written:
+    # VaultFault SUBCLASSES VaultError, so `except VaultError` placed first
+    # would swallow every fault into the quiet path and nothing would look
+    # wrong. Python has no warning for this; the test is the warning. Taken
+    # from the handlers of the ONE try above, not from the first match in the
+    # subtree — a decoy handler written higher up would answer for it.
     ok(caught[:1] == ["VaultFault"],
        "and it catches VaultFault FIRST, or the subclass never gets its turn",
        caught)
@@ -290,21 +370,24 @@ def tool_conversion_check() -> None:
               if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "ToolError"]
     ok(bool(raised), "and re-raises it as ToolError")
 
-    # Pinned to INFO, not merely "below ERROR": `"ERROR" not in level` is a
-    # substring search, and it is satisfied by CRITICAL — which is HIGHER — and
-    # by WARNING, the one value this file spends a paragraph explaining we must
-    # not use. A test that asserts something looser than its own docstring
-    # promises is worse than no test.
+    # Pinned to INFO, and on EVERY occurrence. `"ERROR" not in level` was a
+    # substring search satisfied by CRITICAL, which is higher; `levels[0]` was
+    # a first-match satisfied by a dead handler holding the right value while
+    # the live one holds the wrong one. Both were real, both were found by the
+    # twin reading this file.
     levels = [ast.unparse(k.value) for r in raised for k in r.keywords
               if k.arg == "log_level"]
-    ok(levels and levels[0] == "logging.INFO",
-       "at logging.INFO exactly, which is the decision",
-       levels[0] if levels else "log_level not set")
+    ok(levels and all(v == "logging.INFO" for v in levels),
+       "at logging.INFO exactly, everywhere it is raised",
+       levels or "log_level not set")
 
     # `raise X from None` parses as cause=Constant(None) — not as no cause at
-    # all, which is what a bare `raise X` gives you.
-    ok(any(isinstance(n, ast.Raise) and isinstance(n.cause, ast.Constant)
-           and n.cause.value is None for n in ast.walk(conv)),
+    # all, which is what a bare `raise X` gives you. Read from the handler that
+    # actually converts.
+    conv_h = [h for h in handlers if ast.unparse(h.type or ast.Constant(0)) == "VaultError"]
+    ok(conv_h and all(any(isinstance(n, ast.Raise) and isinstance(n.cause, ast.Constant)
+                          and n.cause.value is None for n in ast.walk(h))
+                      for h in conv_h),
        "with `from None`: the chained traceback is what we are removing")
 
     logged = [n for h in handlers for n in ast.walk(h)
@@ -315,81 +398,87 @@ def tool_conversion_check() -> None:
        "at INFO: WARNING is the Gate's height, and a CONFLICT is not a warning",
        sorted({ast.unparse(n.func) for n in logged}))
 
-    ok(any(ast.unparse(d) == "functools.wraps(fn)"
-           for f in ast.walk(conv) if isinstance(f, ast.FunctionDef)
-           for d in f.decorator_list),
-       "and functools.wraps, or every tool would lose its schema")
+    ok(any(ast.unparse(d) == "functools.wraps(fn)" for d in inner.decorator_list),
+       "and functools.wraps ON THE REGISTERED FUNCTION, or it loses its schema",
+       [ast.unparse(d) for d in inner.decorator_list])
 
-    # WHAT it registers, not merely that it registers. `mcp.tool(fn)` instead of
-    # `mcp.tool(guarded)` defines the wrapper and throws it away: no conversion,
-    # no log line, tracebacks back — and every check above still passes, because
-    # every piece it looks for is still written down. That is the exact shape of
-    # a check that filters out the case it was written for.
-    registers = [n for n in ast.walk(conv) if isinstance(n, ast.Call)
-                 and ast.unparse(n.func) == "mcp.tool"]
-    ok(registers and registers[0].args
-       and ast.unparse(registers[0].args[0]) == "guarded",
-       "and it registers the WRAPPED function, not the bare one",
-       ast.unparse(registers[0].args[0]) if registers and registers[0].args else "no argument")
-
-    # The census. A bare @mcp.tool anywhere else is a tool that never learned
-    # to be quiet, and the failure NAMES it: a list of one is what you get when
-    # you forget a single line, which is the realistic mistake.
-    bare = [n.name for n in tree.body
-            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and any(ast.unparse(d).startswith("mcp.tool") for d in n.decorator_list)]
-    ok(not bare, "no tool is registered with a bare @mcp.tool", bare)
-
-    # An EQUALITY against what the file says, never a threshold. `>= 20` against
-    # 21 tools tolerates exactly one escapee, and one is the realistic mistake:
-    # `@tool()` with the brackets is a Call, not a Name, so it would slip the
-    # list AND satisfy the threshold — while at boot it raises TypeError, since
-    # the decorator takes the function itself. The suite never imports
-    # server.py, so nothing else would see it.
+    # ---- the census, over the WHOLE tree ----
     def names_tool(d) -> bool:
         node = d.func if isinstance(d, ast.Call) else d
         return isinstance(node, ast.Name) and node.id == "tool"
 
-    decorated = [n for n in tree.body
-                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-                 and any(names_tool(d) for d in n.decorator_list)]
-    wrapped = [n.name for n in decorated
-               if any(isinstance(d, ast.Name) and d.id == "tool"
-                      for d in n.decorator_list)]
-    called = [n.name for n in decorated if n.name not in wrapped]
-    ok(not called, "every @tool is written bare: `@tool()` calls the decorator "
-                   "with no function and dies at import", called)
-    # Three counts that have to agree, because two of them fall together. The
-    # bare-form count and the AST list BOTH lose a tool written `@tool()` — it
-    # is a Call, not a Name, and it does not match `^@tool$` either — so on
-    # their own they stay in step while a tool escapes. The wider line count is
-    # the third leg: it sees the brackets.
-    bare_lines = len(re.findall(r"(?m)^@tool[ \t]*$", src))
-    all_lines = len(re.findall(r"(?m)^@tool\b", src))
-    ok(len(wrapped) == bare_lines == all_lines,
-       "and they all go through it, in the bare form",
-       f"{len(wrapped)} decorated, {bare_lines} bare lines, {all_lines} in all")
-    # `mcp.tool` occurs once in the whole file — inside the decorator — and
-    # nowhere else. The count is not written down: it is what the source says.
-    ok(src.count("mcp.tool") == 1,
-       "`mcp.tool` is named exactly once, inside the decorator",
-       src.count("mcp.tool"))
-    # add_tool() is the other door into the surface, and it carries no
-    # decorator at all: a tool entering that way would convert nothing AND go
-    # missing from no manual, because there is nothing for either check to see.
-    ok("add_tool" not in src, "tools enter through the decorator and nowhere else")
+    def is_func(n) -> bool:
+        return isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
 
-    # `guarded` is synchronous and RETURNS what fn returns. Handed a coroutine
-    # function it would return the coroutine unawaited, FastMCP would await it
-    # further out, and the VaultError would surface with the try/except never
-    # entered — the tool works, the conversion silently does not. Today all
-    # tools are sync. The day one is not, this says so instead of blessing it.
-    async_tools = [n.name for n in tree.body if isinstance(n, ast.AsyncFunctionDef)
-                   and any(isinstance(d, ast.Name) and d.id == "tool"
-                           for d in n.decorator_list)]
+    # A bare @mcp.tool is a tool that never learned to be quiet, and the
+    # failure NAMES it. Walked, not read off tree.body: nesting is not an
+    # excuse.
+    bare = [n.name for n in ast.walk(tree) if is_func(n)
+            and any(ast.unparse(d).startswith("mcp.tool") for d in n.decorator_list)]
+    ok(not bare, "no tool is registered with a bare @mcp.tool", bare)
+    ok(len(registers) == 1 and not bare,
+       "`mcp.tool` is reached from exactly one place in the file")
+
+    # The decorator is NEVER called as a function. This one expression closes
+    # two doors at once: `@tool()` with brackets, which dies at import with a
+    # TypeError the suite would never see, and `tool(fn)` written out in the
+    # body, which puts a tool on the surface that no census can see.
+    as_call = [ast.unparse(n)[:60] for n in ast.walk(tree) if isinstance(n, ast.Call)
+               and isinstance(n.func, ast.Name) and n.func.id == "tool"]
+    ok(not as_call, "the decorator is only ever used as `@tool`, bare", as_call)
+
+    everywhere = [n for n in ast.walk(tree) if is_func(n)
+                  and any(names_tool(d) for d in n.decorator_list)]
+    at_module = [n for n in tree.body if is_func(n)
+                 and any(names_tool(d) for d in n.decorator_list)]
+    nested = [n.name for n in everywhere if not any(n is m for m in at_module)]
+    ok(not nested, "no tool is declared inside a function, a class or an `if`",
+       nested)
+
+    # An EQUALITY against what the file says, never a threshold: `>= 20`
+    # against 21 tools tolerates exactly one escapee, and one is the realistic
+    # mistake.
+    lines = len(re.findall(r"(?m)^@tool[ \t]*$", src))
+    ok(len(at_module) == lines, "and they all go through it, in the bare form",
+       f"{len(at_module)} decorated vs {lines} `@tool` lines")
+
+    # add_tool() is the other door into the surface and carries no decorator at
+    # all. Matched on the tree and not as `"add_tool" not in src`: a textual
+    # ban in the negative also forbids EXPLAINING itself in a comment, and in a
+    # file that documents its own reasons that is a check destined to be
+    # deleted rather than respected.
+    added = [ast.unparse(n)[:60] for n in ast.walk(tree) if isinstance(n, ast.Call)
+             and ast.unparse(n.func).endswith(".add_tool")]
+    ok(not added, "tools enter through the decorator and nowhere else", added)
+
+    # The registered wrapper is synchronous and RETURNS what fn returns. Handed
+    # a coroutine function it would return the coroutine unawaited, FastMCP
+    # would await it further out, and the VaultError would surface with the
+    # try/except never entered — the tool works, the conversion silently does
+    # not. Today all tools are sync. The day one is not, this says so instead
+    # of blessing it.
+    async_tools = [n.name for n in everywhere if isinstance(n, ast.AsyncFunctionDef)]
     ok(not async_tools,
-       "no tool is async: `guarded` would return the coroutine without seeing "
+       "no tool is async: the wrapper would return the coroutine without seeing "
        "its refusals", async_tools)
+
+    # And the WITNESS for a tool that loses its decorator cannot be the prose of
+    # a manual: rewrite one sentence and the witness is dismissed. The engine is
+    # the witness. A module-level function that reaches `vault.` IS a tool, by
+    # definition of what this server is for — so if it stops being one it has
+    # fallen off the MCP surface while still looking, to every reader, exactly
+    # like a tool. guide_signature_check() would also notice, but only for as
+    # long as the guide keeps its line.
+    reaches = [n for n in tree.body if is_func(n)
+               and any(isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+                       and isinstance(c.func.value, ast.Name)
+                       and c.func.value.id in ("vault", "ds")
+                       for c in ast.walk(n))]
+    orphan = [n.name for n in reaches
+              if not any(names_tool(d) for d in n.decorator_list)]
+    ok(reaches and not orphan,
+       f"every one of the {len(reaches)} functions that reach the engine is a tool",
+       orphan)
 
     # The engine must NOT import FastMCP: that is what lets this suite run with
     # no network, no Docker and no OAuth in under a minute, and it is the
@@ -404,12 +493,40 @@ def tool_conversion_check() -> None:
     ok("fastmcp" not in imports and "mcp" not in imports,
        "vault.py imports no server framework", sorted(imports))
 
+    # The fault type is pinned IN THE ENGINE, not only in the decorator. One
+    # line — `VaultFault = VaultError`, perfectly plausible as a tidy-up —
+    # makes the fault branch the first one for every REFUSAL and cancels the
+    # whole delivery without a single red line. Four things, because three were
+    # not enough: the class exists, it subclasses the ordinary one, the engine
+    # really raises it, and every name server.py imports from the engine is
+    # actually there.
     fault = next((n for n in engine.body if isinstance(n, ast.ClassDef)
                   and n.name == "VaultFault"), None)
-    ok(fault is not None, "vault.py defines VaultFault")
+    ok(fault is not None, "vault.py defines VaultFault as a class of its own")
     ok(fault is not None and [ast.unparse(b) for b in fault.bases] == ["VaultError"],
        "and it subclasses VaultError, so everything that already catches "
        "VaultError still does", [ast.unparse(b) for b in fault.bases] if fault else None)
+
+    import vault as _engine
+    ok(issubclass(_engine.VaultFault, VaultError)
+       and _engine.VaultFault is not VaultError,
+       "and at runtime it is a DISTINCT type: an alias would make every refusal "
+       "take the fault branch")
+
+    raises_fault = [n for n in ast.walk(engine) if isinstance(n, ast.Raise)
+                    and isinstance(n.exc, ast.Call)
+                    and getattr(n.exc.func, "id", "") == "VaultFault"]
+    ok(len(raises_fault) >= 5, "and the engine really raises it, not just declares it",
+       len(raises_fault))
+
+    # Removing it from the engine would kill the container at import — and the
+    # suite, which never imports server.py, would stay green while doing it.
+    imported = [a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)
+                and n.module == "vault" for a in n.names]
+    missing = [name for name in imported if not hasattr(_engine, name)]
+    ok(imported and not missing,
+       f"and every name server.py imports from the engine exists there: {imported}",
+       missing)
     # The three read-back checks are the engine's own integrity detectors:
     # nothing a caller sends can make them fire, so they are faults by
     # construction. This is a criterion, not a count — it names the shape, and
@@ -463,7 +580,11 @@ def log_level_checks() -> None:
             (" info ", "INFO", None),
             ("DEBUG", "INFO", "DEBUG"),    # inert here: there are no debug lines
             ("ERROR", "INFO", "ERROR"),    # would silence the gate's refusals
-            ("WARN", "INFO", "WARN"),      # the plausible typo
+            # WARN is Python's own alias, not a typo, and the intent behind it is
+            # unambiguous: less noise. Correcting it to INFO would hand back MORE,
+            # and say so in a line that to its author reads as false. Honoured.
+            ("WARN", "WARNING", None),
+            ("warn", "WARNING", None),
             ("INF0", "INFO", "INF0")):
         old = os.environ.pop("LOG_LEVEL", None)
         try:
@@ -924,7 +1045,17 @@ def main() -> int:
         # are checked, and the second one is the one that matters: a fault
         # mislabelled as a refusal goes quiet, and a refusal mislabelled as a
         # fault turns a caller's typo into a page of traceback.
-        from vault import VaultFault
+        # Fetched rather than imported, so that losing the type from the engine
+        # produces a NAMED failure instead of an ImportError that takes the
+        # whole suite down before it can say which line did it. A stand-in
+        # nothing ever raises keeps the section readable: the FAULT cases go
+        # red, the REFUSAL cases still prove what they prove.
+        import vault as _v
+        VaultFault = getattr(_v, "VaultFault", None)
+        ok(VaultFault is not None and VaultFault is not VaultError,
+           "the engine exports VaultFault as a type of its own", VaultFault)
+        if VaultFault is None or VaultFault is VaultError:
+            VaultFault = type("VaultFault", (Exception,), {})
         # Inside `root` so the teardown takes it away, and `root` itself is not
         # a repository — only the datasets under it are — so git finds nothing
         # to walk up to.
@@ -944,6 +1075,10 @@ def main() -> int:
                 ok(True, f"FAULT: {label}")
             except VaultError as e:
                 ok(False, f"FAULT: {label}", f"came back as a plain refusal: {e}")
+            except Exception as e:
+                # Anything else is wrong here too, and saying so beats letting
+                # the traceback end the suite before it names the line.
+                ok(False, f"FAULT: {label}", f"came back as {type(e).__name__}: {e}")
 
         for label, fn in (
             ("a revision that does not exist, in diff",
@@ -961,6 +1096,8 @@ def main() -> int:
                 ok(False, f"REFUSAL: {label}", f"mislabelled as a fault: {e}")
             except VaultError:
                 ok(True, f"REFUSAL: {label}")
+            except Exception as e:
+                ok(False, f"REFUSAL: {label}", f"came back as {type(e).__name__}: {e}")
 
         print("\n[13] static server.py <-> vault.py consistency")
         static_api_check()

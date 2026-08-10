@@ -38,6 +38,7 @@ Environment:
   ANTHROPIC_CIDR          DEPRECATED, still honoured: see ALLOWED_CIDRS
   LOG_LEVEL               level of THIS logger only, INFO or WARNING (default
                           INFO). Nothing below INFO: there are no debug lines.
+                          WARN is honoured as WARNING, being Python's own alias.
                           Anything else falls back to INFO and says so
   FASTMCP_HOME            token store; set in the Dockerfile, MUST persist
   VAULT_UID / VAULT_GID   service user, dropped to by the entrypoint (99/100)
@@ -61,7 +62,7 @@ from fastmcp.server.middleware import Middleware, MiddlewareContext
 from preflight import cidrs_from_env, describe_cidrs, log_level_from_env
 from vault import VaultRoot, VaultError, VaultFault
 
-VERSION = "2.3.0"
+VERSION = "2.3.1"
 
 # The ROOT logger stays at WARNING. It used to be INFO, which switched on INFO
 # for every library loaded, not for ours: that is where the noise came from.

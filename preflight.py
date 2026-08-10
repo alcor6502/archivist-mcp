@@ -96,6 +96,13 @@ def cidrs_from_env() -> list[tuple[str, str]]:
 
 
 LOG_LEVELS = ("INFO", "WARNING")
+# `WARN` is not a typo: it is Python's own standard alias, and setLevel("WARN")
+# does not raise. Someone who writes it wants LESS noise, so making it fall back
+# to INFO hands them MORE — with a log line telling them their value was
+# rejected, which to their ear is simply false. It is the one value outside the
+# list whose intent is unambiguous, so it is honoured rather than corrected.
+# Reported by the twin, which paid for it first.
+LOG_ALIASES = {"WARN": "WARNING"}
 
 
 def log_level_from_env() -> tuple[str, str | None]:
@@ -117,6 +124,8 @@ def log_level_from_env() -> tuple[str, str | None]:
         return "INFO", None
     if given in LOG_LEVELS:
         return given, None
+    if given in LOG_ALIASES:
+        return LOG_ALIASES[given], None
     return "INFO", given
 
 
