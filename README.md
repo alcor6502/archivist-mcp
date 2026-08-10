@@ -375,10 +375,14 @@ container that already runs keeps working untouched.
 access log and FastMCP are set elsewhere. `INFO` prints, once, what was found at
 boot — the datasets and their state, the key registry, and the line with
 version, public URL, allowed user and IP filter — which is what you read to
-confirm that an update actually took. `WARNING` silences those and leaves the
-refusals. The list is closed on purpose: below `INFO` there
-is nothing to switch on, and above `WARNING` the refusals go silent, which is
-the one line that tells a stranger turned away apart from a broken deployment.
+confirm that an update actually took. It also prints one line per **refused
+call** — a `CONFLICT`, a wrong key, a path that is not allowed — in the form
+`refused edit_file: …`. `WARNING` silences all of that; what it does not
+silence is the gate's refusals, and any **fault**, which keeps its full
+traceback at `ERROR` because a broken machine is not a refusal. The list is
+closed on purpose: below `INFO` there is nothing to switch on, and above
+`WARNING` the gate's refusals go silent too, and that is the one line that
+tells a stranger turned away apart from a broken deployment.
 
 The service listens on loopback inside the container, and that is not a setting.
 Legitimate traffic arrives from the Funnel, which runs in the same container.

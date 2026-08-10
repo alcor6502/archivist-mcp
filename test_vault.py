@@ -223,6 +223,203 @@ def gate_hook_check() -> None:
        "both refusals are logged, identity and origin", body.count("log.warning"))
 
 
+def tool_conversion_check() -> None:
+    """Every tool goes through the @tool decorator, and the decorator really
+    converts.
+
+    This is the same trade as the single-door check: the guarantee rests on how
+    server.py is WRITTEN, and nothing at runtime would notice a tool that
+    skipped it. One tool left on a bare @mcp.tool is one tool whose designed
+    refusals still print twenty-five lines of traceback at ERROR — and being
+    the one nobody thought about, it is the one that never gets tested. The
+    log of 2026-Aug-09 is what this exists to keep from coming back: three
+    refusals, three tracebacks, two of them CONFLICTs on edit_file, which is
+    the CAS doing its job and being logged as a fault.
+
+    The decorator's own shape is pinned too, because each piece of it is load
+    bearing and each one is silent when removed:
+      - `functools.wraps` is what keeps the MCP schema intact. FastMCP builds
+        name, docstring and signature from the function and follows
+        __wrapped__ to find them; without it the whole surface changes and
+        every client has to reconnect.
+      - `from None` is the point of the exercise: a chained traceback is
+        exactly what we are taking out of the log.
+      - `log_level` below ERROR is the other half. Converting to ToolError and
+        leaving the level at ERROR would change the number of lines and
+        nothing else.
+      - our OWN log line, at INFO, because FastMCP's does not reach the
+        container's log at all: the Dockerfile sets FASTMCP_LOG_LEVEL=WARNING,
+        so an INFO record from fastmcp.server.server is dropped before it is
+        printed. Without this line the change trades twenty-five lines for
+        none. INFO and not WARNING is a decision, not a detail: WARNING is
+        where the Gate logs a stranger turned away, and mixing a CONFLICT in
+        there costs the one signal that tells a refused stranger from a broken
+        deployment.
+
+    A tool that lost its decorator ALTOGETHER is caught elsewhere and on
+    purpose: it stops being a tool, so guide_signature_check() sees its
+    signature still promised by the manual and names it. The two checks cover
+    the two ways of falling out."""
+    src = (HERE / "server.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    conv = next((n for n in tree.body
+                 if isinstance(n, ast.FunctionDef) and n.name == "tool"), None)
+    if conv is None:
+        ok(False, "server.py defines the @tool decorator")
+        return
+    ok(True, "server.py defines the @tool decorator")
+
+    handlers = [h for h in ast.walk(conv) if isinstance(h, ast.ExceptHandler)]
+    caught = [ast.unparse(h.type) for h in handlers if h.type is not None]
+    ok("VaultError" in caught, "the decorator catches VaultError", sorted(caught))
+
+    # The ORDER, which is the whole distinction and is invisible once written:
+    # VaultFault SUBCLASSES VaultError, so `except VaultError` placed first
+    # would swallow every fault into the quiet path and nothing would look
+    # wrong. Python has no warning for this; the test is the warning.
+    ok(caught[:1] == ["VaultFault"],
+       "and it catches VaultFault FIRST, or the subclass never gets its turn",
+       caught)
+    fault_h = [h for h in handlers if ast.unparse(h.type or ast.Constant(0)) == "VaultFault"]
+    ok(fault_h and all(isinstance(s, ast.Raise) and s.exc is None
+                       for h in fault_h for s in h.body),
+       "and it lets a fault rise untouched: traceback at ERROR, as before 2.3.0")
+
+    raised = [n for h in handlers for n in ast.walk(h)
+              if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "ToolError"]
+    ok(bool(raised), "and re-raises it as ToolError")
+
+    # Pinned to INFO, not merely "below ERROR": `"ERROR" not in level` is a
+    # substring search, and it is satisfied by CRITICAL — which is HIGHER — and
+    # by WARNING, the one value this file spends a paragraph explaining we must
+    # not use. A test that asserts something looser than its own docstring
+    # promises is worse than no test.
+    levels = [ast.unparse(k.value) for r in raised for k in r.keywords
+              if k.arg == "log_level"]
+    ok(levels and levels[0] == "logging.INFO",
+       "at logging.INFO exactly, which is the decision",
+       levels[0] if levels else "log_level not set")
+
+    # `raise X from None` parses as cause=Constant(None) — not as no cause at
+    # all, which is what a bare `raise X` gives you.
+    ok(any(isinstance(n, ast.Raise) and isinstance(n.cause, ast.Constant)
+           and n.cause.value is None for n in ast.walk(conv)),
+       "with `from None`: the chained traceback is what we are removing")
+
+    logged = [n for h in handlers for n in ast.walk(h)
+              if isinstance(n, ast.Call) and ast.unparse(n.func).startswith("log.")]
+    ok(logged, "the refusal leaves a line of OUR own — FastMCP's never reaches "
+               "the container's log, FASTMCP_LOG_LEVEL sees to that")
+    ok(all(ast.unparse(n.func) == "log.info" for n in logged),
+       "at INFO: WARNING is the Gate's height, and a CONFLICT is not a warning",
+       sorted({ast.unparse(n.func) for n in logged}))
+
+    ok(any(ast.unparse(d) == "functools.wraps(fn)"
+           for f in ast.walk(conv) if isinstance(f, ast.FunctionDef)
+           for d in f.decorator_list),
+       "and functools.wraps, or every tool would lose its schema")
+
+    # WHAT it registers, not merely that it registers. `mcp.tool(fn)` instead of
+    # `mcp.tool(guarded)` defines the wrapper and throws it away: no conversion,
+    # no log line, tracebacks back — and every check above still passes, because
+    # every piece it looks for is still written down. That is the exact shape of
+    # a check that filters out the case it was written for.
+    registers = [n for n in ast.walk(conv) if isinstance(n, ast.Call)
+                 and ast.unparse(n.func) == "mcp.tool"]
+    ok(registers and registers[0].args
+       and ast.unparse(registers[0].args[0]) == "guarded",
+       "and it registers the WRAPPED function, not the bare one",
+       ast.unparse(registers[0].args[0]) if registers and registers[0].args else "no argument")
+
+    # The census. A bare @mcp.tool anywhere else is a tool that never learned
+    # to be quiet, and the failure NAMES it: a list of one is what you get when
+    # you forget a single line, which is the realistic mistake.
+    bare = [n.name for n in tree.body
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and any(ast.unparse(d).startswith("mcp.tool") for d in n.decorator_list)]
+    ok(not bare, "no tool is registered with a bare @mcp.tool", bare)
+
+    # An EQUALITY against what the file says, never a threshold. `>= 20` against
+    # 21 tools tolerates exactly one escapee, and one is the realistic mistake:
+    # `@tool()` with the brackets is a Call, not a Name, so it would slip the
+    # list AND satisfy the threshold — while at boot it raises TypeError, since
+    # the decorator takes the function itself. The suite never imports
+    # server.py, so nothing else would see it.
+    def names_tool(d) -> bool:
+        node = d.func if isinstance(d, ast.Call) else d
+        return isinstance(node, ast.Name) and node.id == "tool"
+
+    decorated = [n for n in tree.body
+                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                 and any(names_tool(d) for d in n.decorator_list)]
+    wrapped = [n.name for n in decorated
+               if any(isinstance(d, ast.Name) and d.id == "tool"
+                      for d in n.decorator_list)]
+    called = [n.name for n in decorated if n.name not in wrapped]
+    ok(not called, "every @tool is written bare: `@tool()` calls the decorator "
+                   "with no function and dies at import", called)
+    # Three counts that have to agree, because two of them fall together. The
+    # bare-form count and the AST list BOTH lose a tool written `@tool()` — it
+    # is a Call, not a Name, and it does not match `^@tool$` either — so on
+    # their own they stay in step while a tool escapes. The wider line count is
+    # the third leg: it sees the brackets.
+    bare_lines = len(re.findall(r"(?m)^@tool[ \t]*$", src))
+    all_lines = len(re.findall(r"(?m)^@tool\b", src))
+    ok(len(wrapped) == bare_lines == all_lines,
+       "and they all go through it, in the bare form",
+       f"{len(wrapped)} decorated, {bare_lines} bare lines, {all_lines} in all")
+    # `mcp.tool` occurs once in the whole file — inside the decorator — and
+    # nowhere else. The count is not written down: it is what the source says.
+    ok(src.count("mcp.tool") == 1,
+       "`mcp.tool` is named exactly once, inside the decorator",
+       src.count("mcp.tool"))
+    # add_tool() is the other door into the surface, and it carries no
+    # decorator at all: a tool entering that way would convert nothing AND go
+    # missing from no manual, because there is nothing for either check to see.
+    ok("add_tool" not in src, "tools enter through the decorator and nowhere else")
+
+    # `guarded` is synchronous and RETURNS what fn returns. Handed a coroutine
+    # function it would return the coroutine unawaited, FastMCP would await it
+    # further out, and the VaultError would surface with the try/except never
+    # entered — the tool works, the conversion silently does not. Today all
+    # tools are sync. The day one is not, this says so instead of blessing it.
+    async_tools = [n.name for n in tree.body if isinstance(n, ast.AsyncFunctionDef)
+                   and any(isinstance(d, ast.Name) and d.id == "tool"
+                           for d in n.decorator_list)]
+    ok(not async_tools,
+       "no tool is async: `guarded` would return the coroutine without seeing "
+       "its refusals", async_tools)
+
+    # The engine must NOT import FastMCP: that is what lets this suite run with
+    # no network, no Docker and no OAuth in under a minute, and it is the
+    # reason the conversion lives in server.py rather than in vault.py.
+    engine = ast.parse((HERE / "vault.py").read_text(encoding="utf-8"))
+    imports = set()
+    for n in ast.walk(engine):
+        if isinstance(n, ast.Import):
+            imports |= {a.name.split(".")[0] for a in n.names}
+        elif isinstance(n, ast.ImportFrom) and n.module:
+            imports.add(n.module.split(".")[0])
+    ok("fastmcp" not in imports and "mcp" not in imports,
+       "vault.py imports no server framework", sorted(imports))
+
+    fault = next((n for n in engine.body if isinstance(n, ast.ClassDef)
+                  and n.name == "VaultFault"), None)
+    ok(fault is not None, "vault.py defines VaultFault")
+    ok(fault is not None and [ast.unparse(b) for b in fault.bases] == ["VaultError"],
+       "and it subclasses VaultError, so everything that already catches "
+       "VaultError still does", [ast.unparse(b) for b in fault.bases] if fault else None)
+    # The three read-back checks are the engine's own integrity detectors:
+    # nothing a caller sends can make them fire, so they are faults by
+    # construction. This is a criterion, not a count — it names the shape, and
+    # a fourth one added tomorrow is covered the day it is written.
+    esrc = (HERE / "vault.py").read_text(encoding="utf-8")
+    misfiled = [ln.strip() for ln in esrc.splitlines()
+                if "verification failed" in ln and "raise VaultFault" not in ln]
+    ok(not misfiled, "every post-write read-back failure is a VaultFault", misfiled)
+
+
 def dockerfile_env_check() -> None:
     """FastMCP reads its settings when it is IMPORTED, so they cannot be set
     from inside server.py — they live in the Dockerfile as ENV. That makes them
@@ -308,12 +505,17 @@ def guide_signature_check() -> None:
         return f"{fn.name}({', '.join(parts)})"
 
     def is_tool(fn) -> bool:
-        # Both spellings, because both work: @mcp.tool is an Attribute and
-        # @mcp.tool(name=…) is a Call wrapping it. Matching only the first would
-        # skip a tool in silence, which is the exact failure this test exists to
-        # prevent — it would go missing from the manual and nothing would fail.
+        # Every spelling that registers a tool, because every one of them works:
+        # @tool, which is server.py's own converting decorator and what they all
+        # use since 2.3.0; @mcp.tool, an Attribute; and @mcp.tool(name=…), a Call
+        # wrapping it. Matching only some would skip a tool in silence, which is
+        # the exact failure this test exists to prevent — it would go missing
+        # from the manual and nothing would fail. That @tool is the ONLY one in
+        # use is not asserted here but in tool_conversion_check().
         for d in fn.decorator_list:
             node = d.func if isinstance(d, ast.Call) else d
+            if isinstance(node, ast.Name) and node.id == "tool":
+                return True
             if (isinstance(node, ast.Attribute) and node.attr == "tool"
                     and isinstance(node.value, ast.Name) and node.value.id == "mcp"):
                 return True
@@ -322,11 +524,12 @@ def guide_signature_check() -> None:
     real = [rendered(n) for n in tree.body
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and is_tool(n)]
 
-    # `mcp.tool` appears once per tool in the source and nowhere else. If the AST
-    # walk and a plain count of the decorator disagree, the walk is missing some
-    # and every check below is being run on a subset.
-    ok(len(real) == src.count("@mcp.tool"),
-       "the AST sees every tool the file declares", f"{len(real)} vs {src.count('@mcp.tool')}")
+    # A decorator line appears once per tool in the source and nowhere else. If
+    # the AST walk and a plain count of those lines disagree, the walk is missing
+    # some and every check below is being run on a subset.
+    lines = len(re.findall(r"(?m)^@(?:tool|mcp\.tool)\b", src))
+    ok(len(real) == lines,
+       "the AST sees every tool the file declares", f"{len(real)} vs {lines}")
 
     guide = (HERE / "reference-guide.md").read_text(encoding="utf-8")
 
@@ -715,6 +918,50 @@ def main() -> int:
         ok(old.manifest("")["manifest_sha256"] == before_sha, "CONTENT NEVER CHANGES")
         ok("not needed" in old.prune_history(6), "a second prune is a no-op")
 
+        print("\n[12b] a refusal and a fault are different things")
+        # server.py treats them differently — one quiet line, or a full
+        # traceback — so the engine has to get the label right. Both directions
+        # are checked, and the second one is the one that matters: a fault
+        # mislabelled as a refusal goes quiet, and a refusal mislabelled as a
+        # fault turns a caller's typo into a page of traceback.
+        from vault import VaultFault
+        # Inside `root` so the teardown takes it away, and `root` itself is not
+        # a repository — only the datasets under it are — so git finds nothing
+        # to walk up to.
+        _bare = Path(root) / "not-a-dataset-just-a-folder"
+        _bare.mkdir()
+        for label, fn in (
+            ("git refusing a command of ours", lambda: ds._git("frobnicate")),
+            # A directory that is not a repository, and has none above it
+            # either — the shape a broken mount or a half-made dataset has.
+            ("git in a directory that is not a repository",
+             lambda: Dataset(_bare, "Bare")._git("rev-parse", "HEAD")),
+        ):
+            try:
+                fn()
+                ok(False, f"FAULT: {label}", "did not raise")
+            except VaultFault:
+                ok(True, f"FAULT: {label}")
+            except VaultError as e:
+                ok(False, f"FAULT: {label}", f"came back as a plain refusal: {e}")
+
+        for label, fn in (
+            ("a revision that does not exist, in diff",
+             lambda: ds.diff("deadbee")),
+            ("a revision that does not exist, in restore",
+             lambda: ds.restore("deadbee", ds.manifest("")["manifest_sha256"])),
+            ("a CONFLICT, which is the system working",
+             lambda: ds.write_file("log.md", "x", "0" * 64)),
+            ("a file that is not there", lambda: ds.read_file("nope.md")),
+        ):
+            try:
+                fn()
+                ok(False, f"REFUSAL: {label}", "did not raise")
+            except VaultFault as e:
+                ok(False, f"REFUSAL: {label}", f"mislabelled as a fault: {e}")
+            except VaultError:
+                ok(True, f"REFUSAL: {label}")
+
         print("\n[13] static server.py <-> vault.py consistency")
         static_api_check()
         single_door_check()
@@ -724,6 +971,9 @@ def main() -> int:
 
         print("\n[14b] the Gate is wired to the hook it claims")
         gate_hook_check()
+
+        print("\n[14b2] every tool's refusals go through the converter")
+        tool_conversion_check()
 
         print("\n[14c] the manual says what the code actually offers")
         guide_signature_check()

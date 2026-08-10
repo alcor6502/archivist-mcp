@@ -69,7 +69,36 @@ _NAME_OK = _re.compile(r"^[A-Za-z0-9\u00C0-\u024F][A-Za-z0-9 ._\-\u00C0-\u024F]{
 
 
 class VaultError(Exception):
-    """A readable error, returned to the client as the tool error text."""
+    """A readable error, returned to the client as the tool error text.
+
+    By default it means a DESIGNED REFUSAL: the caller asked for something the
+    rules do not allow, or asked with stale information. A wrong key, a
+    CONFLICT, a path outside the dataset, a file that is not there, a block
+    over the ceiling. Nothing is broken — the answer is no, and the message
+    says what to do instead."""
+
+
+class VaultFault(VaultError):
+    """A refusal's opposite: the machinery failed, and the caller could not
+    have prevented it. git returning non-zero on a commit, a read that comes
+    back short, a write whose read-back does not match what was written, a key
+    registry that will not open.
+
+    It exists because server.py has to tell the two apart. A designed refusal
+    becomes one quiet line; a fault keeps its full traceback at ERROR, which is
+    what a fault deserves. Without this distinction the 2.3.0 change would have
+    turned a full disk into a line beginning with the word "refused" — and, at
+    LOG_LEVEL=WARNING, into nothing at all. Inverting the very defect it was
+    written to close.
+
+    It SUBCLASSES VaultError on purpose: everything that already catches
+    VaultError — boot(), the suite's must_fail — keeps catching it, and the
+    text still reaches the caller. Only the treatment in the log differs.
+
+    The line between the two is not the wording, it is WHO CAUSED IT. `git
+    diff <bad rev>` fails with the same git machinery, but a bad revision came
+    from the caller: that stays a plain VaultError, which is why _git() takes
+    `fault`."""
 
 
 def _sha(data: bytes) -> str:
@@ -174,7 +203,7 @@ class VaultRoot:
         try:
             text = self.keys_file.read_text(encoding="utf-8", errors="replace")
         except OSError as e:
-            raise VaultError(f"key registry unreadable ({self.keys_file}): {e}")
+            raise VaultFault(f"key registry unreadable ({self.keys_file}): {e}")
         for line in text.splitlines():
             if not line.strip() or line.lstrip().startswith("#"):
                 continue
@@ -455,7 +484,7 @@ class Dataset:
             raise VaultError(f"file too large ({size} bytes, max {MAX_READ_BYTES})")
         data = p.read_bytes()
         if len(data) != size:
-            raise VaultError(f"read {len(data)} bytes, {size} declared: incomplete read, stopping")
+            raise VaultFault(f"read {len(data)} bytes, {size} declared: incomplete read, stopping")
         return data
 
     def _lock(self):
@@ -463,11 +492,19 @@ class Dataset:
         fcntl.flock(fh, fcntl.LOCK_EX)
         return fh
 
-    def _git(self, *args: str, check: bool = True, timeout: int = 60) -> str:
+    def _git(self, *args: str, check: bool = True, timeout: int = 60,
+             fault: bool = True) -> str:
+        """`fault` says who a non-zero exit belongs to, and the MESSAGE is the
+        same either way — only its fate in the log changes. The default is the
+        machinery: add, commit, status, read-tree. The exceptions are the calls
+        that carry a REVISION the caller chose, where git failing means the
+        caller named something that is not there: that is an ordinary refusal
+        and gets `fault=False`."""
         r = subprocess.run(["git", "-C", str(self.root), *args],
                            capture_output=True, text=True, timeout=timeout)
         if check and r.returncode != 0:
-            raise VaultError(f"git {' '.join(args[:2])} failed: {r.stderr.strip()[:400]}")
+            msg = f"git {' '.join(args[:2])} failed: {r.stderr.strip()[:400]}"
+            raise (VaultFault if fault else VaultError)(msg)
         return r.stdout
 
     def ensure_git(self) -> str:
@@ -541,7 +578,7 @@ class Dataset:
                 os.unlink(tmp)
         back = p.read_bytes()
         if _sha(back) != _sha(data):
-            raise VaultError("post-write verification failed: read-back differs from what was written")
+            raise VaultFault("post-write verification failed: read-back differs from what was written")
         return back
 
     # ---------- status ----------
@@ -609,7 +646,7 @@ class Dataset:
             raise VaultError(f"file too large ({size} bytes, max {MAX_BINARY_BYTES}): use SMB/scp")
         data = p.read_bytes()
         if len(data) != size:
-            raise VaultError(f"read {len(data)} bytes, {size} declared: incomplete read, stopping")
+            raise VaultFault(f"read {len(data)} bytes, {size} declared: incomplete read, stopping")
         return {"dataset": self.name, "path": self._rel(p), "size": len(data),
                 "sha256": _sha(data), "content_base64": base64.b64encode(data).decode("ascii")}
 
@@ -649,7 +686,7 @@ class Dataset:
                 os.fsync(fh.fileno())
             new = self._read_bytes(p)
             if not new.endswith(add.encode("utf-8")):
-                raise VaultError("post-append verification failed: the file does not end with the block written")
+                raise VaultFault("post-append verification failed: the file does not end with the block written")
             commit = self._commit(f"append: {p.relative_to(self.root)}")
         return {"dataset": self.name, "path": self._rel(p), "size": len(new),
                 "sha256": _sha(new), "commit": commit,
@@ -718,7 +755,7 @@ class Dataset:
                 raise VaultError(f"result too large ({len(out)} bytes)")
             back = self._atomic_write(p, out)
             if new_text.encode("utf-8") not in back:
-                raise VaultError("post-edit verification failed: the new text is not in the file")
+                raise VaultFault("post-edit verification failed: the new text is not in the file")
             commit = self._commit(f"edit: {p.relative_to(self.root)}")
         return {"dataset": self.name, "path": self._rel(p), "size": len(back),
                 "sha256": _sha(back), "commit": commit,
@@ -856,7 +893,10 @@ class Dataset:
         if rel:
             p = self._resolve(rel, must_exist=False)
             args = ["diff", f"{rev_a}..{rev_b}", "--", str(p.relative_to(self.root))]
-        out = self._git(*args)
+        # fault=False: both revisions came from the caller, and _check_rev only
+        # rules out the shapes that are not revisions at all. git failing here
+        # means one of them does not exist — a refusal, not a broken machine.
+        out = self._git(*args, fault=False)
         if len(out.encode()) > MAX_DIFF_BYTES:
             out = out.encode()[:MAX_DIFF_BYTES].decode(errors="replace") + "\n[... diff truncated ...]"
         return {"dataset": self.name, "path": self._rel(rel), "from": rev_a, "to": rev_b,
@@ -880,7 +920,13 @@ class Dataset:
                 raise VaultError(
                     f"CONFLICT: expected manifest {expected_manifest[:12]}... but the dataset "
                     f"is {current[:12]}... Re-read the manifest and retry.")
-            full_sha = self._git("rev-parse", "--verify", f"{rev}^{{commit}}").strip()
+            # Same split as in diff(), and the line between the two calls is
+            # exactly where it belongs: resolving the caller's revision can
+            # fail because the revision is not there (a refusal), while
+            # read-tree on a sha git has just verified can only fail because
+            # something is wrong with the repository (a fault).
+            full_sha = self._git("rev-parse", "--verify", f"{rev}^{{commit}}",
+                                 fault=False).strip()
             self._git("read-tree", "-u", "--reset", full_sha)
             commit = self._commit(f"restore: dataset returned to {full_sha[:7]}")
             after = self.manifest("")
