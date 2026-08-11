@@ -820,6 +820,48 @@ def dockerfile_env_check() -> None:
         ok(f"ENV {var}={val}" in df, f"Dockerfile sets {var}={val}")
 
 
+def redaction_armed_check() -> None:
+    """A malformed call must not print the arguments it carried, and the guard
+    that stops it is one call whose ORDER is the whole of it.
+
+    The filter has to sit on fastmcp's HANDLERS, and fastmcp installs those when
+    it configures its logging — which building the server is what triggers.
+    Called before that line it finds nothing to arm. That case raises rather
+    than returning zero, so it cannot pass unnoticed at runtime; what CANNOT be
+    seen at runtime is the call having been deleted, which is silent and leaves
+    the payload printing again. So the call is read here, and so is its
+    position."""
+    src = (HERE / "server.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    _sole_import(tree, "arm_argument_redaction", "mcp_common_engine.logs")
+
+    calls = [n for n in tree.body if isinstance(n, ast.Expr)
+             and isinstance(n.value, ast.Call)
+             and ast.unparse(n.value.func) == "arm_argument_redaction"]
+    ok(len(calls) == 1,
+       "arm_argument_redaction() is called exactly once, at module level — "
+       "without it fastmcp prints the whole argument dict of any malformed "
+       "call, and for this server the arguments ARE the documents", len(calls))
+
+    server = next((n for n in tree.body if isinstance(n, ast.Assign)
+                   and any(getattr(t, "id", "") == "mcp" for t in n.targets)
+                   and isinstance(n.value, ast.Call)
+                   and ast.unparse(n.value.func) == "FastMCP"), None)
+    ok(server is not None, "the server object is built at module level")
+    ok(server is not None and calls and calls[0].lineno > server.lineno,
+       "and the arming comes AFTER it: fastmcp installs the handlers when it "
+       "configures its logging, so arming any earlier finds nothing to arm",
+       f"arm at {calls[0].lineno if calls else '-'}, "
+       f"server at {server.lineno if server else '-'}")
+
+    # The engine has to be new enough to have the module at all. The pin is
+    # compared with the installed package in engine_adoption_check(); this is
+    # the other half — that what installed actually carries the function.
+    from mcp_common_engine.logs import arm_argument_redaction as _arm
+    ok(callable(_arm), "and the installed engine really provides it")
+
+
 def icon_check() -> None:
     """The icon URL is written in two files that nothing links together: the
     Unraid template, which puts it on the container, and server.py, which hands
@@ -1570,6 +1612,9 @@ def main() -> int:
 
         print("\n[14e] the icon is one url, in two files that agree")
         icon_check()
+
+        print("\n[14f] the payload of a malformed call cannot reach the log")
+        redaction_armed_check()
 
         print("\n[15] the IP filter list, in both directions")
         cidr_checks()

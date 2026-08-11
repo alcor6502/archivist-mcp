@@ -67,10 +67,11 @@ from mcp.types import Icon
 from mcp_common_engine import (VERSION as ENGINE_VERSION, cidrs_from_env,
                                describe_cidrs, log_level_from_env)
 from mcp_common_engine.gate import Gate
+from mcp_common_engine.logs import arm_argument_redaction
 from mcp_common_engine.refusals import make_tool
 from vault import VaultRoot, VaultError, VaultFault
 
-VERSION = "2.5.2"
+VERSION = "2.6.0"
 
 # The ROOT logger stays at WARNING. It used to be INFO, which switched on INFO
 # for every library loaded, not for ours: that is where the noise came from.
@@ -178,6 +179,22 @@ ICON_URL = ("https://raw.githubusercontent.com/alcor6502/archivist-mcp"
 mcp = FastMCP("archivist-mcp", auth=auth,
               icons=[Icon(src=ICON_URL, mimeType="image/png",
                           sizes=["256x256"])])
+
+# A malformed call must not print what it carried. fastmcp validates arguments
+# BEFORE the tool runs, so such a call never reaches `tool` below and leaves no
+# refusal line of ours; what it does leave is fastmcp's own warning, which
+# includes pydantic's `input` — for a call-validation failure, the WHOLE
+# argument dict. For this server the arguments ARE the stored data: `content`,
+# `text`, both halves of an `edit_file`. It happened on 2026-08-10 and put two
+# spans of a document in the container log.
+#
+# HERE, and not earlier, because the filter goes on fastmcp's HANDLERS and
+# fastmcp installs them when it configures its logging — which the line above is
+# what triggers. Called too soon it would find nothing to arm, and it RAISES in
+# that case rather than reporting zero: arming nothing is not a harmless
+# outcome, it means the payload is still being printed. Letting that stop the
+# boot is the point.
+arm_argument_redaction()
 
 
 # The decorator that turns a designed refusal into ToolError plus ONE log
