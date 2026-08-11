@@ -820,6 +820,49 @@ def dockerfile_env_check() -> None:
         ok(f"ENV {var}={val}" in df, f"Dockerfile sets {var}={val}")
 
 
+def icon_check() -> None:
+    """The icon URL is written in two files that nothing links together: the
+    Unraid template, which puts it on the container, and server.py, which hands
+    it to FastMCP for the consent page. Two hand copies of one string do not
+    stay equal — they have an expiry date — so this is the thing that compares
+    them instead of hoping.
+
+    It reads the ASSIGNMENT and then the CALL, because the two failures are
+    different: a constant left behind after the argument was dropped would keep
+    a string-search happy while the server passed no icon at all."""
+    src = (HERE / "server.py").read_text(encoding="utf-8")
+    xml = (HERE / "archivist-mcp.xml").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    assigns = [n for n in tree.body if isinstance(n, ast.Assign)
+               and any(getattr(t, "id", "") == "ICON_URL" for t in n.targets)]
+    ok(len(assigns) == 1, "ICON_URL is assigned exactly once", len(assigns))
+    url = ast.literal_eval(assigns[0].value) if assigns else None
+
+    in_xml = re.search(r"<Icon>\s*(\S+?)\s*</Icon>", xml)
+    ok(in_xml is not None, "the Unraid template still declares an <Icon>")
+    ok(in_xml is not None and url == in_xml.group(1),
+       "the icon of the consent page and the icon of the container are the "
+       "SAME url — one image, or the two drift and nobody notices",
+       f"{url} vs {in_xml.group(1) if in_xml else None}")
+
+    # The constant has to REACH FastMCP. A name that nothing passes is a
+    # comment with a colon in it.
+    call = next((n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                 and ast.unparse(n.func) == "FastMCP"), None)
+    ok(call is not None, "FastMCP is constructed in server.py")
+    icons = next((k.value for k in (call.keywords if call else [])
+                  if k.arg == "icons"), None)
+    ok(icons is not None, "and it is given an `icons` argument — without it "
+       "the constant above is decoration")
+    ok(icons is not None and "ICON_URL" in ast.unparse(icons),
+       "and that argument carries ICON_URL, not a second copy of the string",
+       ast.unparse(icons)[:80] if icons is not None else None)
+    ok(icons is not None and "image/png" in ast.unparse(icons)
+       and url is not None and url.endswith(".png"),
+       "the declared mimeType matches the file actually pointed at")
+
+
 def log_level_checks() -> None:
     """logging.setLevel() raises on an unknown level, and it runs at import —
     after the preflight has printed a clean sheet. So the one way to get a
@@ -1524,6 +1567,9 @@ def main() -> int:
 
         print("\n[14d] the log level cannot kill the service at import")
         log_level_checks()
+
+        print("\n[14e] the icon is one url, in two files that agree")
+        icon_check()
 
         print("\n[15] the IP filter list, in both directions")
         cidr_checks()

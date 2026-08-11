@@ -1031,7 +1031,29 @@ between projects, not a defence against an attacker. That is what OAuth is for.
 | `entrypoint.sh` | init, permissions, privilege drop, preflight, start |
 | `Dockerfile` · `requirements.txt` | the image |
 | `archivist-mcp.xml` | Unraid template, every field documented |
+| `archivist-icon.png` | the icon, used in **two** places — see below |
 | `test_vault.py` | the engine checks, no network needed |
+
+### The icon, and where it is actually seen
+
+`archivist-icon.png` is pointed at by its raw GitHub URL from two files: the
+Unraid template, which puts it on the container, and `server.py`, which passes
+it to FastMCP as `icons=[…]`. A check compares the two URLs, because two hand
+copies of one string have an expiry date.
+
+Passing `icons` buys **the OAuth consent page** — the page seen when the
+connector is added or reconnected — where FastMCP renders it in place of its
+own logo.
+
+It does **not** buy the icon in Claude's connector list. That surface ignores
+`serverInfo.icons`, which the MCP spec has carried since revision `2025-11-25`
+(SEP-973); serving `/favicon.ico` and a root page with `<link rel="icon">` are
+ignored as well. The tracking issue is
+[anthropics/claude-ai-mcp#152](https://github.com/anthropics/claude-ai-mcp/issues/152).
+Under a Tailscale Funnel the list shows Tailscale's icon, which is consistent
+with that surface deriving the icon from the DOMAIN — nothing in this
+repository can reach it. The field is sent anyway: the day the client reads it,
+the list follows with no change here.
 
 ## Licence and credits
 

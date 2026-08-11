@@ -53,6 +53,9 @@ from pathlib import Path
 
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.github import GitHubProvider
+# Imported by name on purpose: `mcp` is the server object below, and that name
+# would shadow the package it comes from.
+from mcp.types import Icon
 
 # The engine: gate, refusal conversion, config helpers — the parts the twins
 # had written twice, pinned by tag in requirements.txt. Config comes from the
@@ -67,7 +70,7 @@ from mcp_common_engine.gate import Gate
 from mcp_common_engine.refusals import make_tool
 from vault import VaultRoot, VaultError, VaultFault
 
-VERSION = "2.5.1"
+VERSION = "2.5.2"
 
 # The ROOT logger stays at WARNING. It used to be INFO, which switched on INFO
 # for every library loaded, not for ours: that is where the noise came from.
@@ -144,7 +147,37 @@ auth = GitHubProvider(
     require_authorization_consent=True,
 )
 
-mcp = FastMCP("archivist-mcp", auth=auth)
+# The icon, and what it does and does not buy.
+#
+# WHERE IT IS SHOWN TODAY: the OAuth consent page, which is the page seen when
+# the connector is added or reconnected. fastmcp reads it there —
+# `oauth_proxy/consent.py` takes `icons[0].src` and hands it to the logo — so
+# this replaces FastMCP's own logo with ours. The page's default CSP is
+# `img-src https: data:`, which is why an https URL is enough and no data URI
+# is needed.
+#
+# WHERE IT IS NOT SHOWN, and this is not our defect: the connector list in
+# Claude, which ignores `serverInfo.icons` entirely. The spec has carried the
+# field since revision 2025-11-25 (SEP-973); the client does not read it yet
+# (anthropics/claude-ai-mcp#152, open). Serving /favicon.ico and putting a
+# <link rel="icon"> on a root page were both tried by others and are ignored
+# too, so there is nothing here left to try. The icon there appears to be
+# derived from the DOMAIN, which under a Funnel is *.ts.net and therefore
+# Tailscale's — not something this file can reach.
+#
+# It is set anyway because it costs one argument, it wins the consent page now,
+# and the day the client starts reading the field the list follows with no
+# change here.
+#
+# THE URL IS NOT A SECOND COPY: it is the same one the Unraid template uses for
+# the container icon, and a static check compares the two rather than trusting
+# them to stay equal.
+ICON_URL = ("https://raw.githubusercontent.com/alcor6502/archivist-mcp"
+            "/main/archivist-icon.png")
+
+mcp = FastMCP("archivist-mcp", auth=auth,
+              icons=[Icon(src=ICON_URL, mimeType="image/png",
+                          sizes=["256x256"])])
 
 
 # The decorator that turns a designed refusal into ToolError plus ONE log
