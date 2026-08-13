@@ -69,9 +69,9 @@ from mcp_common_engine import (VERSION as ENGINE_VERSION, cidrs_from_env,
 from mcp_common_engine.gate import Gate
 from mcp_common_engine.logs import arm_argument_redaction
 from mcp_common_engine.refusals import make_tool
-from vault import VaultRoot, VaultError, VaultFault
+from vault import VaultRoot, VaultError, VaultFault, guide_for
 
-VERSION = "2.6.0"
+VERSION = "2.7.0"
 
 # The ROOT logger stays at WARNING. It used to be INFO, which switched on INFO
 # for every library loaded, not for ours: that is where the noise came from.
@@ -231,34 +231,34 @@ _GUIDE = Path(__file__).with_name("reference-guide.md")
 
 @tool
 def vault_status() -> dict:
-    """Start here: is the vault alive, and which datasets exist (open / locked).
-    No key needed. If it does not answer, stop and say so — no other tool will
-    work either."""
+    """Is the vault alive, and which datasets exist. Start here."""
     return vault.status(VERSION)
 
 
 @tool
-def reference_guide() -> dict:
-    """The manual for this vault: the model, the rules, which tool for which job,
-    the limits and what to do when you hit them, the recipes, the errors.
-    Read it before your first write. No key needed."""
+def reference_guide(name: str = "") -> dict:
+    """The manual. Empty: the model. A command name: that command's card.
+    No key needed."""
+    # The behaviour is vault.guide_for, not here: this file cannot be imported
+    # without fastmcp, so anything written in it is out of reach of the suite.
+    # What stays is what only this layer can do — read the file, and stamp the
+    # version.
     try:
-        return {"version": VERSION, "guide": _GUIDE.read_text(encoding="utf-8")}
+        text = _GUIDE.read_text(encoding="utf-8")
     except OSError as e:
         raise VaultError(f"guide not available in the image: {e}")
+    return {"version": VERSION, **guide_for(text, name)}
 
 
 @tool
 def dataset_create(name: str) -> dict:
-    """Create a new dataset: open, empty, with its own git.
-    Name: no '/', no leading '.' or '_'."""
+    """A new dataset: open, empty, with its own git."""
     return vault.create(name)
 
 
 @tool
 def dataset_drop(dataset: str, expected_manifest: str) -> dict:
-    """Delete an OPEN dataset and everything in it. Needs the current
-    manifest_sha256. A dataset with a key cannot be dropped."""
+    """Delete an open dataset and everything in it. Irreversible."""
     return vault.drop(dataset, expected_manifest)
 
 
@@ -266,31 +266,27 @@ def dataset_drop(dataset: str, expected_manifest: str) -> dict:
 
 @tool
 def dataset_status(dataset: str, key: str = "") -> dict:
-    """One dataset in detail: file count, Trash, git status, commits, repository
-    size, last commit."""
+    """One dataset in detail: files, Trash, git, size, last commit."""
     return vault.open_by_name(dataset, key).status()
 
 
 @tool
 def list_files(dataset: str, path: str = "", key: str = "") -> dict:
-    """Files under `path` with size and sha256, recursive. Same sha means same
-    file. Empty path: the whole dataset. An empty folder does not appear."""
+    """Files under `path` with size and sha256, recursive."""
     ds, rel = vault.open(dataset, path, key)
     return ds.list_files(rel)
 
 
 @tool
 def read_file(dataset: str, path: str, key: str = "") -> dict:
-    """Read a UTF-8 text file: content plus sha256. That sha is what write_file
-    and edit_file want back."""
+    """Read a text file: content plus sha256."""
     ds, rel = vault.open(dataset, path, key)
     return ds.read_file(rel)
 
 
 @tool
 def append(dataset: str, path: str, text: str, key: str = "") -> dict:
-    """Append a block to an existing file. It never touches existing bytes, so it
-    needs no sha. Max 64 KB."""
+    """Add a block to the end of an existing file."""
     ds, rel = vault.open(dataset, path, key)
     return ds.append(rel, text)
 
@@ -298,8 +294,7 @@ def append(dataset: str, path: str, text: str, key: str = "") -> dict:
 @tool
 def write_file(dataset: str, path: str, content: str,
                expected_sha256: str, key: str = "") -> dict:
-    """Write the WHOLE file. CAS: expected_sha256 must match the file's current
-    sha, or "new" for a new file. UTF-8, max 2 MB."""
+    """Write the WHOLE file. CAS on expected_sha256, "new" if new."""
     ds, rel = vault.open(dataset, path, key)
     return ds.write_file(rel, content, expected_sha256)
 
@@ -307,16 +302,14 @@ def write_file(dataset: str, path: str, content: str,
 @tool
 def edit_file(dataset: str, path: str, old_text: str, new_text: str,
               expected_sha256: str, key: str = "") -> dict:
-    """Replace old_text — which must occur EXACTLY once — with new_text. Same CAS
-    as write_file. Only the fragments travel, not the file."""
+    """Replace old_text — exactly one occurrence — with new_text. CAS."""
     ds, rel = vault.open(dataset, path, key)
     return ds.edit_file(rel, old_text, new_text, expected_sha256)
 
 
 @tool
 def move_path(dataset: str, src: str, dst: str, key: str = "") -> dict:
-    """Move, rename or trash inside the dataset. Never overwrites. There is no
-    delete tool: moving into Trash/ is the disposal route."""
+    """Move, rename or trash. There is no delete tool: Trash/ is it."""
     # src and dst are relative to the SAME dataset, so a move across datasets is
     # no longer expressible: the runtime check that used to catch it is gone,
     # replaced by the shape of the call itself.
@@ -328,16 +321,14 @@ def move_path(dataset: str, src: str, dst: str, key: str = "") -> dict:
 @tool
 def search(dataset: str, pattern: str, path: str = "",
            regex: bool = False, key: str = "") -> dict:
-    """Grep the dataset server-side: file:line:text, nothing downloaded.
-    regex=True for expressions."""
+    """Grep the dataset server-side. Literal unless regex=True."""
     ds, rel = vault.open(dataset, path, key)
     return ds.search(pattern, rel, regex)
 
 
 @tool
 def manifest(dataset: str, path: str = "", key: str = "") -> dict:
-    """Fingerprint of a tree in one number. Two equal manifests mean identical
-    trees. Required by dataset_drop and dataset_restore."""
+    """Fingerprint of a whole tree in one number."""
     ds, rel = vault.open(dataset, path, key)
     return ds.manifest(rel)
 
@@ -345,19 +336,16 @@ def manifest(dataset: str, path: str = "", key: str = "") -> dict:
 @tool
 def archive(dataset: str, path: str = "", pattern: str = "*.md",
             max_chars: int = 0, key: str = "") -> dict:
-    """Every file matching `pattern` under `path` in ONE call, as a base64
-    tar.gz. Needs a sandbox to extract it in. A big one may not reach you at
-    all — that ceiling is your client's, not this server's: read the guide
-    before archiving a whole dataset. `max_chars` refuses instead of producing
-    what will not travel."""
+    """Every file matching `pattern`, in one call, as a base64 tar.gz.
+    READ reference_guide('archive') FIRST — its defaults and its
+    ceilings hand you less than you asked for, silently."""
     ds, rel = vault.open(dataset, path, key)
     return ds.archive(rel, pattern, max_chars)
 
 
 @tool
 def read_binary(dataset: str, path: str, key: str = "") -> dict:
-    """Read any file (PDF, binary) as base64 plus sha256. Max 2 MB. Useless
-    without a sandbox to decode it in."""
+    """Read any file (PDF, binary) as base64 plus sha256."""
     ds, rel = vault.open(dataset, path, key)
     return ds.read_binary(rel)
 
@@ -365,24 +353,21 @@ def read_binary(dataset: str, path: str, key: str = "") -> dict:
 @tool
 def write_binary(dataset: str, path: str, content_base64: str,
                  expected_sha256: str, key: str = "") -> dict:
-    """Write a binary file from base64. Same CAS as write_file. Max 2 MB decoded.
-    Compare the returned sha with the one computed at the source."""
+    """Write a binary file from base64. Same CAS as write_file."""
     ds, rel = vault.open(dataset, path, key)
     return ds.write_binary(rel, content_base64, expected_sha256)
 
 
 @tool
 def read_at(dataset: str, path: str, rev: str, key: str = "") -> dict:
-    """Read a text file as it was at a past revision (a hash from history, or
-    "HEAD~3"). Read-only."""
+    """Read a text file as it was at a past revision."""
     ds, rel = vault.open(dataset, path, key)
     return ds.read_at(rel, rev)
 
 
 @tool
 def history(dataset: str, path: str = "", n: int = 10, key: str = "") -> dict:
-    """The last n commits of the dataset (empty path) or of one file: hash, ISO
-    date, message. The short hash goes verbatim into read_at and diff."""
+    """The last n commits of the dataset, or of one file."""
     ds, rel = vault.open(dataset, path, key)
     return ds.history(rel, n)
 
@@ -390,25 +375,21 @@ def history(dataset: str, path: str = "", n: int = 10, key: str = "") -> dict:
 @tool
 def diff(dataset: str, rev_a: str, path: str = "", rev_b: str = "HEAD",
          key: str = "") -> dict:
-    """Differences between two revisions. An empty path gives the per-file
-    summary; a file gives its full diff."""
+    """Differences between two revisions."""
     ds, rel = vault.open(dataset, path, key)
     return ds.diff(rev_a, rev_b, rel)
 
 
 @tool
 def dataset_restore(dataset: str, rev: str, expected_manifest: str, key: str = "") -> dict:
-    """Rewrite EVERY file in the dataset back to `rev`. Needs the current
-    manifest_sha256. Not destructive: it commits forward, so it can itself be
-    undone."""
+    """Rewrite EVERY file back to `rev`. Commits forward, so undoable."""
     ds = vault.open_by_name(dataset, key)
     return ds.restore(rev, expected_manifest)
 
 
 @tool
 def trash_purge(dataset: str, before: str, key: str = "") -> dict:
-    """Empty Trash/ of what was trashed before an ISO date. Contents remain in
-    git history."""
+    """Empty Trash/ of what was trashed before an ISO date."""
     ds = vault.open_by_name(dataset, key)
     return ds.trash_purge(before)
 

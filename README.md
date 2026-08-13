@@ -110,11 +110,26 @@ reads the descriptions and decides on its own when to call them.
 That has a consequence which governs the whole design: **every tool's
 description rides at the head of every request**, always, even when none of them
 is used — and it arrives *isolated*, read without the rest of the surface in view.
-Hence the refusal to multiply tools for fun, and hence the division of labour: a
-description carries only what prevents damage when the manual was never read,
-while everything that needs the whole picture lives in `reference_guide()`,
-which is fetched when it is wanted. Extended documentation for humans is in
-this README, which costs nobody anything.
+Hence the refusal to multiply tools for fun, and hence the division of labour,
+which since 2.7.0 has three levels instead of two:
+
+- **the description** carries the signature and one line of what the tool does,
+  and nothing else — measured, all twenty-one together come to about 310 tokens;
+- **`reference_guide()`** is the model: datasets and paths, the sha, the absence
+  of a delete tool, the ceiling that belongs to the client. Only what a
+  signature cannot say, and it is fetched when it is wanted;
+- **`reference_guide("archive")`** is one command's card — its defaults, its
+  limits, the way it bites. Asking for a card costs between 30 and 300 tokens
+  instead of the whole manual.
+
+The reason for the third level is that the second was all-or-nothing: to learn
+one thing about one tool, a caller paid for the entire manual. `vault_status()`,
+which is the first call anyone makes anyway, says in its `guide` field that
+cards exist — so the pointer is paid for once, not repeated in twenty-one
+descriptions where it would cost more than it saves.
+
+Extended documentation for humans is in this README, which costs nobody
+anything.
 
 ### FastMCP
 
@@ -628,7 +643,7 @@ changes from outside were committed separately before yours.
 | empty `Trash/` before a date | `trash_purge` | — |
 | destroy a dataset | `dataset_drop` | the manifest |
 | which datasets exist, and which are locked | `vault_status` | — |
-| the manual itself | `reference_guide` | — |
+| the manual, whole or one card | `reference_guide` | — |
 
 `append` needs no sha because it **never touches existing bytes**: no conflict is
 possible, so there is nothing to protect. It is the right operation for logs and
@@ -658,17 +673,25 @@ before yours — that is information, not an error.
 ```
 vault_status()
 → {"vault": "ok", "version": "…",
-   "guide": "call reference_guide() for the manual",
+   "guide": "reference_guide() for the model; reference_guide(name) for one command's card",
    "datasets": [{"name": "Example Project", "state": "open"},
                 {"name": "Ledger",          "state": "locked"}]}
 ```
 
-**`reference_guide()`** — the manual, served from the image.
-**Returns** `version · guide`
+**`reference_guide(name="")`** — the manual, served from the image, in two
+grains. Empty gives the model and the list of card names; a command name gives
+that command's card; an unknown name is refused *with* the list, so a wrong
+guess is one round trip from the right one.
+**Returns** `version · guide · cards` · or `version · command · guide`
 
 ```
 reference_guide()
-→ {"version": "…", "guide": "# Archivist MCP — manual\n\n## THE MODEL\n…"}
+→ {"version": "…", "guide": "# Archivist MCP — manual\n\n## THE MODEL\n…",
+   "cards": ["append", "archive", …], "how": "reference_guide(name) for …"}
+
+reference_guide("archive")
+→ {"version": "…", "command": "archive",
+   "guide": "archive(dataset, path='', pattern='*.md', max_chars=0, key='')\n…"}
 ```
 
 **`dataset_create(name)`** — a new dataset: open, empty, its own git.
@@ -1027,7 +1050,7 @@ between projects, not a defence against an attacker. That is what OAuth is for.
 | `vault.py` | the engine: `VaultRoot` and `Dataset` |
 | `server.py` | the MCP tools; parameters in the schema, prose in the guide |
 | `preflight.py` | the blocking startup checks, and the IP-filter parser |
-| `reference-guide.md` | the compact guide served by `reference_guide()` |
+| `reference-guide.md` | the manual: a short model page, then one card per command, served by `reference_guide()` |
 | `entrypoint.sh` | init, permissions, privilege drop, preflight, start |
 | `Dockerfile` · `requirements.txt` | the image |
 | `archivist-mcp.xml` | Unraid template, every field documented |

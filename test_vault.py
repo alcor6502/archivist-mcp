@@ -27,7 +27,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from vault import VaultRoot, Dataset, VaultError  # noqa: E402
+from vault import VaultRoot, Dataset, VaultError, guide_for  # noqa: E402
 
 OK = FAIL = 0
 KEY = "k7m2xq4p"
@@ -1001,24 +1001,44 @@ def guide_signature_check() -> None:
 
     guide = (HERE / "reference-guide.md").read_text(encoding="utf-8")
 
-    # Anchored to the block, not scattered over the file. Scanning the whole
-    # manual would let a recipe line pose as a signature, and — worse — would
-    # keep passing if the block itself were deleted.
-    block = guide.split("## EVERY CALL, IN FULL", 1)
-    ok(len(block) == 2, "the manual still has the block of signatures")
-    body = block[1].split("\n## ", 1)[0] if len(block) == 2 else ""
-    written = [ln.strip() for ln in body.splitlines()
-               if ln.startswith("    ") and ln.strip().endswith(")")]
+    # The manual is cut into cards by vault.split_guide — the REAL function the
+    # server calls, not a second parser written here to check the first. If the
+    # cut moves, this moves with it or fails, which is the point.
+    import vault as _v
+
+    # Asked FIRST, by name. split_guide raises VaultFault without the separator,
+    # and a check that dies in a traceback instead of failing by name is a check
+    # in less: the suite goes red either way, but only one of the two tells you
+    # that the heading is what went missing.
+    ok("\n# COMMANDS\n" in guide,
+       "the manual still carries the '# COMMANDS' heading the cut depends on")
+    if "\n# COMMANDS\n" not in guide:
+        return
+    model, cards = _v.split_guide(guide)
+    written = [c.splitlines()[0] for c in cards.values()]
 
     missing = [r for r in real if r not in written]
-    ok(not missing, "every tool is in the guide with its exact signature", missing)
+    ok(not missing, "every tool has a card, headed by its exact signature", missing)
 
-    # The other direction, which is the one that rots silently: a line left in
-    # the manual for a tool that was renamed or deleted. This compares the whole
-    # block, so such a line has nowhere to hide — filtering it by the names the
-    # code still has would have made this check unable to see it.
+    # The other direction, which is the one that rots silently: a card left
+    # behind for a tool that was renamed or deleted. Comparing the whole set
+    # means such a card has nowhere to hide — filtering by the names the code
+    # still has would have made this check unable to see it.
     stale = [w for w in written if w not in real]
-    ok(not stale, "the guide promises no signature the code does not have", stale)
+    ok(not stale, "no card promises a signature the code does not have", stale)
+
+    # One card per tool, and the count is nobody's constant: it is the length of
+    # the list on both sides. A tool added without a card, or a card added
+    # twice, changes one of these two numbers and not the other.
+    ok(len(cards) == len(real),
+       "there are exactly as many cards as tools", f"{len(cards)} cards, {len(real)} tools")
+
+    # The model page is what every caller pays for on the first read, so it is
+    # kept to what a signature cannot say. This is not a style rule: the whole
+    # point of the split is that the general page stays small, and a page that
+    # grows back to holding every signature has quietly undone it.
+    ok(len(model) < 4000,
+       "the model page is still the short one, not the manual again", len(model))
 
     # The manual states that `key` is always last, and a caller passing it
     # positionally depends on that being true. It is a promise, so it is checked.
@@ -1047,27 +1067,27 @@ def guide_signature_check() -> None:
     # The limits are the other kind of number the documents copy by hand, and
     # the one a caller plans around: told 2 MB when the real ceiling is 1, they
     # build a call that fails. The number is RENDERED from the constant into the
-    # form a person writes, and then the whole table ROW is looked for — row and
-    # all, because "2 MB" on its own is satisfied three times over by a single
-    # occurrence, and a wrong row would sail through. There is no second copy of
-    # any number here: change vault.py and this expects the new value.
-    import vault as _v
+    # form a person writes, and then looked for INSIDE THE CARD of the tool it
+    # governs — not in the file at large, where "2 MB" is satisfied several
+    # times over by a single occurrence somewhere else and a wrong number would
+    # sail through. There is no second copy of any number here: change vault.py
+    # and this expects the new value.
     mb = lambda n: f"{n // 1_000_000} MB"
     kb = lambda n: f"{n // 1_000} KB"
     ok(_v.MAX_READ_BYTES == _v.MAX_WRITE_BYTES,
-       "reads and writes share one ceiling, as the single table row claims")
-    rows = [("text file", mb(_v.MAX_READ_BYTES)),
-            ("binary", mb(_v.MAX_BINARY_BYTES)),
-            ("`append` block", kb(_v.MAX_APPEND_BYTES)),
-            ("`list_files`", f"{_v.MAX_LIST_FILES:,} files"),
-            ("`search`", f"{_v.MAX_SEARCH_HITS} lines"),
-            ("`diff`", kb(_v.MAX_DIFF_BYTES)),
-            ("`archive`", f"{mb(_v.MAX_ARCHIVE_BYTES)} in, "
-                          f"{mb(_v.MAX_ARCHIVE_OUT_BYTES)} tgz out"),
-            ("datasets in the vault", f"{_v.MAX_DATASETS}")]
-    for label, shown in rows:
-        ok(f"| {label} | {shown} |" in guide,
-           f"the guide's row for {label} still states what the code enforces", shown)
+       "reads and writes share one ceiling, as one card claims for both")
+    limits = [("write_file", mb(_v.MAX_WRITE_BYTES)),
+              ("read_binary", mb(_v.MAX_BINARY_BYTES)),
+              ("write_binary", mb(_v.MAX_BINARY_BYTES)),
+              ("append", kb(_v.MAX_APPEND_BYTES)),
+              ("list_files", f"{_v.MAX_LIST_FILES:,} files"),
+              ("search", f"{_v.MAX_SEARCH_HITS} lines"),
+              ("diff", kb(_v.MAX_DIFF_BYTES)),
+              ("archive", mb(_v.MAX_ARCHIVE_OUT_BYTES)),
+              ("dataset_create", f"{_v.MAX_DATASETS} datasets")]
+    for name, shown in limits:
+        ok(name in cards and shown in cards[name],
+           f"the card for {name} still states the limit the code enforces", shown)
 
 
 def main() -> int:
@@ -1276,6 +1296,37 @@ def main() -> int:
         a = ds.archive("", "*.md")
         ok(a["file_count"] >= 3 and a["tgz_bytes"] > 0, "archive packs", a["file_count"])
         must_fail("archive with no match", lambda: ds.archive("", "*.xyz"))
+
+        # The default pattern leaves things out, and used to leave them out in
+        # silence: an archive of a folder holding PDFs looked exactly like an
+        # archive of a folder that really was all Markdown. The description no
+        # longer explains this — it says to read the card — so the RESULT has to
+        # carry it, which costs nothing to anyone who is not archiving.
+        (ds.root / "note.pdf").write_bytes(b"%PDF-1.4 not markdown\n")
+        (ds.root / "sheet.csv").write_text("a,b\n1,2\n")
+        md = ds.archive("", "*.md")
+        here = len(ds.list_files("")["files"])
+        ok(md["pattern"] == "*.md", "archive says which pattern it applied", md["pattern"])
+        # Counted against list_files rather than against a number written here:
+        # a fixture gains a file and a hard-coded 2 goes red for no reason, which
+        # is how a check gets switched off. Both sides go through _skip, so they
+        # are counting the same thing.
+        ok(md["skipped_by_pattern"] == here - md["file_count"],
+           "and counts what the pattern left behind — the silent part, made loud",
+           f"{md['skipped_by_pattern']} skipped of {here}")
+        ok(md["skipped_by_pattern"] >= 2,
+           "the two non-Markdown files really are among the skipped", md["skipped_by_pattern"])
+        every = ds.archive("", "*")
+        ok(every["skipped_by_pattern"] == 0 and every["file_count"] == md["file_count"] + md["skipped_by_pattern"],
+           "with '*' nothing is skipped and everything is in",
+           f"{every['file_count']} vs {md['file_count']}")
+        # The count means the same "file" the archive itself means: both sides
+        # go through _skip, so .git and the lockfile are outside both.
+        ok(every["file_count"] == len(ds.list_files("")["files"]),
+           "archiving everything packs exactly what list_files lists",
+           f"{every['file_count']} vs {len(ds.list_files('')['files'])}")
+        (ds.root / "note.pdf").unlink()
+        (ds.root / "sheet.csv").unlink()
         # The member names inside the tgz follow the same rule as every other
         # path that comes back: extracting reproduces the dataset's tree, not a
         # directory named after the dataset.
@@ -1313,6 +1364,34 @@ def main() -> int:
         # cheapest thing to do is say so. Falling back to "no ceiling" would
         # hand back MORE than was asked for, silently.
         must_fail("a negative max_chars", lambda: ds.archive("", "*.md", max_chars=-1))
+
+        # The guide, served the way the tool serves it. reference_guide() is a
+        # shell over guide_for(), so this is the real behaviour and not a
+        # rehearsal of it: server.py cannot be imported without fastmcp, and
+        # what cannot be imported cannot be tested.
+        print("\n[6c] the guide, whole and by the card")
+        gtext = (Path(__file__).parent / "reference-guide.md").read_text(encoding="utf-8")
+        whole = guide_for(gtext)
+        ok("cards" in whole and "archive" in whole["cards"],
+           "the model page comes with the list of card names",
+           len(whole.get("cards", [])))
+        ok("# COMMANDS" not in whole["guide"],
+           "and the model page stops before the cards")
+        card = guide_for(gtext, "archive")
+        ok(card["command"] == "archive" and card["guide"].startswith("archive("),
+           "a card comes back headed by its own signature")
+        ok(len(card["guide"]) < len(whole["guide"]),
+           "and a card is smaller than the model page — the whole point")
+        # Written as the manual prints it, which is how a reader will paste it.
+        for spelling in ("Archive", " archive ", "archive()"):
+            ok(guide_for(gtext, spelling)["command"] == "archive",
+               f"{spelling!r} finds the same card")
+        # The refusal carries the names: one round trip, not two.
+        try:
+            guide_for(gtext, "teleport"); ok(False, "an unknown name is refused")
+        except VaultError as e:
+            ok("append" in str(e) and "archive" in str(e),
+               "an unknown name is refused WITH the list of names", str(e)[:60])
         try:
             ds.archive("", "*.md", max_chars=10)
             ok(False, "the refusal states the size it would have been")

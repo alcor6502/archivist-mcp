@@ -68,6 +68,51 @@ ROOT_LOCKFILE = ".archivist-root.lock"
 _NAME_OK = _re.compile(r"^[A-Za-z0-9\u00C0-\u024F][A-Za-z0-9 ._\-\u00C0-\u024F]{0,62}$")
 
 
+def split_guide(text: str) -> tuple[str, dict[str, str]]:
+    """The manual, cut in two: everything before `# COMMANDS` is the model, and
+    each `## name(signature)` after it is one command's card.
+
+    It lives HERE, in the module the test suite imports, and not next to the
+    tool that serves it, because the alternative is two parsers: the server's
+    and the one a test would have to write to check the server's. Two
+    expressions that agree today are the shape every drift in this project has
+    taken. The suite runs this function — the real one — against the real file.
+
+    The signature stays in the HEADING rather than in the body because that is
+    what makes the cards checkable: a static check compares each heading with
+    the tool's actual parameters, so a card cannot promise an argument the code
+    has not got, and a tool cannot be added without one."""
+    model, sep, rest = text.partition("\n# COMMANDS\n")
+    if not sep:
+        raise VaultFault("the guide has no '# COMMANDS' section: the image is wrong")
+    cards = {}
+    for m in _re.finditer(r"\n## ([a-z_]+)\((.*?)\)\n(.*?)(?=\n## |\Z)", rest, _re.S):
+        cards[m.group(1)] = f"{m.group(1)}({m.group(2)})\n{m.group(3).strip()}"
+    return model.strip(), cards
+
+
+def guide_for(text: str, name: str = "") -> dict:
+    """What `reference_guide(name)` answers, minus the version — so the tool is
+    a shell and this is the behaviour, testable without fastmcp installed.
+
+    A name is taken as written and then forgiven: surrounding space, capitals,
+    and a trailing `()` copied out of a signature. Forgiving the parentheses is
+    not politeness — the manual prints names WITH them, so pasting one back is
+    the likeliest way to ask, and refusing it would punish reading the guide.
+
+    An unknown name is refused WITH the list of names. A bare refusal costs the
+    caller a second round trip to find out what it should have asked for, and
+    the names are the cheapest thing in here to send."""
+    model, cards = split_guide(text)
+    if not name.strip():
+        return {"guide": model, "cards": sorted(cards),
+                "how": "reference_guide(name) for one command's card"}
+    key = name.strip().lower().removesuffix("()")
+    if key not in cards:
+        raise VaultError(f"no card for {name!r}: {', '.join(sorted(cards))}")
+    return {"command": key, "guide": cards[key]}
+
+
 class VaultError(Exception):
     """A readable error, returned to the client as the tool error text.
 
@@ -316,7 +361,8 @@ class VaultRoot:
         return {
             "vault": "ok",
             "version": version,
-            "guide": "call reference_guide() for the manual",
+            "guide": "reference_guide() for the model; reference_guide(name) "
+                     "for one command's card",
             "datasets": [
                 {"name": n, "state": "locked" if _fold(n) in keys else "open"}
                 for n in self.dataset_names()
@@ -929,7 +975,20 @@ class Dataset:
         # Member names are dataset-relative, like every other path that comes
         # back: extracting the tgz reproduces the tree as the dataset holds it,
         # not a directory named after the dataset.
-        return {"dataset": self.name, "base": self._rel(base), "file_count": n,
+        #
+        # `pattern` and `skipped_by_pattern` are the tool explaining itself in
+        # the one place where it costs nothing: the result. The default is
+        # `*.md`, so an archive taken without thinking about it holds the
+        # Markdown and silently leaves out every PDF, image and binary — and
+        # the caller cannot tell that from a folder that really is all
+        # Markdown. Stating the pattern and counting what it left behind turns
+        # a silent omission into a number to read. The count goes through
+        # `_skip`, so it means the same "file" the archive itself means.
+        skipped = 0
+        if base.is_dir():
+            skipped = sum(1 for p in base.rglob("*") if not self._skip(p)) - n
+        return {"dataset": self.name, "base": self._rel(base), "pattern": pattern,
+                "file_count": n, "skipped_by_pattern": skipped,
                 "original_bytes": total, "tgz_bytes": len(gz),
                 "tgz_base64": base64.b64encode(gz).decode("ascii")}
 
