@@ -125,24 +125,38 @@ def c_keys():
     # The registry may be absent (all datasets open): not an error. If it is
     # there it must be readable and syntactically sane, or a dataset you believe
     # is protected would silently be open.
+    #
+    # The parsing is NOT done here. It used to be, with a second implementation
+    # that split on TAB only while the format also tolerates two-or-more
+    # spaces: a good space-separated line was read as one long name, matched no
+    # dataset, and was reported as an orphan that did not exist. And the
+    # message carried the offending LINE, which is `name<sep>KEY` — so the key
+    # of a protected dataset was printed into the container log in clear. Both
+    # halves are cured by asking vault.py, which is the reader that decides
+    # what is actually locked, and which hands back line NUMBERS, never lines.
+    #
+    # Imported inside the check on purpose: the module contract is that this
+    # file needs only the engine's root, so an unimportable vault.py has to
+    # come out as one named FAILED check — not as a traceback that takes the
+    # whole preflight with it.
+    from vault import parse_key_registry
+
     if not os.path.exists(KEYS):
         return f"no registry at {KEYS}: every dataset is open"
     if not os.access(KEYS, os.R_OK):
         raise RuntimeError(f"{KEYS} is not readable by the service user: check owner and mode (99:100, 640)")
+    text = open(KEYS, encoding="utf-8", errors="replace").read()
+    entries, malformed = parse_key_registry(text)
+    if malformed:
+        raise RuntimeError(
+            f"{len(malformed)} registry lines carry no separator, at line(s) "
+            f"{', '.join(str(n) for n in malformed[:5])} — a TAB is required "
+            f"(two or more spaces are tolerated). The lines are not printed: "
+            f"they contain keys")
     known = {d.casefold() for d in _datasets()}
-    n = 0
-    orphans = []
-    for line in open(KEYS, encoding="utf-8", errors="replace").read().splitlines():
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        if "\t" not in line and "  " not in line:
-            raise RuntimeError(f"registry line without a separator: {line[:40]!r} — a TAB is required")
-        name = line.split("\t", 1)[0].strip()
-        n += 1
-        if name.casefold() not in known:
-            orphans.append(name)
+    orphans = [name for name, _ in entries if name.casefold() not in known]
     note = f"; {len(orphans)} orphan lines ({', '.join(orphans[:3])}): no such dataset" if orphans else ""
-    return f"{n} protected datasets{note}"
+    return f"{len(entries)} protected datasets{note}"
 
 
 @check("oauth")

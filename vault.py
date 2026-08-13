@@ -160,6 +160,52 @@ def _fold(s: str) -> str:
     return _norm(s).casefold()
 
 
+def parse_key_registry(text: str) -> tuple[list[tuple[str, str]], list[int]]:
+    """The key registry, read ONCE for everybody: `[(name, key), ...]` plus the
+    NUMBERS of the lines that carry no separator.
+
+    It exists because there used to be two readers. This one, and a second one
+    inside `preflight.py` that split on TAB only — while the format has always
+    tolerated two-or-more spaces as well. The preflight therefore read a
+    perfectly good space-separated line as one long name, found no dataset by
+    that name, and reported an orphan that was not there. Two parsers of one
+    file agree only while the file is written one way; the direction that hurt
+    was harmless, the other one — the preflight calling protected what the
+    vault reads as open, or the reverse — would not have been.
+
+    ⚠ IT RETURNS LINE NUMBERS AND NEVER LINES, and that is the second half of
+    the cure rather than a detail. The preflight used to put the offending line
+    into its message, and a line of this file is `name<sep>KEY`: the key of a
+    protected dataset went into the container log in clear, which is where it
+    was found on 2026-08-13. A caller cannot leak what it is never handed.
+
+    Format: TAB is the separator. Two or more spaces are tolerated, because a
+    registry is often edited in a file manager that eats tabs — and then the
+    split is on the FIRST run of spaces, so a dataset whose name contains two
+    consecutive spaces must use a real TAB. Blank lines and lines starting with
+    '#' are comments and are not counted as anything.
+    """
+    entries: list[tuple[str, str]] = []
+    malformed: list[int] = []
+    for n, line in enumerate(text.splitlines(), start=1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if "\t" in line:
+            name, key = line.split("\t", 1)
+        else:  # tolerated: two or more spaces instead of a tab
+            parts = _re.split(r"\s{2,}", line.strip(), maxsplit=1)
+            if len(parts) != 2:
+                malformed.append(n)
+                continue
+            name, key = parts
+        name, key = _norm(name), key.strip()
+        if name and key:
+            entries.append((name, key))
+        else:
+            malformed.append(n)
+    return entries, malformed
+
+
 # Names a path segment may never be. Compared case-folded, because on a
 # case-insensitive volume — an SMB share is the obvious one — '.GIT' reaches the
 # real repository while an exact comparison waves it through.
@@ -249,19 +295,11 @@ class VaultRoot:
             text = self.keys_file.read_text(encoding="utf-8", errors="replace")
         except OSError as e:
             raise VaultFault(f"key registry unreadable ({self.keys_file}): {e}")
-        for line in text.splitlines():
-            if not line.strip() or line.lstrip().startswith("#"):
-                continue
-            if "\t" in line:
-                name, key = line.split("\t", 1)
-            else:  # tolerated: two or more spaces instead of a tab
-                parts = _re.split(r"\s{2,}", line.strip(), maxsplit=1)
-                if len(parts) != 2:
-                    continue
-                name, key = parts
-            name, key = _norm(name), key.strip()
-            if name and key:
-                out[_fold(name)] = key
+        # Malformed lines are ignored HERE and reported by the preflight, which
+        # is the half that blocks: a registry the service half-understands must
+        # stop the boot, not quietly protect fewer datasets than it was told to.
+        for name, key in parse_key_registry(text)[0]:
+            out[_fold(name)] = key
         self._keys_cache, self._keys_mtime = out, m
         return out
 

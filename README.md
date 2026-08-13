@@ -384,7 +384,7 @@ container that already runs keeps working untouched.
 | Variable | Value |
 |---|---|
 | `LOG_LEVEL` | `INFO`, or `WARNING` for a quiet log. Nothing else: see below |
-| `HTTP_MODE` | `stateful` — leave it alone unless you are testing the other one: see below |
+| `HTTP_MODE` | `stateless` on a new install; the code's fallback stays `stateful`: see below |
 | `VAULT_UID` / `VAULT_GID` | `99` / `100` — `nobody:users`, the right owner for share files |
 
 `LOG_LEVEL` governs this service's logger and nothing else: the root logger, the
@@ -402,13 +402,15 @@ tells a stranger turned away apart from a broken deployment. `WARN` is
 honoured as `WARNING` — it is Python's own alias, not a typo, and whoever
 writes it wants less noise, so correcting it to `INFO` would hand back more.
 
-`HTTP_MODE` is the shape of the HTTP transport, and it is the one knob here
-that is an **experiment** rather than a preference. `stateful` is what every
-version before 2.8.0 did and remains the default, so a container already
-installed keeps behaving exactly as it did. `stateless` serves each request on
-its own transport: no `initialize` handshake, no session id, and no `GET`
+`HTTP_MODE` is the shape of the HTTP transport. `stateless` serves each request
+on its own transport: no `initialize` handshake, no session id, and no `GET`
 stream for server-initiated notifications — that route answers `405`, because
-in this mode it has no `GET` at all.
+in this mode it has no `GET` at all. **A new installation is shipped
+`stateless`**, because this server never sends anything of its own accord: the
+session buys it nothing and can only break. The **code's fallback stays
+`stateful`**, which is what every version before 2.8.0 did, so a container
+installed earlier and never given this variable keeps behaving exactly as it
+did.
 
 It exists because calls sent by the client in the **same batch** fall over,
 while the retry always passes. Eight at once lost two, four at once lost none,

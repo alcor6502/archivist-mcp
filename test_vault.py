@@ -1718,6 +1718,81 @@ def main() -> int:
         ok(v.status("t")["datasets"][0]["state"] == "locked", "putting the line back locks it")
         must_fail("and it blocks again", lambda: v.open("Example Project", "log.md", ""))
 
+        print("\n[11b] the registry has ONE reader, and it never hands back a line")
+        # Found in the boot log, not here: the preflight had a second parser
+        # that split on TAB only, so a legitimate space-separated line was read
+        # as one long name and reported as an orphan that did not exist — and
+        # the message carried the LINE, which is `name<sep>KEY`. The key of a
+        # protected dataset went into the container log in clear.
+        from vault import parse_key_registry
+        SECRET = "SuperSecretKey123"
+        for label, text, expect_entries, expect_bad in (
+                ("a TAB, the documented form", f"Example Project\t{SECRET}\n",
+                 [("Example Project", SECRET)], []),
+                ("two spaces, tolerated because file managers eat tabs",
+                 f"Example Project  {SECRET}\n", [("Example Project", SECRET)], []),
+                ("four spaces — the shape that was in the real registry",
+                 f"MCP Projects    {SECRET}\n", [("MCP Projects", SECRET)], []),
+                ("comments and blank lines count as nothing",
+                 f"# a note\n\n   \nExample Project\t{SECRET}\n",
+                 [("Example Project", SECRET)], []),
+                ("a line with no separator is malformed, by NUMBER",
+                 f"Example Project\t{SECRET}\nnoseparator\n",
+                 [("Example Project", SECRET)], [2]),
+                ("a name with no key is malformed too",
+                 f"Example Project\t\n", [], [1]),
+                ("two malformed lines, both numbered",
+                 "one\ntwo\n", [], [1, 2])):
+            got = parse_key_registry(text)
+            ok(got == (expect_entries, expect_bad), f"registry: {label}", got)
+
+        # The trap, asserted rather than described: the tolerated form splits on
+        # the FIRST run of spaces, so a name carrying two of them needs a TAB.
+        ok(parse_key_registry(f"Two  Spaces  {SECRET}\n")[0] == [("Two", f"Spaces  {SECRET}")],
+           "a dataset name with two consecutive spaces MUST use a real tab — the "
+           "space form would eat half the name, and this is what that looks like",
+           parse_key_registry(f"Two  Spaces  {SECRET}\n")[0])
+
+        # And the half that was the leak: no return value may carry the key.
+        for text in (f"Example Project\t{SECRET}\n", "noseparator-line\n",
+                     f"Example Project  {SECRET}\n"):
+            _, bad = parse_key_registry(text)
+            ok(all(isinstance(n, int) for n in bad),
+               "malformed lines come back as NUMBERS, never as text — a caller "
+               "cannot leak into a log what it was never handed", bad)
+
+        # The preflight's own message, end to end: it must name the line number
+        # and NOT the secret. This is the injection that proves the cure.
+        old_keys = os.environ.get("KEYS_FILE")
+        bad_registry = Path(root) / "bad-keys.txt"
+        bad_registry.write_text(f"Example Project\t{SECRET}\nnoseparator\n")
+        try:
+            import importlib
+            os.environ["KEYS_FILE"] = str(bad_registry)
+            os.environ["VAULT_ROOT"] = str(root)
+            import preflight as _pf
+            importlib.reload(_pf)
+            # The harness SWALLOWS the exception and records it: a check that
+            # crashes counts as failed. So the message is read where it really
+            # lands — RESULTS — which is also where the log line comes from,
+            # and therefore the only place worth asserting about.
+            _pf.c_keys()
+            _name, _passed, verdict = _pf.RESULTS[-1]
+            ok(_name == "keys" and not _passed,
+               "a registry with a malformed line FAILS the preflight, and the "
+               "service does not start", (_name, _passed))
+        finally:
+            os.environ.pop("VAULT_ROOT", None)
+            os.environ.pop("KEYS_FILE", None)
+            if old_keys is not None:
+                os.environ["KEYS_FILE"] = old_keys
+        ok(SECRET not in verdict,
+           "the preflight's complaint about a malformed registry does NOT "
+           "contain the key — which is exactly what it used to do", verdict[:120])
+        ok("line(s) 2" in verdict,
+           "and it says WHICH line, which is what you actually need to fix it",
+           verdict[:120])
+
         print("\n[12] history pruning")
         os.makedirs(Path(root) / "Old")
         v.boot(0)
