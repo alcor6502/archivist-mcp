@@ -4,4 +4,4 @@
 # not git+: a public tarball needs no git at pip time. fastmcp is pinned
 # INSIDE the engine (==3.4.5), where the code that depends on its routing
 # lives — one number, one place.
-mcp-common-engine @ https://github.com/alcor6502/mcp-common-engine/archive/refs/tags/v1.1.0.tar.gz
+mcp-common-engine @ https://github.com/alcor6502/mcp-common-engine/archive/refs/tags/v1.2.0.tar.gz

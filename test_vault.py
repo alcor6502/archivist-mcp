@@ -862,6 +862,68 @@ def redaction_armed_check() -> None:
     ok(callable(_arm), "and the installed engine really provides it")
 
 
+def timestamps_armed_check() -> None:
+    """fastmcp's own lines have to carry our clock, and our format has to be
+    ONE string.
+
+    The sibling of the check above, and it shares its grip: same logger, same
+    handlers, same call site. What is specific here is the format. It is
+    written once and passed twice — to `basicConfig` and to `arm_timestamps` —
+    because two copies of a format string agree until somebody edits one, and
+    the symptom then is two shapes of line in one log, which reads as two
+    services rather than as a defect.
+
+    A literal in either place would pass a string search and would be exactly
+    the failure this reads for."""
+    src = (HERE / "server.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    _sole_import(tree, "arm_timestamps", "mcp_common_engine.logs")
+
+    assigns = [n for n in tree.body if isinstance(n, ast.Assign)
+               and any(getattr(t, "id", "") == "LOG_FORMAT" for t in n.targets)]
+    ok(len(assigns) == 1, "LOG_FORMAT is assigned exactly once", len(assigns))
+    fmt = ast.literal_eval(assigns[0].value) if assigns else None
+    ok(fmt is not None and "%(asctime)s" in fmt,
+       "and the format really carries a timestamp — the one field the whole "
+       "cure exists for", fmt)
+
+    basic = next((n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                  and ast.unparse(n.func) == "logging.basicConfig"), None)
+    ok(basic is not None, "logging.basicConfig is called")
+    given = next((k.value for k in (basic.keywords if basic else [])
+                  if k.arg == "format"), None)
+    ok(given is not None and ast.unparse(given) == "LOG_FORMAT",
+       "and it is handed the NAME, not a second copy of the string",
+       ast.unparse(given) if given is not None else None)
+
+    calls = [n for n in tree.body if isinstance(n, ast.Expr)
+             and isinstance(n.value, ast.Call)
+             and ast.unparse(n.value.func) == "arm_timestamps"]
+    ok(len(calls) == 1,
+       "arm_timestamps() is called exactly once, at module level — without it "
+       "fastmcp's lines keep coming out with no date, and a line with no time "
+       "correlates with nothing", len(calls))
+    arg = calls[0].value.args[0] if calls and calls[0].value.args else None
+    ok(arg is not None and ast.unparse(arg) == "LOG_FORMAT",
+       "and it is given the same NAME basicConfig got — one format, one place",
+       ast.unparse(arg) if arg is not None else None)
+
+    server = next((n for n in tree.body if isinstance(n, ast.Assign)
+                   and any(getattr(t, "id", "") == "mcp" for t in n.targets)
+                   and isinstance(n.value, ast.Call)
+                   and ast.unparse(n.value.func) == "FastMCP"), None)
+    ok(server is not None and calls and calls[0].lineno > server.lineno,
+       "and the arming comes AFTER the server object, for the same reason its "
+       "sibling does: fastmcp installs the handlers when it configures its "
+       "logging",
+       f"arm at {calls[0].lineno if calls else '-'}, "
+       f"server at {server.lineno if server else '-'}")
+
+    from mcp_common_engine.logs import arm_timestamps as _arm
+    ok(callable(_arm), "and the installed engine really provides it")
+
+
 def icon_check() -> None:
     """The icon URL is written in two files that nothing links together: the
     Unraid template, which puts it on the container, and server.py, which hands
@@ -1809,6 +1871,9 @@ def main() -> int:
 
         print("\n[14f] the payload of a malformed call cannot reach the log")
         redaction_armed_check()
+
+        print("\n[14f2] and the same lines carry our clock, in our one format")
+        timestamps_armed_check()
 
         print("\n[15] the IP filter list, in both directions")
         cidr_checks()

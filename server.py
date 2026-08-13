@@ -73,7 +73,7 @@ from mcp.types import Icon
 from mcp_common_engine import (VERSION as ENGINE_VERSION, cidrs_from_env,
                                describe_cidrs, log_level_from_env)
 from mcp_common_engine.gate import Gate
-from mcp_common_engine.logs import arm_argument_redaction
+from mcp_common_engine.logs import arm_argument_redaction, arm_timestamps
 from mcp_common_engine.refusals import make_tool
 # Read from preflight and not restated here for the same reason the log level
 # is read from one expression: the suite can import preflight (it drags no
@@ -84,11 +84,16 @@ from vault import VaultRoot, VaultError, VaultFault, guide_for
 
 VERSION = "2.8.0"
 
+# The shape of a line of ours. It is a NAME because it is used twice: here, and
+# again below where fastmcp's own handlers are given the same shape. Written out
+# twice it would be two strings that agree until somebody edits one — and the
+# symptom would be two kinds of line in one log, which reads as two services.
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
 # The ROOT logger stays at WARNING. It used to be INFO, which switched on INFO
 # for every library loaded, not for ours: that is where the noise came from.
 # Only our own logger follows LOG_LEVEL.
-logging.basicConfig(level=logging.WARNING,
-                    format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.basicConfig(level=logging.WARNING, format=LOG_FORMAT)
 log = logging.getLogger("archivist-mcp")
 # Resolved in the engine's log_level_from_env for the same reason as the IP
 # filter: one expression, read by this file and by the preflight, not two that
@@ -239,6 +244,16 @@ mcp = FastMCP("archivist-mcp", auth=auth,
 # outcome, it means the payload is still being printed. Letting that stop the
 # boot is the point.
 arm_argument_redaction()
+
+# And the same lines get a clock. fastmcp's logger obeys no format of ours —
+# the sentence above, read the other way round — so its records came out as
+# "WARNING: Invalid arguments for tool 'x'": no date, no time, no service name.
+# A line without a time correlates with nothing, and that is not theoretical:
+# the investigation into calls dropping under concurrency wanted to know whether
+# a malformed call had landed in the same second as a transport error, and could
+# not ask. Same grip and same call site as the redaction, so if one of the two
+# ever finds nothing to arm they both fail, loudly, at boot.
+arm_timestamps(LOG_FORMAT)
 
 
 # The decorator that turns a designed refusal into ToolError plus ONE log
