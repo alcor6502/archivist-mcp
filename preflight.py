@@ -26,6 +26,36 @@ from mcp_common_engine import (DEFAULT_CIDRS, LOG_LEVELS, RESULTS, SKIP,
 V = os.environ.get("VAULT_ROOT", "/vault")
 KEYS = os.environ.get("KEYS_FILE", os.path.join(V, "keys.txt"))
 
+# The two shapes of the HTTP transport, closed here and not only in the Unraid
+# template, for the reason LOG_LEVEL taught: a container built by hand has no
+# dropdown, and a value nobody understood must fall back to the behaviour of
+# yesterday rather than to a guess.
+HTTP_MODES = ("stateful", "stateless")
+
+
+def http_mode_from_env() -> tuple[str, str | None]:
+    """Which shape of the HTTP transport, and what was rejected getting there.
+
+    It lives HERE, next to the checks, for one reason: this file imports no
+    fastmcp, so the suite can call it and exercise both directions. server.py
+    cannot be imported without fastmcp, so anything written there is out of
+    the suite's reach — which is exactly how a knob ends up untested.
+
+    The default is `stateful`, and that is not a preference: it is the
+    behaviour of every version before this one. Unraid does not propagate new
+    variables to containers already installed, so an installation that has
+    never heard of this variable must keep running exactly as it did.
+
+    An unknown value falls back to `stateful` and SAYS SO, like LOG_LEVEL: a
+    knob that silently ignores you is how you get told the feature is broken.
+    """
+    raw = os.environ.get("HTTP_MODE", "").strip()
+    if not raw:
+        return HTTP_MODES[0], None
+    if raw.casefold() in HTTP_MODES:
+        return raw.casefold(), None
+    return HTTP_MODES[0], raw
+
 
 def _datasets() -> list[str]:
     return sorted(d for d in os.listdir(V)

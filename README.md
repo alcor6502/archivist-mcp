@@ -384,6 +384,7 @@ container that already runs keeps working untouched.
 | Variable | Value |
 |---|---|
 | `LOG_LEVEL` | `INFO`, or `WARNING` for a quiet log. Nothing else: see below |
+| `HTTP_MODE` | `stateful` — leave it alone unless you are testing the other one: see below |
 | `VAULT_UID` / `VAULT_GID` | `99` / `100` — `nobody:users`, the right owner for share files |
 
 `LOG_LEVEL` governs this service's logger and nothing else: the root logger, the
@@ -400,6 +401,25 @@ closed on purpose: below `INFO` there is nothing to switch on, and above
 tells a stranger turned away apart from a broken deployment. `WARN` is
 honoured as `WARNING` — it is Python's own alias, not a typo, and whoever
 writes it wants less noise, so correcting it to `INFO` would hand back more.
+
+`HTTP_MODE` is the shape of the HTTP transport, and it is the one knob here
+that is an **experiment** rather than a preference. `stateful` is what every
+version before 2.8.0 did and remains the default, so a container already
+installed keeps behaving exactly as it did. `stateless` serves each request on
+its own transport: no `initialize` handshake, no session id, and no `GET`
+stream for server-initiated notifications — that route answers `405`, because
+in this mode it has no `GET` at all.
+
+It exists because calls sent by the client in the **same batch** fall over,
+while the retry always passes. Eight at once lost two, four at once lost none,
+and the calls that fell were the ones that touch nothing — they read a file out
+of the image — so it is not the work being done but the number of requests in
+flight, which puts the fault under the tools, in the transport. The message the
+client shows (*"This connector's server hostname doesn't resolve or isn't
+reachable from this network"*) is neither true nor useful: it says only which
+side is reporting. Switching the mode takes effect at startup and needs no new
+image, so it can be switched back the same way. The startup line always prints
+the mode actually running, which is the only place worth believing.
 
 The service listens on loopback inside the container, and that is not a setting.
 Legitimate traffic arrives from the Funnel, which runs in the same container.

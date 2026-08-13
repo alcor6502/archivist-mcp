@@ -947,6 +947,117 @@ def log_level_checks() -> None:
            f"{'and says what it rejected' if expect_rejected else 'silently'}", got)
 
 
+def http_mode_checks() -> None:
+    """The transport mode, in both directions.
+
+    The default is the whole point: Unraid does not propagate a new variable to
+    containers already installed, so an installation that has never heard of
+    HTTP_MODE must keep the behaviour it had. Every case below where the
+    variable is absent, empty or unreadable has to come back `stateful`, and
+    the unreadable ones have to SAY what they rejected — a knob that silently
+    ignores you is how you get told the feature is broken.
+
+    And the other direction, which an "it must default to stateful" test cannot
+    see: `stateless` has to actually arrive. A knob wired to a value nobody can
+    reach defaults perfectly and does nothing."""
+    from preflight import http_mode_from_env
+    for value, expect_mode, expect_rejected in (
+            (None, "stateful", None),          # not defined at all: the case
+            ("", "stateful", None),            # of every container already
+            ("   ", "stateful", None),         # installed
+            ("stateful", "stateful", None),
+            ("stateless", "stateless", None),
+            ("STATELESS", "stateless", None),  # case is typography, not intent
+            (" stateless ", "stateless", None),
+            # Not a synonym here, however obvious it looks elsewhere: the value
+            # is read into a log line and into an Unraid dropdown, and half a
+            # vocabulary is worse than one.
+            ("true", "stateful", "true"),
+            ("1", "stateful", "1"),
+            ("stateles", "stateful", "stateles"),
+            ("session", "stateful", "session")):
+        old = os.environ.pop("HTTP_MODE", None)
+        try:
+            if value is not None:
+                os.environ["HTTP_MODE"] = value
+            got = http_mode_from_env()
+        finally:
+            os.environ.pop("HTTP_MODE", None)
+            if old is not None:
+                os.environ["HTTP_MODE"] = old
+        ok(got == (expect_mode, expect_rejected),
+           f"HTTP_MODE={value!r} resolves to {expect_mode} "
+           f"{'and says what it rejected' if expect_rejected else 'silently'}", got)
+
+
+def http_mode_wiring_check() -> None:
+    """The mode has to REACH fastmcp, and the log has to name the one running.
+
+    server.py cannot be imported without fastmcp, so this is read from the
+    source — and from the AST, because a string search is satisfied by the
+    comment that explains the thing rather than by the thing.
+
+    Three ways this goes wrong, and only the first is loud:
+      - the argument is not passed at all: the knob moves nothing, and the only
+        symptom is that the experiment says stateless changed nothing;
+      - the argument is passed as a LITERAL: the mode freezes while the log
+        goes on quoting the variable. That is not hypothetical, it is exactly
+        how BIND_HOST broke — the line printed 127.0.0.1 as text while the bind
+        followed the variable;
+      - the startup line stops naming the mode: after an Apply the log is the
+        only thing that says what is really running, and a mode written in a
+        document is not a state."""
+    src = (HERE / "server.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    _sole_import(tree, "http_mode_from_env", "preflight")
+
+    assigns = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)
+               and any("HTTP_MODE" in ast.unparse(t) for t in n.targets)]
+    ok(len(assigns) == 1, "HTTP_MODE is resolved exactly once", len(assigns))
+    ok(assigns and "http_mode_from_env()" in ast.unparse(assigns[0].value),
+       "and it comes from the shared helper, not from a second os.environ read "
+       "that agrees with the preflight only today",
+       ast.unparse(assigns[0].value)[:60] if assigns else None)
+
+    runs = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+            and ast.unparse(n.func) == "mcp.run"]
+    ok(len(runs) == 1, "mcp.run() is called exactly once", len(runs))
+    arg = next((k.value for k in (runs[0].keywords if runs else [])
+                if k.arg == "stateless_http"), None)
+    ok(arg is not None,
+       "and it is given `stateless_http` — the name fastmcp 3.4.5 takes on "
+       "run_http_async and forwards from run(); without it HTTP_MODE is a "
+       "label on a knob connected to nothing")
+    ok(arg is not None and "HTTP_MODE" in ast.unparse(arg),
+       "and its value is derived from HTTP_MODE, not written as a literal: a "
+       "literal freezes the mode while the log keeps quoting the variable",
+       ast.unparse(arg)[:60] if arg is not None else None)
+
+    startup = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+               and ast.unparse(n.func) == "log.info"
+               and n.args and isinstance(n.args[0], ast.Constant)
+               and "starting on" in n.args[0].value]
+    ok(len(startup) == 1, "the startup line is emitted exactly once", len(startup))
+    ok(startup and any(ast.unparse(a) == "HTTP_MODE" for a in startup[0].args),
+       "and it carries HTTP_MODE itself — not a second expression that says "
+       "the same thing until one of the two is edited",
+       ast.unparse(startup[0])[:90] if startup else None)
+
+    # The template's dropdown and the code's closed list are two hand copies of
+    # one set. The template is also the only half a hand-built container never
+    # sees, which is why the list is closed in the code as well.
+    xml = (HERE / "archivist-mcp.xml").read_text(encoding="utf-8")
+    from preflight import HTTP_MODES
+    field = re.search(r'<Config[^>]*Target="HTTP_MODE"[^>]*>', xml)
+    ok(field is not None, "the Unraid template declares HTTP_MODE")
+    default = re.search(r'Default="([^"]*)"', field.group(0)) if field else None
+    ok(default is not None and tuple(default.group(1).split("|")) == HTTP_MODES,
+       "and its dropdown offers exactly the values the code accepts, in the "
+       "same order — the first one being the default the code falls back to",
+       f"{default.group(1) if default else None} vs {'|'.join(HTTP_MODES)}")
+
+
 def guide_signature_check() -> None:
     """The manual travels inside the image and is served by reference_guide(),
     so it is read by the caller far more often than the code is. A manual that
@@ -1688,6 +1799,10 @@ def main() -> int:
 
         print("\n[14d] the log level cannot kill the service at import")
         log_level_checks()
+
+        print("\n[14d2] the transport mode defaults to yesterday, and arrives")
+        http_mode_checks()
+        http_mode_wiring_check()
 
         print("\n[14e] the icon is one url, in two files that agree")
         icon_check()

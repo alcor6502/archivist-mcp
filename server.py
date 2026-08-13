@@ -40,6 +40,12 @@ Environment:
                           INFO). Nothing below INFO: there are no debug lines.
                           WARN is honoured as WARNING, being Python's own alias.
                           Anything else falls back to INFO and says so
+  HTTP_MODE               shape of the HTTP transport: stateful (default, the
+                          behaviour of every earlier version) or stateless, in
+                          which every request is served on its own transport
+                          with no MCP session behind it. Anything else falls
+                          back to stateful and says so. See the startup line:
+                          it prints which one is running
   FASTMCP_HOME            token store; set in the Dockerfile, MUST persist
   VAULT_UID / VAULT_GID   service user, dropped to by the entrypoint (99/100)
   PREFLIGHT_SKIP          checks to skip, by name. Testing only
@@ -69,9 +75,14 @@ from mcp_common_engine import (VERSION as ENGINE_VERSION, cidrs_from_env,
 from mcp_common_engine.gate import Gate
 from mcp_common_engine.logs import arm_argument_redaction
 from mcp_common_engine.refusals import make_tool
+# Read from preflight and not restated here for the same reason the log level
+# is read from one expression: the suite can import preflight (it drags no
+# fastmcp in) and cannot import this file, so a knob resolved here would be a
+# knob nothing exercises.
+from preflight import HTTP_MODES, http_mode_from_env
 from vault import VaultRoot, VaultError, VaultFault, guide_for
 
-VERSION = "2.7.0"
+VERSION = "2.8.0"
 
 # The ROOT logger stays at WARNING. It used to be INFO, which switched on INFO
 # for every library loaded, not for ours: that is where the noise came from.
@@ -132,6 +143,39 @@ BIND_ADDR = "127.0.0.1"
 # can never disagree about what the filter is. A malformed entry raises here,
 # which is deliberate: it has already blocked the preflight by this point.
 ALLOWED_CIDRS = cidrs_from_env()
+
+# The shape of the HTTP transport, and why it is a knob at all.
+#
+# Calls sent in the SAME batch fall over: measured on 2026-08-13, eight at once
+# lost two — the third and the fourth, adjacent — while four at once lost none,
+# and the retry always passes. The failing calls were `reference_guide`, which
+# reads a file out of the image: no vault, no git, no lock, no disk, no thread
+# pool. So it is not the work, it is the NUMBER, and the layer under the tools
+# is the transport. The client's own message names neither, and misleads:
+# "This connector's server hostname doesn't resolve or isn't reachable from
+# this network. The connector may be misconfigured."
+#
+# In stateful mode — every version until this one — concurrent requests share
+# one MCP session. In stateless mode fastmcp serves each request on its own
+# transport: no `initialize` handshake, no `Mcp-Session-Id`, and a POST that
+# names a tool is answered on its own. Measured against fastmcp 3.4.5 outside
+# the image: stateful answers a session-less tool call with 400 "Bad Request:
+# Missing session ID" and hands out an `mcp-session-id` header; stateless
+# answers the same call 200 and hands out no header. The GET stream, which
+# only exists to carry server-initiated notifications, is 400 in stateful and
+# 405 in stateless — the route simply has no GET.
+#
+# It is a HYPOTHESIS, not a diagnosis, and this variable is the instrument to
+# test it: with the default unchanged the service behaves exactly as before,
+# and the mode can be flipped on an installed container without a new image,
+# which is what makes before/after a comparison of one variable instead of two
+# builds. fastmcp reads its own FASTMCP_STATELESS_HTTP for the same setting;
+# the value is passed EXPLICITLY at mcp.run() below so that ours wins and the
+# startup line cannot describe a mode nobody is running.
+HTTP_MODE, _MODE_REJECTED = http_mode_from_env()
+if _MODE_REJECTED:
+    log.warning("HTTP_MODE=%r is not %s — using %s",
+                _MODE_REJECTED, " or ".join(HTTP_MODES), HTTP_MODE)
 
 vault = VaultRoot(VAULT_ROOT, KEYS_FILE)
 for line in vault.boot(RETENTION):
@@ -399,10 +443,19 @@ if __name__ == "__main__":
     # decoration: two repositories pinning a third can pin different tags, and
     # "identical to the twin" quietly becomes "identical if both updated".
     # This line is where somebody already looks after every Apply.
-    log.info("archivist-mcp %s (engine %s) — starting on %s:%s — base_url %s — "
-             "allowed user: %s — IP filter: %s — token store: %s — retention: %s",
-             VERSION, ENGINE_VERSION, BIND_ADDR, PORT, BASE_URL, ALLOWED_LOGIN,
+    log.info("archivist-mcp %s (engine %s) — starting on %s:%s (http %s) — "
+             "base_url %s — allowed user: %s — IP filter: %s — token store: %s "
+             "— retention: %s",
+             VERSION, ENGINE_VERSION, BIND_ADDR, PORT, HTTP_MODE,
+             BASE_URL, ALLOWED_LOGIN,
              describe_cidrs(ALLOWED_CIDRS),
              os.environ.get("FASTMCP_HOME", "(default — NOT persistent!)"),
              f"{RETENTION} months" if RETENTION else "disabled")
-    mcp.run(transport="http", host=BIND_ADDR, port=PORT)
+    # The mode travels as a boolean because that is what fastmcp's signature
+    # asks for (`stateless_http: bool | None` on run_http_async, forwarded by
+    # run() through **transport_kwargs — read off fastmcp 3.4.5 itself, not a
+    # blog). It is derived from HTTP_MODE and never written as a literal: a
+    # literal here would freeze the mode while the log went on quoting the
+    # variable, which is the exact shape of the BIND_HOST defect.
+    mcp.run(transport="http", host=BIND_ADDR, port=PORT,
+            stateless_http=HTTP_MODE == "stateless")
