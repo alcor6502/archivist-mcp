@@ -29,6 +29,7 @@ ENV FASTMCP_SHOW_SERVER_BANNER=false
 ENV FASTMCP_ENABLE_RICH_LOGGING=false
 ENV FASTMCP_CHECK_FOR_UPDATES=off
 ENV FASTMCP_LOG_LEVEL=WARNING
-# The vault mounts on /vault, state (logs + tokens) on /data.
+# The vault mounts on /vault, state (OAuth tokens + HOME) on /data. NOT logs:
+# nothing here opens a log file, the service prints and Docker keeps it.
 # No EXPOSE: the Funnel inside the container handles ingress.
 CMD ["/bin/sh", "/app/entrypoint.sh"]
