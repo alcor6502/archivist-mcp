@@ -1754,12 +1754,19 @@ def main() -> int:
            parse_key_registry(f"Two  Spaces  {SECRET}\n")[0])
 
         # And the half that was the leak: no return value may carry the key.
+        # ⚠ The `extra` of these checks reports a COUNT and a TYPE, never the
+        # value found. A suite's output is a log like any other: it is read in a
+        # terminal and pasted into a chat, so a check that proves a secret did
+        # not leak, and prints the secret when it fails, has moved the leak
+        # rather than closed it. The refinement is codifier's, 2026-08-14.
         for text in (f"Example Project\t{SECRET}\n", "noseparator-line\n",
                      f"Example Project  {SECRET}\n"):
             _, bad = parse_key_registry(text)
             ok(all(isinstance(n, int) for n in bad),
                "malformed lines come back as NUMBERS, never as text — a caller "
-               "cannot leak into a log what it was never handed", bad)
+               "cannot leak into a log what it was never handed",
+               f"{len(bad)} item(s) of type "
+               f"{sorted({type(x).__name__ for x in bad}) or 'none'}")
 
         # The preflight's own message, end to end: it must name the line number
         # and NOT the secret. This is the injection that proves the cure.
@@ -1788,10 +1795,11 @@ def main() -> int:
                 os.environ["KEYS_FILE"] = old_keys
         ok(SECRET not in verdict,
            "the preflight's complaint about a malformed registry does NOT "
-           "contain the key — which is exactly what it used to do", verdict[:120])
+           "contain the key — which is exactly what it used to do",
+           f"{verdict.count(SECRET)} secret(s) inside the message")
         ok("line(s) 2" in verdict,
            "and it says WHICH line, which is what you actually need to fix it",
-           verdict[:120])
+           verdict.replace(SECRET, "<redacted>")[:120])
 
         print("\n[12] history pruning")
         os.makedirs(Path(root) / "Old")
