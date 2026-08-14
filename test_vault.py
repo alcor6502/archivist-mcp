@@ -967,6 +967,112 @@ def icon_check() -> None:
        "the declared mimeType matches the file actually pointed at")
 
 
+# The variables the ENGINE reads on our behalf, so the template declares them
+# and no file of ours mentions them. Named ONE BY ONE and then verified against
+# the installed engine: an exemption phrased as "anything the engine might
+# read" would be the hole this check exists to close, and an exemption nobody
+# rechecks outlives the reader it was granted for.
+ENGINE_READS = ("ALLOWED_CIDRS", "LOG_LEVEL")
+
+# Names that must NOT be offered on the container, each for its own reason.
+# The check above would already refuse a name nothing reads; this one keeps
+# refusing it the day somebody adds a reader back, which is not the same event.
+#   BIND_HOST       retired in 2.2.0: its only power was to bypass the Funnel
+#   PREFLIGHT_SKIP  read by the engine, for local testing — a field on the
+#                   container would be a documented way to disable the checks
+#                   that stop an authless Funnel
+#   ANTHROPIC_CIDR  deprecated, still honoured for containers that carry it;
+#                   offering it to a NEW install would spread the old name
+NEVER_DECLARED = ("BIND_HOST", "PREFLIGHT_SKIP", "ANTHROPIC_CIDR")
+
+
+def _env_readers(*modules: str) -> set[str]:
+    """Every environment variable name these modules actually READ.
+
+    From the AST, and that is the whole point: a string search is satisfied by
+    a comment, and a comment is precisely where a variable that has stopped
+    being read goes to be talked about in the past tense.
+    """
+    names: set[str] = set()
+    for mod in modules:
+        tree = ast.parse((HERE / mod).read_text(encoding="utf-8"))
+        for n in ast.walk(tree):
+            if (isinstance(n, ast.Call)
+                    and ast.unparse(n.func) in ("os.environ.get", "os.getenv", "env")
+                    and n.args and isinstance(n.args[0], ast.Constant)):
+                names.add(n.args[0].value)
+            elif (isinstance(n, ast.Subscript)
+                    and ast.unparse(n.value) == "os.environ"
+                    and isinstance(n.slice, ast.Constant)):
+                names.add(n.slice.value)
+    return names
+
+
+def template_variable_check() -> None:
+    """Every variable the Unraid template declares must have a reader.
+
+    THE DIRECTION IS THE WHOLE THING. A check shaped "the template must declare
+    PORT, BASE_URL, ..." catches an OMISSION and can never catch a SURVIVOR: the
+    day a variable stays in the template and its last reader is deleted, that
+    list has nothing to say. And a missing variable is the cheap failure — the
+    preflight refuses and names it at first boot. A variable the template offers
+    and nobody reads never fails at all: it is a field somebody fills in with
+    care whose value goes nowhere, and the symptom arrives much later wearing
+    another face — "I set it to 60 and it counts 90".
+
+    Written after codifier-mcp found four of them in its own template on
+    2026-08-14, three releases old, with the code's comments already speaking of
+    them in the past tense. We had none; this is what keeps it that way.
+
+    `Target` is filtered to SHOUTING_CASE because path and port mappings use the
+    same attribute (`Target="/vault"`, `Target="9443"`), and the template is
+    parsed as XML rather than grepped: attribute order is not a promise.
+
+    entrypoint.sh is read too — it is where VAULT_UID and VAULT_GID are used,
+    and a check that only looked at the Python would call them dead.
+    """
+    import xml.etree.ElementTree as ET
+
+    tree = ET.parse(HERE / "archivist-mcp.xml").getroot()
+    declared = {c.get("Target") for c in tree.iter("Config")
+                if c.get("Type") == "Variable"
+                and re.fullmatch(r"[A-Z][A-Z0-9_]*", c.get("Target") or "")}
+    ok(len(declared) > 5, "the template declares variables at all", len(declared))
+
+    readers = _env_readers("server.py", "vault.py", "preflight.py")
+    # The shell reads by expansion, and once through an inline python -c.
+    sh = (HERE / "entrypoint.sh").read_text(encoding="utf-8")
+    readers |= set(re.findall(r"\$\{([A-Z][A-Z0-9_]*)[:\-}]", sh))
+    readers |= set(re.findall(r"""os\.environ\.get\(["']([A-Z][A-Z0-9_]*)["']""", sh))
+
+    # The exemptions are only worth what they still describe.
+    engine_dir = _engine_pkg_dir()
+    ok(engine_dir is not None, "the engine is installed, so its reads can be "
+       "verified rather than assumed")
+    engine_names: set[str] = set()
+    for mod in sorted(engine_dir.glob("*.py")) if engine_dir else []:
+        t = ast.parse(mod.read_text(encoding="utf-8"))
+        for n in ast.walk(t):
+            if (isinstance(n, ast.Call)
+                    and ast.unparse(n.func) in ("os.environ.get", "os.getenv")
+                    and n.args and isinstance(n.args[0], ast.Constant)):
+                engine_names.add(n.args[0].value)
+    for name in ENGINE_READS:
+        ok(name in engine_names,
+           f"{name} is exempted because the INSTALLED engine reads it — "
+           f"and it still does", sorted(engine_names))
+
+    orphans = sorted(declared - readers - set(ENGINE_READS))
+    ok(not orphans,
+       f"every variable the template declares has a reader "
+       f"({len(declared)} declared)", orphans)
+
+    resurrected = sorted(set(NEVER_DECLARED) & declared)
+    ok(not resurrected,
+       "and none of the names that must never be offered on the container is "
+       "back in the template", resurrected)
+
+
 def log_level_checks() -> None:
     """logging.setLevel() raises on an unknown level, and it runs at import —
     after the preflight has printed a clean sheet. So the one way to get a
@@ -1951,6 +2057,9 @@ def main() -> int:
 
         print("\n[14e] the icon is one url, in two files that agree")
         icon_check()
+
+        print("\n[14e2] every variable the template offers is read by somebody")
+        template_variable_check()
 
         print("\n[14f] the payload of a malformed call cannot reach the log")
         redaction_armed_check()
