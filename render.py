@@ -248,37 +248,40 @@ class Spacer(_Block):
 
 
 class Stats(_Block):
-    """A band of pills on ONE row: label + value, each with a tone. If they do
-    not fit on the row it is a refusal — the old script's assert, kept."""
-    LS, VS, PAD, H = 7.4, 9.0, 8, 17     # DejaVu is wider than Helvetica: a notch smaller
+    """A band of pills on ONE row, the same gap a row of cards has, spanning
+    the full width: each pill takes what its content needs and the leftover
+    is shared equally — so the band lines up with whatever sits under it. A
+    band whose contents do not fit the row is a refusal — the old script's
+    assert, kept — not a squeeze."""
+    LS, VS, PAD, H, GAP = 7.4, 9.0, 8, 17, 12     # DejaVu is wider than Helvetica: a notch smaller
 
-    def _widths(self, p, items):
-        return [p.width(_str(i.get("label")), "R", self.LS) + 5
-                + p.width(_str(i.get("value")), "B", self.VS) + 2 * self.PAD for i in items]
+    def _widths(self, p, items, width):
+        need = [p.width(_str(it.get("label")), "R", self.LS) + 5
+                + p.width(_str(it.get("value")), "B", self.VS) + 2 * self.PAD for it in items]
+        room = width - self.GAP * (len(items) - 1)
+        if sum(need) > room:
+            raise RenderError(f"{self.what}: the stats band does not fit on one row "
+                              f"({sum(need):.0f}pt of {room:.0f}): shorten a label")
+        extra = (room - sum(need)) / len(items)
+        return [n + extra for n in need]
 
     def measure(self, p, width):
         items = _req(self.spec, "items", self.what)
         if not items:
             raise RenderError(f"{self.what}: stats needs at least one item")
-        ws = self._widths(p, items)
-        gap = (width - sum(ws)) / max(1, len(items) - 1)
-        if sum(ws) > width or (len(items) > 1 and gap < 4):
-            raise RenderError(f"{self.what}: the stats band does not fit on one row "
-                              f"({sum(ws):.0f}pt of {width:.0f}): shorten a label")
+        self._widths(p, items, width)
         return self.H + 10
 
     def draw(self, p, x, top, width):
         items = self.spec["items"]
-        ws = self._widths(p, items)
-        gap = (width - sum(ws)) / max(1, len(items) - 1)
         y = top - self.H - 4
-        for it, w in zip(items, ws):
+        for it, w in zip(items, self._widths(p, items, width)):
             tone = it.get("tone", "navy")
             p.rect(x, y, w, self.H, fill=it.get("bg", TONE_BG.get(tone, "#eef1f6")), radius=8)
             p.text(x + self.PAD, y + 5, _str(it.get("label")), "R", self.LS, "desc")
             p.text(x + self.PAD + p.width(_str(it.get("label")), "R", self.LS) + 5, y + 4,
                    _str(it.get("value")), "B", self.VS, tone)
-            x += w + gap
+            x += w + self.GAP
 
 
 class Grid(_Block):
