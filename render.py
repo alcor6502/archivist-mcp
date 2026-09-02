@@ -295,6 +295,8 @@ class Grid(_Block):
     def _rows(self):
         items = _req(self.spec, "items", self.what)
         cols = int(self.spec.get("cols", 2))
+        if cols < 1:
+            raise RenderError(f"{self.what}: grid cols must be at least 1, got {cols}")
         return [items[i:i + cols] for i in range(0, len(items), cols)], cols
 
     def measure(self, p, width):
@@ -352,6 +354,9 @@ class Donut(_Block):
         slices = _req(self.spec, "slices", self.what)
         if not slices or sum(float(s.get("value", 0)) for s in slices) <= 0:
             raise RenderError(f"{self.what}: donut needs slices whose values sum above zero")
+        for s in slices:
+            if float(s.get("value", 0)) < 0:
+                raise RenderError(f"{self.what}: slice {_str(s.get('label'))!r} has a negative value")
         return max(2 * self.R + 8, len(slices) * self.ROW + 4)
 
     def draw(self, p, x, top, width):
@@ -363,6 +368,11 @@ class Donut(_Block):
         c = p.c
         for s in slices:
             ext = -(float(s.get("value", 0)) / total) * 360
+            if ext == 0:
+                # An empty class is a normal allocation, not an error: it keeps
+                # its line in the legend (0.0%) and draws no sector — an arc of
+                # extent zero is a division by zero inside reportlab.
+                continue
             c.setFillColor(p.col(s.get("color", "accent"))); c.setStrokeColor(p.col("#ffffff")); c.setLineWidth(1.1)
             path = c.beginPath(); path.moveTo(cx, cy)
             path.arcTo(cx - self.R, cy - self.R, cx + self.R, cy + self.R, a0, ext); path.close()
@@ -456,6 +466,9 @@ class Table(_Block):
     def _xs(self, x, width):
         """Column boundaries: the first column takes what the others leave."""
         rest = [float(c.get("width", 0.12)) for c in self.columns[1:]]
+        for c, w in zip(self.columns[1:], rest):
+            if not 0 < w < 0.9:
+                raise RenderError(f"{self.what}: column {_str(c.get('label'))!r} has width {w}: a fraction of the row, above 0 and below 0.9")
         if sum(rest) >= 0.9:
             raise RenderError(f"{self.what}: the declared column widths leave no room for the first column")
         edges, cur = [], x + width * (1 - sum(rest))
@@ -706,25 +719,34 @@ class _Doc:
 
         y = title_line(H - M - 14)
         for b in self.blocks:
-            if isinstance(b, Table):
-                th = b.draw_title(p, M, y)
-                if th and y - th - b.section_height(b.sections[0]) < bottom:
-                    y = new_page(); th = b.draw_title(p, M, y)
-                y -= th
-                for s in b.sections:
-                    need = b.section_height(s)
-                    if y - need < bottom:
-                        if need > H - M - 14 - 40 - bottom:
-                            raise RenderError(f"{b.what}: section {s.get('title')!r} is taller than a page ({need:.0f}pt)")
-                        y = new_page()
-                    b.draw_section(p, M, y, AV, s); y -= need
-                continue
-            need = b.measure(p, AV)
-            if y - need < bottom:
-                if need > H - M - 14 - 40 - bottom:
-                    raise RenderError(f"{b.what}: a {b.spec.get('type')} block taller than a page ({need:.0f}pt)")
-                y = new_page()
-            b.draw(p, M, y, AV); y -= need
+            try:
+                if isinstance(b, Table):
+                    th = b.draw_title(p, M, y)
+                    if th and y - th - b.section_height(b.sections[0]) < bottom:
+                        y = new_page(); th = b.draw_title(p, M, y)
+                    y -= th
+                    for s in b.sections:
+                        need = b.section_height(s)
+                        if y - need < bottom:
+                            if need > H - M - 14 - 40 - bottom:
+                                raise RenderError(f"{b.what}: section {s.get('title')!r} is taller than a page ({need:.0f}pt)")
+                            y = new_page()
+                        b.draw_section(p, M, y, AV, s); y -= need
+                    continue
+                need = b.measure(p, AV)
+                if y - need < bottom:
+                    if need > H - M - 14 - 40 - bottom:
+                        raise RenderError(f"{b.what}: a {b.spec.get('type')} block taller than a page ({need:.0f}pt)")
+                    y = new_page()
+                b.draw(p, M, y, AV); y -= need
+            except (RenderError, RenderFault):
+                raise
+            except Exception as e:
+                # A block that blows up inside the drawing library came out as a
+                # bare `float division by zero` with no block named: whatever
+                # escapes here is a fault of ours, and it says where.
+                raise RenderFault(f"{b.what}: the renderer failed on a {b.spec.get('type')!s} block "
+                                  f"({type(e).__name__}: {e})") from e
         footer(); c.showPage(); c.save()
         return state["page"]
 

@@ -1850,6 +1850,33 @@ def main() -> int:
                                         "sections": [{"title": "s", "rows": [{"cells": [{"text": "r"}]}] * 80}]}]), "new"))
         must_fail("a document that is not an object is refused",
                   lambda: ds.render_pdf("Reports/x.pdf", ["not", "a", "document"], "new"))
+        # Reported from use on 2026-09-02, the first live day of render_pdf: a
+        # donut slice at 0 — an allocation with an empty class, which is normal
+        # — came out as a bare `float division by zero` from inside reportlab,
+        # naming no block. The slice is now listed and not drawn; and whatever
+        # escapes a block is a FAULT that says which block.
+        _zero = ds.render_pdf("", dict(_doc, blocks=[{"type": "donut", "center": "70/30", "slices": [
+            {"label": "Equity", "value": 5}, {"label": "Bitcoin", "value": 0}]}], text_check=["Bitcoin", "0.0%"]), "new")
+        ok(_zero["pages"] == 1 and _zero["missing"] == [], "a donut slice at 0 renders: listed in the legend, no sector drawn")
+        must_fail("a donut slice below 0 is refused by name",
+                  lambda: ds.render_pdf("Reports/x.pdf", dict(_doc, blocks=[{"type": "donut", "slices": [
+                      {"label": "a", "value": 5}, {"label": "b", "value": -1}]}]), "new"))
+        must_fail("a grid with cols 0 is refused, not a ValueError from range()",
+                  lambda: ds.render_pdf("Reports/x.pdf", dict(_doc, blocks=[{"type": "grid", "cols": 0, "items": [{"label": "a", "value": "1"}]}]), "new"))
+        must_fail("a table column of width 0 is refused by name",
+                  lambda: ds.render_pdf("Reports/x.pdf", dict(_doc, blocks=[{"type": "table", "columns": [{"label": ""}, {"label": "V", "width": 0}],
+                                        "sections": [{"title": "s", "rows": [{"cells": [{"text": "a"}, {"text": "1"}]}]}]}]), "new"))
+        import render as _rm
+        _orig_draw = _rm.Donut.draw
+        _rm.Donut.draw = lambda *a: 1 / 0          # the library blowing up under a block
+        try:
+            ds.render_pdf("Reports/x.pdf", dict(_doc, blocks=[{"type": "donut", "slices": [{"label": "a", "value": 5}]}]), "new")
+            ok(False, "an exception escaping a block is a fault")
+        except Exception as e:
+            ok(type(e).__name__ == "VaultFault" and "blocks[0]" in str(e) and "ZeroDivisionError" in str(e),
+               f"an exception escaping a block is a VaultFault naming the block and the cause: {e}")
+        finally:
+            _rm.Donut.draw = _orig_draw
         # Pagination: many sections flow over pages and the footer counts them.
         _many = dict(_doc, blocks=[{"type": "table", "columns": [{"label": ""}, {"label": "V", "width": 0.2}],
                                    "sections": [{"title": f"sezione {i}", "rows": [{"cells": [{"text": f"r{i}-{j}"}, {"text": "$1"}]} for j in range(12)]} for i in range(9)]}])

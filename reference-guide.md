@@ -152,7 +152,7 @@ The document: `{"page", "title", "footer", "forbid", "text_check", "blocks"}`.
   `stats` `{items:[{label,value,tone}]}` one row of pills, refused if it does
   not fit · `row` `{items:[blocks]}` side by side, cards stretched equal ·
   `card` `{title, blocks}` · `donut` `{slices:[{label,value,color}], center,
-  center_label}` · `grid` `{cols, items:[{label,value,tone}]}` · `gauge`
+  center_label}` (a slice at 0 is listed, not drawn; a negative one is refused) · `grid` `{cols, items:[{label,value,tone}]}` · `gauge`
   `{label, position 0-100, bands:[{to,color}], ticks:[{at,text,align}]}` ·
   `table` `{title, columns:[{label,align,width}], sections:[{title,subtitle,
   rows:[{cells:[…]}]}]}` — first cell `{text,sub}` name + description, others
