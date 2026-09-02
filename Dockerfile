@@ -1,9 +1,12 @@
 FROM python:3.12-slim
-RUN apt-get update && apt-get install -y --no-install-recommends git util-linux && rm -rf /var/lib/apt/lists/*
+# fonts-dejavu-core: the faces render_pdf embeds. A PDF drawn with a fallback
+# face would silently look different from every other, so the renderer refuses
+# to draw without them — and a static check keeps this line here.
+RUN apt-get update && apt-get install -y --no-install-recommends git util-linux fonts-dejavu-core && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY vault.py server.py preflight.py entrypoint.sh reference-guide.md ./
+COPY vault.py render.py server.py preflight.py entrypoint.sh reference-guide.md ./
 RUN chmod +x entrypoint.sh
 # Python's stdout is block-buffered, stderr is not: the service logs on stderr
 # and entrypoint.sh echoes on stdout, so the two drain at different moments and

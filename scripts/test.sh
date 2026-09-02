@@ -36,7 +36,7 @@ if [ ! -x "$VENV/bin/python" ]; then
   "$PY" -m venv "$VENV"
 fi
 PIP="$VENV/bin/pip"
-if ! "$VENV/bin/python" -c 'import mcp_common_engine' 2>/dev/null; then
+if ! "$VENV/bin/python" -c 'import mcp_common_engine, reportlab' 2>/dev/null; then
   echo "== engine $TAG: from the pin =="
   if ! "$PIP" install -q --no-deps -r "$REQ" 2>"$WORK/pip.err"; then
     echo "   tarball refused ($(grep -o 'HTTP error [0-9]*' "$WORK/pip.err" | head -1 || echo see "$WORK/pip.err")): cloning the tag instead"

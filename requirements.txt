@@ -5,3 +5,6 @@
 # INSIDE the engine (==3.4.5), where the code that depends on its routing
 # lives — one number, one place.
 mcp-common-engine @ https://github.com/alcor6502/mcp-common-engine/archive/refs/tags/v1.2.0.tar.gz
+# The PDF renderer behind render_pdf. Pure Python, no compiled dependency;
+# the fonts it embeds come from the image (fonts-dejavu-core), not from pip.
+reportlab==5.0.1

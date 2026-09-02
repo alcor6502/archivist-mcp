@@ -925,6 +925,42 @@ class Dataset:
             raise VaultError(f"content too large ({len(data)} bytes, max {MAX_BINARY_BYTES})")
         return self._write_bytes(rel, data, expected_sha256, "write-binary")
 
+    def render_pdf(self, rel: str, document: dict, expected_sha256: str = "new") -> dict:
+        """A PDF drawn HERE from a document of blocks, then written like any
+        binary — same CAS, same commit. The point is where the bytes are born:
+        on this side of the wire. A dashboard is a few KB of JSON in the call
+        and fifty KB of PDF on disk, and the fifty never cross the model.
+
+        An empty `rel` renders and hands the bytes back as base64 without
+        writing: the "live" case, a sheet that is consumed in the chat and
+        never enters the vault. That costs the caller context on the way in,
+        which is cheap; what it never costs is output tokens.
+
+        The document's `forbid` patterns are checked on the renderer's own log
+        of drawn strings before a byte is written: a refused document leaves
+        nothing behind."""
+        import json
+        from render import build, RenderError, RenderFault, MAX_DOCUMENT_BYTES
+        if not isinstance(document, dict):
+            raise VaultError("document must be a JSON object: see reference_guide('render_pdf')")
+        size = len(json.dumps(document, ensure_ascii=False).encode("utf-8"))
+        if size > MAX_DOCUMENT_BYTES:
+            raise VaultError(f"document too large ({size} bytes, max {MAX_DOCUMENT_BYTES})")
+        try:
+            data, verdict = build(document)
+        except RenderError as e:
+            raise VaultError(f"document refused: {e}") from None
+        except RenderFault as e:
+            raise VaultFault(f"render machinery: {e}") from None
+        if len(data) > MAX_BINARY_BYTES:
+            raise VaultError(f"the PDF came out at {len(data)} bytes, over {MAX_BINARY_BYTES}: fewer pages")
+        if not rel:
+            return {"dataset": self.name, "path": "", "size": len(data), "sha256": _sha(data),
+                    "pdf_base64": base64.b64encode(data).decode("ascii"), **verdict,
+                    "note": "not written: an empty path renders for the chat only"}
+        out = self._write_bytes(rel, data, expected_sha256, "render-pdf")
+        return {**out, **verdict}
+
     def _write_bytes(self, rel: str, data: bytes, expected_sha256: str, label: str) -> dict:
         p = self._resolve(rel, must_exist=False)
         with self._lock():

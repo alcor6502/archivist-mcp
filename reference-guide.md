@@ -54,7 +54,8 @@ Do not split a file to get past a size limit — above 2 MB the vault is not the
 transport, use SMB or scp. Do not push a big binary through `write_binary`:
 the base64 is typed by the model, a token every two or three characters, so a
 500 KB PDF is tens of minutes for a write the server does in a millisecond —
-drop it over SMB and the next write to the dataset adopts it, sha included.
+drop it over SMB and the next write to the dataset adopts it, sha included —
+and a PDF made of data is not typed at all: `render_pdf` draws it here.
 Do not read a directory file by file to audit it —
 `archive` once, or `manifest` if you only need to know whether anything changed.
 Do not read files looking for something — `search`, then `read_file` on the
@@ -127,6 +128,44 @@ Writes the WHOLE file. UTF-8, max 2 MB.
 CAS: `expected_sha256` must match the file's current sha, or `"new"` for a file
 that does not exist yet. `"new"` on an existing file is refused, and so is a
 real sha on a missing one.
+
+## render_pdf(dataset, path, document, expected_sha256='new', key='')
+
+A PDF **drawn by the server** from a JSON document of blocks, written with the
+same CAS as `write_binary` (`"new"` by default). The bytes are born on the
+server: a dashboard is ~5 KB of JSON in the call and ~50 KB of PDF on disk,
+and the PDF never crosses the model. Real fonts, full Unicode, max 20 pages.
+An **empty `path`** renders and returns `pdf_base64` without writing — the
+"live" case, for a sheet the chat consumes and the vault never keeps.
+Returns `size · sha256 · commit · pages · strings_drawn · missing`.
+
+The document: `{"page", "title", "footer", "forbid", "text_check", "blocks"}`.
+- `page`: `{"size": "a4"|"letter", "margin": 28, "landscape": false}`
+- `title`: `{"text", "subtitle", "badge", "value"}` — one line, a red badge,
+  a big figure on the right; repeated on every page after the first
+- `footer`: list of lines, on every page; the last one gets `· pagina N di M`
+- `forbid`: regexes that must match NO string drawn (an account number, a
+  name) — a match is a refusal and nothing is written
+- `text_check`: strings that must appear; the missing ones come back in
+  `missing`, they do not stop the render
+- `blocks`, in order, each `{"type": …}`:
+  `stats` `{items:[{label,value,tone}]}` one row of pills, refused if it does
+  not fit · `row` `{items:[blocks]}` side by side, cards stretched equal ·
+  `card` `{title, blocks}` · `donut` `{slices:[{label,value,color}], center,
+  center_label}` · `grid` `{cols, items:[{label,value,tone}]}` · `gauge`
+  `{label, position 0-100, bands:[{to,color}], ticks:[{at,text,align}]}` ·
+  `table` `{title, columns:[{label,align,width}], sections:[{title,subtitle,
+  rows:[{cells:[…]}]}]}` — first cell `{text,sub}` name + description, others
+  `{text,sub,tone,bold}` or `{tag,style}`; a section never splits across
+  pages; a cell wider than its column is a refusal · `checklist` `{title,
+  numbered, start, items:[{cols:[…]}]}` drawn boxes, columns sized on content
+  · `heading` · `paragraph` `{text,size,face,tone}` · `note` `{text,tone,
+  align}` · `rule` · `spacer`.
+- tones: `navy accent muted green red black desc dark` or any `#rrggbb`;
+  tag styles `t-ord t-qual t-muni t-roc t-mix t-none` or `{bg,fg}`.
+
+The server draws; it does not know what the numbers mean. Whatever must add
+up, add it up before calling.
 
 ## edit_file(dataset, path, old_text, new_text, expected_sha256, key='')
 

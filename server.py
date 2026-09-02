@@ -361,6 +361,15 @@ def write_file(dataset: str, path: str, content: str,
 
 
 @tool
+def render_pdf(dataset: str, path: str, document: dict, expected_sha256: str = "new",
+               key: str = "") -> dict:
+    """A PDF drawn by the server from a document of blocks (see the guide)
+    and written with CAS; an empty path returns it as base64, unwritten."""
+    ds, rel = vault.open(dataset, path, key)
+    return ds.render_pdf(rel, document, expected_sha256)
+
+
+@tool
 def edit_file(dataset: str, path: str, old_text: str, new_text: str,
               expected_sha256: str, key: str = "") -> dict:
     """Replace old_text — exactly one occurrence — with new_text. CAS."""

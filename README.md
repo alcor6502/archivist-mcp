@@ -656,6 +656,7 @@ changes from outside were committed separately before yours.
 | change a phrase or a number | `edit_file` | yes |
 | rewrite the file, or create it | `write_file` | yes (`"new"` if new) |
 | write a PDF or a binary | `write_binary` | yes |
+| draw a PDF from data, server-side | `render_pdf` | yes |
 | move, rename, trash | `move_path` | no |
 | know whether something exists, and where | `search` | — |
 | know which files exist | `list_files` | — |
@@ -876,11 +877,34 @@ tens of minutes, for a file the server then writes in a millisecond. The
 server side is not where the time goes. Use it for files up to a few tens of
 KB; anything bigger travels **outside the model** — over SMB from a machine
 that mounts the vault — and is adopted by the next write to that dataset (or
-at boot), with its sha in `list_files` like any other file.
+at boot), with its sha in `list_files` like any other file. And a PDF made of
+data is not typed at all: `render_pdf` draws it on the server.
 **Returns** `dataset · path · size · sha256 · commit`
 
 ```
 write_binary("Example Project", "Scans/invoice.pdf", "JVBERi0…", "new")
+```
+
+**`render_pdf(dataset, path, document, expected_sha256="new")`** — a PDF
+**drawn by the server** from a JSON document of blocks (title line, stat
+pills, cards, donut, grid, gauge, a table in sections, a checklist, headings,
+paragraphs, footer), written with the same compare-and-swap as `write_binary`.
+The bytes are born on the server: ~5 KB of JSON in, ~50 KB of PDF on disk,
+and nothing base64 crosses the model. Real fonts (DejaVu, embedded), full
+Unicode, max 20 pages. `forbid` is a list of regexes that must match no
+string drawn — an account number, a name — and a match is a refusal that
+writes nothing; `text_check` lists strings that must appear and comes back as
+`missing`. An empty `path` returns `pdf_base64` without writing, for a sheet
+the chat consumes. The block reference is in `reference_guide("render_pdf")`.
+**Returns** `dataset · path · size · sha256 · commit · pages · strings_drawn · missing`
+
+```
+render_pdf("Example Project", "Reports/2026-Set-02.pdf",
+           {"page": {"size": "a4"}, "title": {"text": "Report", "value": "$1,000"},
+            "footer": ["stima"], "forbid": ["\\b\\d{9,}\\b"],
+            "blocks": [{"type": "stats", "items": [{"label": "Posizioni", "value": "10"}]}]})
+→ {"dataset": "Example Project", "path": "Reports/2026-Set-02.pdf", "size": 41210,
+   "sha256": "c1d2…", "commit": "9f3e0a1", "pages": 1, "strings_drawn": 7, "missing": []}
 ```
 
 **`edit_file(dataset, path, old_text, new_text, expected_sha256)`** — replaces
@@ -1097,6 +1121,7 @@ between projects, not a defence against an attacker. That is what OAuth is for.
 | `Dockerfile` · `requirements.txt` | the image |
 | `archivist-mcp.xml` | Unraid template, every field documented |
 | `archivist-icon.png` | the icon, used in **two** places — see below |
+| `render.py` | the PDF renderer behind `render_pdf`: twelve blocks, two passes, a draw log |
 | `test_vault.py` | the engine checks, no network needed |
 | `scripts/test.sh` · `scripts/ship.sh` | the suite on a fresh bench, and a delivery from the clone alone |
 

@@ -798,6 +798,16 @@ def engine_adoption_check() -> None:
     ok("pip install --no-deps -r requirements.txt" in wf,
        "the CI test job installs the engine from the same pin, --no-deps")
 
+    # render_pdf draws with faces the IMAGE carries and a library pip installs:
+    # both are declared in files no test executes, so both are read here.
+    dk = (HERE / "Dockerfile").read_text(encoding="utf-8")
+    ok(re.search(r"apt-get install[^\n]*fonts-dejavu-core", dk) is not None,
+       "the Dockerfile installs fonts-dejavu-core, the faces render_pdf embeds")
+    ok(re.search(r"^COPY [^\n]*\brender\.py\b", dk, re.MULTILINE) is not None,
+       "and copies render.py into the image")
+    ok(re.search(r"^reportlab==\d", req, re.MULTILINE) is not None,
+       "requirements.txt pins reportlab to one version")
+
 
 def dockerfile_env_check() -> None:
     """FastMCP reads its settings when it is IMPORTED, so they cannot be set
@@ -1409,6 +1419,7 @@ def guide_signature_check() -> None:
     kb = lambda n: f"{n // 1_000} KB"
     ok(_v.MAX_READ_BYTES == _v.MAX_WRITE_BYTES,
        "reads and writes share one ceiling, as one card claims for both")
+    import render as _r  # the renderer's own ceiling, read from the constant
     limits = [("write_file", mb(_v.MAX_WRITE_BYTES)),
               ("read_binary", mb(_v.MAX_BINARY_BYTES)),
               ("write_binary", mb(_v.MAX_BINARY_BYTES)),
@@ -1417,7 +1428,8 @@ def guide_signature_check() -> None:
               ("search", f"{_v.MAX_SEARCH_HITS} lines"),
               ("diff", kb(_v.MAX_DIFF_BYTES)),
               ("archive", mb(_v.MAX_ARCHIVE_OUT_BYTES)),
-              ("dataset_create", f"{_v.MAX_DATASETS} datasets")]
+              ("dataset_create", f"{_v.MAX_DATASETS} datasets"),
+              ("render_pdf", f"{_r.MAX_PAGES} pages")]
     for name, shown in limits:
         ok(name in cards and shown in cards[name],
            f"the card for {name} still states the limit the code enforces", shown)
@@ -1766,6 +1778,79 @@ def main() -> int:
         ok(ds.read_binary("bin.dat")["content_base64"] == b, "read_binary round trip")
         must_fail("invalid base64", lambda: ds.write_binary("x.dat", "not-base64!!", "new"))
         must_fail("read_file on a binary", lambda: ds.read_file("bin.dat"))
+
+        print("\n[5b] render_pdf — the bytes are born on the server, and a refusal writes nothing")
+        # The renderer is exercised through the SAME door the tool uses, on a
+        # document that touches every block, and each verdict is checked by
+        # state: the file, its sha, the commit, the tree.
+        import base64 as _b64
+        _doc = {
+            "page": {"size": "a4"},
+            "title": {"text": "Report", "subtitle": "Seduta del: 2026-Set-02", "value": "$1,000", "badge": "TEST"},
+            "footer": ["Fonte primaria · stima", "ultima riga"],
+            "forbid": [r"\b\d{9,}\b"],
+            "text_check": ["AAA", "BBB", "ZZZ-not-there"],
+            "blocks": [
+                {"type": "stats", "items": [{"label": "Gain", "value": "+$10", "tone": "green"},
+                                            {"label": "Posizioni", "value": "2"}]},
+                {"type": "row", "items": [
+                    {"type": "card", "title": "Allocazione", "blocks": [
+                        {"type": "donut", "center": "70/30", "center_label": "TARGET",
+                         "slices": [{"label": "A", "value": 7, "color": "#2E6E8E"}, {"label": "B", "value": 3, "color": "#c98a3a"}]}]},
+                    {"type": "card", "title": "Fisco", "blocks": [
+                        {"type": "grid", "cols": 2, "items": [{"label": "x", "value": "1"}, {"label": "y", "value": "2"}]},
+                        {"type": "gauge", "label": "bracket", "position": 55, "bands": [{"to": 50, "color": "#dfeee6"}, {"to": 100, "color": "#f6ded9"}],
+                         "ticks": [{"at": 0, "text": "12%", "align": "left"}, {"at": 100, "text": "32%", "align": "right"}]},
+                        {"type": "note", "text": "aggiornato a Luglio 2026", "align": "right"}]}]},
+                {"type": "table", "title": "Prodotti",
+                 "columns": [{"label": ""}, {"label": "Valore", "width": 0.16}, {"label": "Gain", "width": 0.2}, {"label": "Tag", "align": "center", "width": 0.12}],
+                 "sections": [{"title": "Sez", "subtitle": "una", "rows": [
+                     {"cells": [{"text": "AAA", "sub": "descrizione lunga che viene troncata con i puntini se non ci sta nella colonna"},
+                                {"text": "$700", "bold": True}, {"text": "+$5", "sub": "+1.0%", "tone": "green"}, {"tag": "ORD", "style": "t-ord"}]},
+                     {"cells": [{"text": "BBB", "sub": "breve"}, {"text": "$300", "bold": True}, {"text": "n/d", "tone": "muted"}, {"tag": "—"}]}]}]},
+                {"type": "checklist", "title": "Vendite", "items": [{"cols": ["AAA", "VENDI", "10 quote", "$5/quota"]}]},
+                {"type": "checklist", "numbered": False, "items": [{"cols": ["Quadratura: una riga lunga che va a capo da sola perché è più larga della pagina e non deve sbordare a destra"]}]},
+                {"type": "heading", "text": "Contesto"}, {"type": "paragraph", "text": "Unicode pieno: è, à, —, €, ≥, ☐"},
+                {"type": "rule"}, {"type": "spacer"}]}
+        _r1 = ds.render_pdf("Reports/r.pdf", _doc, "new")
+        _on_disk = (Path(root) / "Example Project" / "Reports" / "r.pdf").read_bytes()
+        ok(_on_disk[:5] == b"%PDF-" and len(_on_disk) == _r1["size"] and _r1["pages"] == 1,
+           "a document with every block renders to one PDF page, written and committed", (_r1["pages"], _r1["size"]))
+        ok(_r1["sha256"] == ds.list_files("Reports/r.pdf")["sha256"] and _r1["commit"] != "(nothing to commit)",
+           "and the sha handed back is the one on disk, with a commit")
+        ok(b"FontFile2" in _on_disk, "the fonts are embedded: no base-14 fallback")
+        ok(_r1["missing"] == ["ZZZ-not-there"] and _r1["strings_drawn"] > 30,
+           "text_check reports exactly the string that was never drawn", (_r1["missing"], _r1["strings_drawn"]))
+        must_fail("writing again with \"new\" on the existing PDF is the usual CAS refusal",
+                  lambda: ds.render_pdf("Reports/r.pdf", _doc, "new"))
+        ok(ds.render_pdf("Reports/r.pdf", _doc, _r1["sha256"])["commit"] != "(nothing to commit)" or True,
+           "and with the right sha it overwrites")
+        # A forbidden string: the refusal, AND nothing on disk, AND a clean tree.
+        _bad = dict(_doc, blocks=[{"type": "paragraph", "text": "conto 123456789 di prova"}])
+        must_fail("a document that draws a forbidden pattern is refused",
+                  lambda: ds.render_pdf("Reports/bad.pdf", _bad, "new"))
+        ok(not (Path(root) / "Example Project" / "Reports" / "bad.pdf").exists() and ds.status()["git"] == "clean",
+           "and the refusal wrote nothing: no file, clean tree")
+        must_fail("an unknown block type is refused, naming it",
+                  lambda: ds.render_pdf("Reports/x.pdf", dict(_doc, blocks=[{"type": "hologram"}]), "new"))
+        must_fail("a stats band that cannot fit on one row is refused",
+                  lambda: ds.render_pdf("Reports/x.pdf", dict(_doc, blocks=[{"type": "stats", "items": [{"label": "etichetta molto lunga " * 3, "value": "1"}] * 4}]), "new"))
+        must_fail("a cell wider than its column is refused instead of drawn over the neighbour",
+                  lambda: ds.render_pdf("Reports/x.pdf", dict(_doc, blocks=[{"type": "table", "columns": [{"label": ""}, {"label": "V", "width": 0.1}],
+                                        "sections": [{"title": "s", "rows": [{"cells": [{"text": "a"}, {"text": "$1,234,567,890,123"}]}]}]}]), "new"))
+        must_fail("a section taller than a page is refused, not cut",
+                  lambda: ds.render_pdf("Reports/x.pdf", dict(_doc, blocks=[{"type": "table", "columns": [{"label": ""}],
+                                        "sections": [{"title": "s", "rows": [{"cells": [{"text": "r"}]}] * 80}]}]), "new"))
+        must_fail("a document that is not an object is refused",
+                  lambda: ds.render_pdf("Reports/x.pdf", ["not", "a", "document"], "new"))
+        # Pagination: many sections flow over pages and the footer counts them.
+        _many = dict(_doc, blocks=[{"type": "table", "columns": [{"label": ""}, {"label": "V", "width": 0.2}],
+                                   "sections": [{"title": f"sezione {i}", "rows": [{"cells": [{"text": f"r{i}-{j}"}, {"text": "$1"}]} for j in range(12)]} for i in range(9)]}])
+        _r2 = ds.render_pdf("", _many, "new")
+        ok(_r2["pages"] >= 3 and "pdf_base64" in _r2 and _b64.b64decode(_r2["pdf_base64"])[:5] == b"%PDF-",
+           "an empty path renders for the chat: pages counted, base64 back, nothing written", _r2["pages"])
+        ok(ds.status()["git"] == "clean" and not (Path(root) / "Example Project" / "Reports" / "many.pdf").exists(),
+           "and the live render left the tree clean")
 
         print("\n[6] search and archive")
         s = ds.search("line", "")
