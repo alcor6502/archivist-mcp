@@ -2112,24 +2112,36 @@ def main() -> int:
         # that rewrites history rather than adding to it: if it is going to
         # behave differently at scale, it will be on the rebase.
         #
-        # The commits are made in ONE shell rather than by four hundred
-        # subprocess calls from Python: the loop is the cost, not the work, and
-        # a suite that takes a minute stops being run.
+        # The commits come from ONE `git fast-import` stream, not from four
+        # hundred git processes in a shell loop: that loop was ~18 of the
+        # suite's ~25 seconds (2026-09-02), and a suite that takes a minute
+        # stops being run. The repository it produces is the same shape —
+        # 200 dated commits, each adding a line to f.md, then a recent one.
         os.makedirs(Path(root) / "Long")
         v.boot(0)
         long_ds = Dataset(Path(root) / "Long", "Long")
-        _old_date = "2024-01-15T12:00:00"
-        _script = (
-            'set -e; cd "$1"; '
-            'for i in $(seq 1 200); do '
-            '  echo "line $i" >> f.md; git add -A; '
-            '  GIT_AUTHOR_DATE="$2" GIT_COMMITTER_DATE="$2" git commit -q -m "old $i"; '
-            'done; '
-            'echo recent > recent.md; git add -A; git commit -q -m recent'
-        )
-        _r = subprocess.run(["sh", "-c", _script, "sh", str(Path(root) / "Long"), _old_date],
-                            capture_output=True, text=True)
+        _branch = long_ds._git("rev-parse", "--abbrev-ref", "HEAD").strip()
+        _old = "1705320000 +0000"          # 2024-01-15T12:00:00Z
+        _now = f"{int(time.time())} +0000"
+        _who = "archivist-mcp <archivist-mcp@localhost>"
+        _stream, _lines = [], []
+        for i in range(1, 201):
+            _lines.append(f"line {i}\n")
+            _blob = "".join(_lines)
+            _stream.append(
+                f"commit refs/heads/{_branch}\n"
+                f"committer {_who} {_old}\n"
+                f"data {len(f'old {i}')}\nold {i}\n"
+                + (f"from refs/heads/{_branch}^0\n" if i == 1 else "")
+                + f"M 100644 inline f.md\ndata {len(_blob.encode())}\n{_blob}\n")
+        _stream.append(
+            f"commit refs/heads/{_branch}\ncommitter {_who} {_now}\n"
+            f"data 6\nrecent\nM 100644 inline recent.md\ndata 7\nrecent\n\n")
+        _r = subprocess.run(["git", "-C", str(Path(root) / "Long"), "fast-import", "--quiet"],
+                            input="".join(_stream).encode(), capture_output=True)
         ok(_r.returncode == 0, "two hundred commits were made", _r.stderr[:200])
+        # fast-import moves the ref, not the index or the working tree.
+        long_ds._git("reset", "-q", "--hard")
         n_before = long_ds.status()["total_commits"]
         ok(n_before > 200, "a history of some size to prune", n_before)
         sha_before = long_ds.manifest("")["manifest_sha256"]
