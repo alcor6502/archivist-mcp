@@ -349,7 +349,8 @@ Half of the checks verify things that must **not** happen — traversal, wrong
 keys, dropping protected datasets — and they are the ones that matter most.
 `scripts/ship.sh <message-file> <file>...` runs the same suite, commits the
 named files and pushes to `main`; when `VERSION` moved it prints the link that
-publishes the release.
+publishes the release — as a markdown link named after the tag, `[v2.11.1](…)`,
+so pasted into a chat it is one click, not two thousand characters of URL.
 
 </details>
 

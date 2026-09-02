@@ -93,6 +93,9 @@ q = urllib.parse.urlencode({"tag": f"v{ver}", "target": "main", "title": title, 
 print(f"https://github.com/{repo}/releases/new?{q}")
 PY
 )
+  # A markdown link, not the URL in full: pasted into a chat it renders as
+  # the tag name and opens the prefilled release page on a click. The URL
+  # itself runs to a couple of thousand characters and reads as noise.
   echo "== release v$VER: open, check, tap Publish =="
-  echo "$URL"
+  echo "[v$VER]($URL)"
 fi
