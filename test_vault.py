@@ -1226,6 +1226,46 @@ def http_mode_wiring_check() -> None:
        f"{default.group(1) if default else None} vs {'|'.join(HTTP_MODES)}")
 
 
+def ship_scripts_check() -> None:
+    """The delivery scripts, which are how a machine holding nothing but the
+    clone runs the suite and ships: they must read the pin, never carry it.
+
+    `scripts/test.sh` builds the bench from requirements.txt — the tarball, or
+    a git clone of the SAME tag when the network refuses the tarball — so the
+    number lives in one place and the adoption check above keeps it honest.
+    `scripts/ship.sh` must run that suite before it commits, add NAMED files
+    (never `-A`: a tree can hold another hand's half-written change), commit
+    with the anonymous identity, and push to main — the branch the workflow's
+    release link targets. What it must never do is push a tag: from a sandbox
+    that answers 403, and a typed tag is where the case error comes from."""
+    test_sh = HERE / "scripts" / "test.sh"
+    ship_sh = HERE / "scripts" / "ship.sh"
+    for f in (test_sh, ship_sh):
+        ok(f.is_file() and os.access(f, os.X_OK), f"{f.relative_to(HERE)} exists and is executable")
+    t = test_sh.read_text(encoding="utf-8") if test_sh.is_file() else ""
+    s = ship_sh.read_text(encoding="utf-8") if ship_sh.is_file() else ""
+
+    literal = re.findall(r"\bv\d+\.\d+\.\d+\b", t)
+    ok(not literal and "requirements.txt" in t and "refs/tags" in t,
+       "test.sh reads the engine tag out of requirements.txt and carries no tag of its own",
+       literal)
+    ok("mcp-common-engine.git" in t and "--no-deps" in t,
+       "test.sh falls back to a git clone of the tag, installed --no-deps like CI")
+    ok("suite.log" in t and "exit=" in t and "set -eu" in t,
+       "test.sh logs the suite to a file and prints the exit code — the form that cannot lie")
+
+    i_test, i_commit = s.find("scripts/test.sh"), s.find("commit -q")
+    ok(0 <= i_test < i_commit, "ship.sh runs the suite BEFORE it commits", (i_test, i_commit))
+    ok("git add -- \"$@\"" in s and "add -A" not in s,
+       "ship.sh adds the files it was NAMED, never -A")
+    ok("user.email=14092600+alcor6502@users.noreply.github.com" in s,
+       "ship.sh commits with the anonymous identity, on the command")
+    ok("HEAD:refs/heads/$BRANCH" in s and "BRANCH=main" in s,
+       "ship.sh pushes straight to main")
+    ok(not re.search(r"git push[^\n]*\bv\$", s) and "releases/new?" in s,
+       "ship.sh never pushes a tag: it prints the release link instead")
+
+
 def guide_signature_check() -> None:
     """The manual travels inside the image and is served by reference_guide(),
     so it is read by the caller far more often than the code is. A manual that
@@ -2044,6 +2084,9 @@ def main() -> int:
 
         print("\n[14bis] the engine is pinned, installed, and announced")
         engine_adoption_check()
+
+        print("\n[14bis2] the delivery scripts read the pin they install")
+        ship_scripts_check()
 
         print("\n[14c] the manual says what the code actually offers")
         guide_signature_check()
