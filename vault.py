@@ -796,6 +796,16 @@ class Dataset:
             external = self._commit_external_if_dirty()
             data = self._read_bytes(p)
             add = ("" if (not data or data.endswith(b"\n")) else "\n") + text.rstrip("\n") + "\n"
+            # The ceiling is checked BEFORE the bytes land, on the size the file
+            # will have. Checked after — which is what the read-back below used
+            # to do on its own — the refusal arrived with the block already on
+            # disk and no commit: the caller heard "no", the next tool call
+            # found a dirty tree and committed the block as "external: changes
+            # made outside the tools". A refusal must leave nothing behind.
+            if len(data) + len(add.encode("utf-8")) > MAX_READ_BYTES:
+                raise VaultError(
+                    f"the file would exceed {MAX_READ_BYTES} bytes after the append "
+                    f"({len(data)} now): split the document instead")
             with open(p, "ab") as fh:
                 fh.write(add.encode("utf-8"))
                 fh.flush()

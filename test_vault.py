@@ -1599,6 +1599,27 @@ def main() -> int:
         must_fail('"new" on an existing file', lambda: ds.write_file("new.md", "x", "new"))
         must_fail("append over 64 KB", lambda: ds.append("log.md", "x" * 70_000))
 
+        print("\n[4b] a refused append leaves NOTHING on disk")
+        # A file a few bytes under the read ceiling, plus a block that crosses
+        # it. The refusal alone proves nothing — the read-back after the write
+        # refused this too, with the block already on disk and the tree dirty,
+        # so the next tool call committed it as "external". What has to hold is
+        # the state: same bytes, clean tree. Remove the guard and both go red.
+        import vault as _v
+        _big = Path(root) / "Example Project" / "big.md"
+        _big.write_bytes(b"x" * (_v.MAX_READ_BYTES - 10) + b"\n")
+        ds._commit("setup big")
+        _before = _big.stat().st_size
+        must_fail("append that would cross the read ceiling",
+                  lambda: ds.append("big.md", "y" * 40))
+        ok(_big.stat().st_size == _before,
+           "the file on disk is exactly as it was", (_before, _big.stat().st_size))
+        ok(ds.status()["git"] == "clean",
+           "and the tree is clean: nothing for the next call to commit as external",
+           ds.status()["git"])
+        _big.unlink()
+        ds._commit("cleanup big")
+
         print("\n[5] binaries")
         import base64
         b = base64.b64encode(b"\xff\xfe\x00%PDF").decode()   # deliberately not valid UTF-8
