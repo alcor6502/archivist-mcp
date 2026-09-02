@@ -574,6 +574,29 @@ class Dataset:
         # it. One rule, every walker: a link is not a file of this dataset.
         return p.is_symlink() or (not p.is_file()) or ".git" in p.parts or p.name == LOCKFILE
 
+    def _walk(self, base: Path) -> list[Path]:
+        """Every file under `base`, in the order `sorted(base.rglob("*"))`
+        gave, WITHOUT ever entering `.git`. Every walker goes through here.
+
+        rglob descended into .git and _skip threw the entries away afterwards:
+        in a dataset of a dozen documents and fifty commits, 301 of the 302
+        entries walked were loose objects — one Path and one stat each — and
+        loose objects grow with every commit until git packs them. A listing
+        paid for the history it was not asking about. os.walk prunes the
+        directory before it is read, which is what preflight.py already did.
+
+        Symlinks to directories are not followed (os.walk's default), and
+        symlinks to files are refused by _skip: the dataset is what is IN it."""
+        out = []
+        for dirpath, dirnames, filenames in os.walk(base):
+            dirnames[:] = [d for d in dirnames if d != ".git"]
+            dp = Path(dirpath)
+            for f in filenames:
+                q = dp / f
+                if not self._skip(q):
+                    out.append(q)
+        return sorted(out)
+
     def _read_bytes(self, p: Path) -> bytes:
         size = p.stat().st_size
         if size > MAX_READ_BYTES:
@@ -677,15 +700,15 @@ class Dataset:
             raise VaultError(f"invalid revision: {rev!r}")
 
     def _git_size(self) -> int:
+        """What the repository weighs, from git's own count in ONE process:
+        loose objects, packs and garbage, in KiB as git reports them. It used
+        to walk every file under .git with a stat each — thousands of loose
+        objects for a number nobody compares to the byte."""
         total = 0
-        g = self.root / ".git"
-        if g.is_dir():
-            for p in g.rglob("*"):
-                try:
-                    if p.is_file():
-                        total += p.stat().st_size
-                except OSError:
-                    pass
+        for line in self._git("count-objects", "-v", check=False).splitlines():
+            k, _, v = line.partition(":")
+            if k.strip() in ("size", "size-pack", "size-garbage") and v.strip().isdigit():
+                total += int(v) * 1024
         return total
 
     def _atomic_write(self, p: Path, data: bytes) -> bytes:
@@ -712,13 +735,13 @@ class Dataset:
     # ---------- status ----------
 
     def status(self) -> dict:
-        md = sum(1 for p in self.root.rglob("*.md") if not self._skip(p))
-        total = sum(1 for p in self.root.rglob("*") if not self._skip(p))
+        files = self._walk(self.root)
+        md = sum(1 for p in files if p.name.endswith(".md"))
+        total = len(files)
+        n_trash = sum(1 for p in files if p.relative_to(self.root).parts[0] == TRASH)
         dirty = self._git("status", "--porcelain").strip()
         last = self._git("log", "-1", "--format=%h %cI %s", check=False).strip() or "(no commits)"
         n_commits = self._git("rev-list", "--count", "HEAD", check=False).strip() or "0"
-        trash = self.root / TRASH
-        n_trash = sum(1 for p in trash.rglob("*") if not self._skip(p)) if trash.is_dir() else 0
         return {
             "dataset": self.name,
             "total_files": total,
@@ -739,9 +762,7 @@ class Dataset:
             return {"dataset": self.name, "file": self._rel(base),
                     "size": len(data), "sha256": _sha(data)}
         out, n = [], 0
-        for p in sorted(base.rglob("*")):
-            if self._skip(p):
-                continue
+        for p in self._walk(base):
             n += 1
             if n > MAX_LIST_FILES:
                 raise VaultError(f"more than {MAX_LIST_FILES} files: narrow the path")
@@ -916,9 +937,8 @@ class Dataset:
                 now = datetime.now(timezone.utc).timestamp()
                 try:
                     if d.is_dir():
-                        for q in d.rglob("*"):
-                            if q.is_file():
-                                os.utime(q, (now, now))
+                        for q in self._walk(d):
+                            os.utime(q, (now, now))
                     else:
                         os.utime(d, (now, now))
                 except OSError:
@@ -941,10 +961,8 @@ class Dataset:
             except _re.error as e:
                 raise VaultError(f"invalid regex: {e}")
         hits, scanned, truncated = [], 0, False
-        targets = [base] if base.is_file() else sorted(base.rglob("*"))
+        targets = [base] if base.is_file() else self._walk(base)
         for p in targets:
-            if self._skip(p):
-                continue
             try:
                 text = self._read_bytes(p).decode("utf-8")
             except (VaultError, UnicodeDecodeError):
@@ -972,9 +990,7 @@ class Dataset:
         # kind of thing that is noticed six months later.
         base = self._resolve(rel, must_exist=True)
         lines, total = [], 0
-        for p in sorted(base.rglob("*") if base.is_dir() else [base], key=lambda x: str(x)):
-            if self._skip(p):
-                continue
+        for p in sorted(self._walk(base) if base.is_dir() else [base], key=lambda x: str(x)):
             size = p.stat().st_size
             h = _sha(self._read_bytes(p)) if size <= MAX_READ_BYTES else "OVERSIZE"
             total += size
@@ -1001,19 +1017,31 @@ class Dataset:
         if max_chars < 0:
             raise VaultError("max_chars cannot be negative: use 0 for no ceiling")
         base = self._resolve(rel, must_exist=True)
+        # One walk. `rglob(pattern)` matched the pattern against the tail of
+        # each path, which is what PurePath.match does on the relative path;
+        # the files the pattern leaves out are counted from the SAME list,
+        # where a second walk used to count them.
+        everything = self._walk(base) if base.is_dir() else [base]
+        chosen = [p for p in everything if p.relative_to(base).match(pattern)] \
+            if base.is_dir() else everything
         buf = io.BytesIO()
         n, total = 0, 0
         with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-            for p in sorted(base.rglob(pattern) if base.is_dir() else [base]):
-                if self._skip(p):
-                    continue
-                data = self._read_bytes(p)
+            for p in chosen:
+                # _read_bytes inlined around ONE stat: it is needed for the
+                # ceiling and again for the mtime, and used to be taken twice.
+                st = p.stat()
+                if st.st_size > MAX_READ_BYTES:
+                    raise VaultError(f"file too large ({st.st_size} bytes, max {MAX_READ_BYTES})")
+                data = p.read_bytes()
+                if len(data) != st.st_size:
+                    raise VaultFault(f"read {len(data)} bytes, {st.st_size} declared: incomplete read, stopping")
                 total += len(data)
                 if total > MAX_ARCHIVE_BYTES:
                     raise VaultError(f"archive over {MAX_ARCHIVE_BYTES} bytes: narrow path or pattern")
                 info = tarfile.TarInfo(name=self._rel(p))
                 info.size = len(data)
-                info.mtime = int(p.stat().st_mtime)
+                info.mtime = int(st.st_mtime)
                 tar.addfile(info, io.BytesIO(data))
                 n += 1
         if n == 0:
@@ -1044,9 +1072,7 @@ class Dataset:
         # Markdown. Stating the pattern and counting what it left behind turns
         # a silent omission into a number to read. The count goes through
         # `_skip`, so it means the same "file" the archive itself means.
-        skipped = 0
-        if base.is_dir():
-            skipped = sum(1 for p in base.rglob("*") if not self._skip(p)) - n
+        skipped = len(everything) - n if base.is_dir() else 0
         return {"dataset": self.name, "base": self._rel(base), "pattern": pattern,
                 "file_count": n, "skipped_by_pattern": skipped,
                 "original_bytes": total, "tgz_bytes": len(gz),
@@ -1128,9 +1154,7 @@ class Dataset:
         with self._lock():
             external = self._commit_external_if_dirty()
             removed, freed = [], 0
-            for p in sorted(trash.rglob("*")):
-                if self._skip(p):
-                    continue
+            for p in self._walk(trash):
                 try:
                     st = p.stat()
                 except OSError:
@@ -1140,12 +1164,12 @@ class Dataset:
                     removed.append(self._rel(p))
                     p.unlink()
             # directories left empty: remove those too, deepest first
-            for d in sorted((q for q in trash.rglob("*") if q.is_dir()),
-                            key=lambda x: len(x.parts), reverse=True):
-                try:
-                    d.rmdir()
-                except OSError:
-                    pass
+            for dirpath, dirnames, _ in os.walk(trash, topdown=False):
+                for d in dirnames:
+                    try:
+                        os.rmdir(os.path.join(dirpath, d))
+                    except OSError:
+                        pass
             commit = self._commit(f"trash-purge: {len(removed)} files trashed before {before}") \
                 if removed else "(nothing to commit)"
         return {"dataset": self.name, "before": before, "removed": len(removed),

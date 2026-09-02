@@ -1590,6 +1590,38 @@ def main() -> int:
            "the default path is the empty one")
         ok(ds.manifest()["file_count"] == 4, "manifest with no path covers the dataset")
 
+        print("\n[3c] the walker never enters .git, and lists what the old rule listed")
+        # Two things, and the second is what makes the first checkable. The
+        # listing must equal the rule every walker used until 2.9.0 —
+        # sorted(rglob("*")) minus _skip — on a tree with the shapes that rule
+        # met: nested folders, Trash, .gitignore, the lockfile, a link. And
+        # .git must never be READ: os.scandir is wrapped to record every
+        # directory opened, and the objects folder is proved non-empty first,
+        # or the check would be green on a repository with nothing to skip.
+        import unittest.mock as _mock
+        _ep = Path(root) / "Example Project"
+        (_ep / ".archivist.lock").touch()
+        _link = _ep / "01 Notes" / "link.md"; _link.symlink_to(_ep / "log.md")
+        try:
+            _old_rule = sorted(q for q in _ep.rglob("*")
+                               if not (q.is_symlink() or not q.is_file() or ".git" in q.parts
+                                       or q.name == ".archivist.lock"))
+            ok(len(list((_ep / ".git" / "objects").rglob("*"))) > 5,
+               "the repository has loose objects for a walker to trip over")
+            _opened = []
+            _real = os.scandir
+            def _spy(path=".", *a, **k):
+                _opened.append(str(path)); return _real(path, *a, **k)
+            with _mock.patch("os.scandir", _spy):
+                _walked = ds._walk(_ep)
+            ok(_walked == _old_rule, "the walk lists exactly what sorted(rglob) minus _skip listed",
+               [str(x) for x in set(_walked) ^ set(_old_rule)])
+            _git_dirs = [o for o in _opened if "/.git" in o]
+            ok(_opened and not _git_dirs, "and never opened a directory under .git", _git_dirs[:3])
+        finally:
+            _link.unlink()
+            (_ep / ".archivist.lock").unlink()
+
         print("\n[3b] every returned path is relative, and carries its dataset")
         # The writes are exercised here too, not only the reads: a return that
         # kept the prefix on one side and dropped it on the other would be the
