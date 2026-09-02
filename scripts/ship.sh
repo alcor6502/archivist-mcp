@@ -80,9 +80,13 @@ if git show --format= --name-only HEAD | grep -qx server.py \
   VER=$(sed -n 's/^VERSION = "\([^"]*\)"/\1/p' server.py)
   OWNER_REPO=$(git remote get-url "$REMOTE" | sed -E 's#.*github.com[:/]##; s#\.git$##')
   URL=$(python3 - "$MSG" "$VER" "$OWNER_REPO" <<'PY'
-import sys, urllib.parse
+import re, sys, urllib.parse
 msg, ver, repo = sys.argv[1:]
 lines = open(msg, encoding="utf-8").read().strip().splitlines()
+# Trailers (Co-Authored-By:, Signed-off-by:, ...) are for git, not for the
+# release page: strip the trailing block of `Token: value` lines.
+while lines and re.match(r"^[A-Za-z][A-Za-z-]*: ", lines[-1]):
+    lines.pop()
 title = f"v{ver} — {lines[0]}"
 body = "\n".join(lines[2:]).strip()
 q = urllib.parse.urlencode({"tag": f"v{ver}", "target": "main", "title": title, "body": body})
