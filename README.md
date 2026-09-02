@@ -335,14 +335,21 @@ on an Apple Silicon Mac: the image comes out arm64.
 report `CACHED` for a layer whose file had changed. You lose an hour testing the
 old image, convinced you fixed something.
 
-Before installing, test the engine with no network and no Docker:
+Before installing, test the engine with no Docker:
 
 ```sh
-python3 test_vault.py     # the engine checks, all must pass
+scripts/test.sh           # a venv on python3.12, the engine from the pin, the suite to a log
 ```
 
-Half of those checks verify things that must **not** happen — traversal, wrong
+It prints the last lines of the log and `exit=0` when everything passed; any
+other exit code is a suite that did not get to the end, whatever the lines
+above it say. The engine comes from the tag pinned in `requirements.txt` — the
+tarball, or a git clone of the same tag where the network refuses the tarball.
+Half of the checks verify things that must **not** happen — traversal, wrong
 keys, dropping protected datasets — and they are the ones that matter most.
+`scripts/ship.sh <message-file> <file>...` runs the same suite, commits the
+named files and pushes to `main`; when `VERSION` moved it prints the link that
+publishes the release.
 
 </details>
 
@@ -1078,6 +1085,7 @@ between projects, not a defence against an attacker. That is what OAuth is for.
 | `archivist-mcp.xml` | Unraid template, every field documented |
 | `archivist-icon.png` | the icon, used in **two** places — see below |
 | `test_vault.py` | the engine checks, no network needed |
+| `scripts/test.sh` · `scripts/ship.sh` | the suite on a fresh bench, and a delivery from the clone alone |
 
 ### The icon, and where it is actually seen
 

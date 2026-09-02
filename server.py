@@ -82,7 +82,7 @@ from mcp_common_engine.refusals import make_tool
 from preflight import HTTP_MODES, http_mode_from_env
 from vault import VaultRoot, VaultError, VaultFault, guide_for
 
-VERSION = "2.8.2"
+VERSION = "2.9.0"
 
 # The shape of a line of ours. It is a NAME because it is used twice: here, and
 # again below where fastmcp's own handlers are given the same shape. Written out
