@@ -840,9 +840,12 @@ archive("Example Project", "", "*", max_chars=20000)
   for (101 files, 246467 bytes in): narrow `path` or `pattern`
 ```
 
-**`append(dataset, path, text)`** — a block at the end of an existing file. It
-never touches existing bytes, so it needs **no sha**: this is the operation for
-logs and registers. Max 64 KB.
+**`append(dataset, path, text, expected_sha256="")`** — a block at the end of
+an existing file. It never touches existing bytes, so it needs **no sha**: this
+is the operation for logs and registers. Max 64 KB. The sha is **optional** and
+it buys one thing: a retry after a lost response cannot land the block twice,
+because if the first append arrived the file moved and the retry is refused
+with CONFLICT — the same belt `write_file` and `edit_file` always had.
 **Returns** `dataset · path · size · sha256 · commit`
 
 ```
@@ -866,6 +869,14 @@ write_file("Example Project", "new.md", "# Fresh\n", "new")
 **`write_binary(dataset, path, content_base64, expected_sha256)`** — same
 compare-and-swap, from base64. Max 2 MB decoded. Always compare the returned
 sha with the one computed at the source: base64 travels as generated text.
+**And that is the cost to know before using it:** the base64 is *typed by the
+model* as part of the call, about a token every two or three characters, so a
+500 KB PDF is ~700 KB of base64 and a quarter of a million output tokens —
+tens of minutes, for a file the server then writes in a millisecond. The
+server side is not where the time goes. Use it for files up to a few tens of
+KB; anything bigger travels **outside the model** — over SMB from a machine
+that mounts the vault — and is adopted by the next write to that dataset (or
+at boot), with its sha in `list_files` like any other file.
 **Returns** `dataset · path · size · sha256 · commit`
 
 ```
@@ -958,8 +969,10 @@ trash_purge("Example Project", "2026-06-01")
 
 The binary limits are calibrated on actual consumption: a file larger than 2 MB
 is not usable inside a conversation anyway. A talking refusal beats a silent
-failure further down. Above that threshold files travel over SMB or `scp`, and
-the vault acts as the archivist.
+failure further down. Above that threshold — and in practice above a few tens
+of KB, because every base64 byte is a token the model has to type — files
+travel over SMB or `scp`, and the vault acts as the archivist: it adopts what
+appears on disk at the next write, or at boot.
 
 </details>
 

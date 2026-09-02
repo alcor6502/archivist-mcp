@@ -51,7 +51,11 @@ instead of losing the payload.
 ## FOUR WRONG TURNS
 
 Do not split a file to get past a size limit — above 2 MB the vault is not the
-transport, use SMB or scp. Do not read a directory file by file to audit it —
+transport, use SMB or scp. Do not push a big binary through `write_binary`:
+the base64 is typed by the model, a token every two or three characters, so a
+500 KB PDF is tens of minutes for a write the server does in a millisecond —
+drop it over SMB and the next write to the dataset adopts it, sha included.
+Do not read a directory file by file to audit it —
 `archive` once, or `manifest` if you only need to know whether anything changed.
 Do not read files looking for something — `search`, then `read_file` on the
 match. Do not rewrite a file to add a line or change a number — `append`,
@@ -105,12 +109,17 @@ A UTF-8 text file: content plus sha256. That sha is what `write_file` and
 A long document is exactly where you meet your client's result cap — see the
 model page.
 
-## append(dataset, path, text, key='')
+## append(dataset, path, text, expected_sha256='', key='')
 
-Adds a block to the end of an existing file.
-**No sha needed**, and that is not an oversight: it never touches existing bytes,
-so no conflict is possible and there is nothing to protect. Max 64 KB per block.
+Adds a block to the end of an existing file. Max 64 KB per block.
 This is the tool for a log or a register. Do not rewrite a file to add a line.
+**No sha needed**: it never touches existing bytes, so no conflict is possible.
+**But pass `expected_sha256` when you can** — the sha the last read or write
+handed you. It costs nothing when the file is where you left it, and after a
+transport error it is the only thing that tells a lost RESPONSE from a lost
+REQUEST: if your first append did arrive, the retry is refused with CONFLICT
+instead of writing the block twice. Without it, verify the tail with
+`list_files` before retrying.
 
 ## write_file(dataset, path, content, expected_sha256, key='')
 
@@ -180,7 +189,9 @@ Useless without a sandbox to decode it in.
 
 ## write_binary(dataset, path, content_base64, expected_sha256, key='')
 
-A binary file from base64. Same CAS as `write_file`. Max 2 MB decoded.
+A binary file from base64. Same CAS as `write_file`. Max 2 MB decoded. Fine up
+to a few tens of KB; above that the base64 you have to type is the cost, not
+the server — see FOUR WRONG TURNS.
 Compare the returned sha with the one computed at the source.
 
 ## read_at(dataset, path, rev, key='')

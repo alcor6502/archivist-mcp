@@ -344,10 +344,12 @@ def read_file(dataset: str, path: str, key: str = "") -> dict:
 
 
 @tool
-def append(dataset: str, path: str, text: str, key: str = "") -> dict:
-    """Add a block to the end of an existing file."""
+def append(dataset: str, path: str, text: str, expected_sha256: str = "",
+           key: str = "") -> dict:
+    """Add a block to the end of an existing file. No sha needed; pass
+    expected_sha256 to make a retry after a lost response safe (CAS)."""
     ds, rel = vault.open(dataset, path, key)
-    return ds.append(rel, text)
+    return ds.append(rel, text, expected_sha256)
 
 
 @tool

@@ -849,7 +849,21 @@ class Dataset:
 
     # ---------- writing ----------
 
-    def append(self, rel: str, text: str) -> dict:
+    def append(self, rel: str, text: str, expected_sha256: str = "") -> dict:
+        """`expected_sha256` is OPTIONAL here, and that is the whole design.
+
+        Without it, append is what it always was: no sha, no conflict, because
+        it never touches existing bytes. What it cannot tell is whether a block
+        already landed — and after a transport error that is the one thing a
+        caller needs to know. write_file and edit_file get that for free from
+        their CAS: retry blindly, and a write that DID arrive is refused because
+        the sha moved. append had no such belt, so a blind retry after a lost
+        response appended the block twice, and nothing said so (2026-08-30,
+        03:24:33, missed by a `list_files`).
+
+        With it, the same belt: pass the sha you last saw, and a retry after a
+        lost response is refused with CONFLICT — because the first one arrived
+        and the file moved on. Omit it and nothing changes for anyone."""
         if not text.strip():
             raise VaultError("empty text: nothing to append")
         if len(text.encode("utf-8")) > MAX_APPEND_BYTES:
@@ -857,6 +871,13 @@ class Dataset:
         p = self._resolve(rel, must_exist=True)
         with self._lock():
             external = self._commit_external_if_dirty()
+            if expected_sha256:
+                cur = _sha(p.read_bytes())
+                if cur != expected_sha256:
+                    raise VaultError(
+                        f"CONFLICT: expected sha {expected_sha256[:12]}... but the file is {cur[:12]}... "
+                        "Someone wrote after you read it — or your previous append DID arrive: "
+                        "re-read the tail before appending again.")
             # Only the LAST byte decides whether a newline goes first: the file
             # is not read whole before the write — it is read whole after it,
             # for the sha, and that read used to happen twice.

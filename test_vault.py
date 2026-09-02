@@ -1711,6 +1711,27 @@ def main() -> int:
         _big.unlink()
         ds._commit("cleanup big")
 
+        print("\n[4d] append takes an OPTIONAL sha, and with it a retry cannot double the block")
+        # The shape of the defect: a lost response on an append, and a blind
+        # retry. Without a sha the block lands twice and nothing says so; with
+        # the sha of the file as it was BEFORE the first append, the retry is
+        # refused, because the first one moved the file. All three directions:
+        # omitted (as before), right, wrong — and the state after each.
+        _log = ds.read_file("log.md")
+        _before = _log["sha256"]
+        _r1 = ds.append("log.md", "once", _before)
+        ok(_r1["sha256"] != _before and _r1["commit"] != "(nothing to commit)",
+           "append with the CURRENT sha passes and moves the file")
+        must_fail("the same append retried with the OLD sha is refused (the first one arrived)",
+                  lambda: ds.append("log.md", "once", _before))
+        ok(ds.read_file("log.md")["content"].count("once") == 1,
+           "and the block is in the file exactly once", ds.read_file("log.md")["content"].count("once"))
+        _r2 = ds.append("log.md", "twice")
+        ok(_r2["sha256"] != _r1["sha256"], "append without a sha still works as it always did")
+        ok(ds.append("log.md", "thrice", _r2["sha256"])["commit"] != "(nothing to commit)",
+           "and the sha a previous append handed back is accepted by the next one")
+        must_fail("a sha that never was is refused", lambda: ds.append("log.md", "x", "0" * 64))
+
         print("\n[4c] a write costs four git processes, a boot on a clean dataset one")
         # Counted, not timed: a process is the unit of cost here — a few ms
         # on an idle box, tens under load — and the count is what a refactor
