@@ -1487,6 +1487,51 @@ def main() -> int:
            "'.gitignore' is not '.git': it passes")
         ok(ds.read_file(".gitignore")["path"] == ".gitignore", "and it really reads")
 
+        print("\n[2d] a link planted inside the dataset is not a file of the dataset")
+        # _resolve refused READING a symlink that points outside — and the
+        # walkers never went through _resolve: `search` returned the content
+        # of a file outside the dataset through a link inside it. The target
+        # here is the key registry, the file the whole model exists to keep
+        # out of reach. Every walker must leave the link out, by name.
+        _link = Path(root) / "Example Project" / "escape.md"
+        _link.symlink_to(Path(root) / "keys.txt")
+        try:
+            must_fail("reading the link", lambda: ds.read_file("escape.md"))
+            _paths = [f["path"] for f in ds.list_files("")["files"]]
+            ok("escape.md" not in _paths, "list_files leaves the link out", _paths)
+            _hits = ds.search(KEY, "")
+            ok(_hits["matches"] == 0 and _hits["files_scanned"] == len(_paths),
+               "search does not read through the link — the key is not findable", _hits)
+            ok(ds.manifest("")["file_count"] == len(_paths),
+               "manifest counts the same files list_files does", ds.manifest("")["file_count"])
+            import tarfile as _tf, io as _io, base64 as _b64
+            _tgz = ds.archive("", "*")
+            _names = _tf.open(fileobj=_io.BytesIO(_b64.b64decode(_tgz["tgz_base64"]))).getnames()
+            ok("escape.md" not in _names and _tgz["skipped_by_pattern"] == 0,
+               "archive packs neither the link nor its target, and does not count it as skipped",
+               (_names, _tgz["skipped_by_pattern"]))
+        finally:
+            _link.unlink()
+
+        print("\n[2e] a NUL byte in a path is a refusal, not a traceback")
+        # The kernel refuses it and Python turns that into a bare ValueError:
+        # a fault in the log, with a traceback, for the caller's malformed
+        # argument. Both doors — resolution and the per-dataset resolver.
+        # must_fail would let a ValueError escape and take the suite down: the
+        # verdict here is WHICH exception, so it is caught by hand and named.
+        for _label, _fn in (
+            ("NUL through the root door", lambda: v.open("Example Project", "a\x00.md", KEY)),
+            ("NUL through the dataset resolver", lambda: ds.read_file("a\x00.md")),
+            ("NUL in a write", lambda: ds.write_file("a\x00.md", "x", "new")),
+        ):
+            try:
+                _fn()
+                ok(False, _label, "did NOT fail")
+            except VaultError:
+                ok(True, f"{_label} (refused)")
+            except Exception as _e:  # noqa: BLE001 — the point is the type
+                ok(False, _label, f"escaped as {type(_e).__name__}: {_e}")
+
         print("\n[2b] the ambiguous path — the v1.8 shape MUST be refused")
         # A caller not yet rewritten sends the dataset twice: once in `dataset`,
         # once as the head of `path`. Refused loudly.

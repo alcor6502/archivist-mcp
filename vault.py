@@ -362,6 +362,11 @@ class VaultRoot:
         p = _norm(path)
         if not p or p == ".":
             return ""
+        if "\x00" in p:
+            # Not a path at all: the kernel refuses it and Python turns that
+            # into a bare ValueError, which is a fault in the log for what is
+            # the caller's malformed argument. Refused here, as a refusal.
+            raise VaultError(f"path contains a NUL byte: {path!r}")
         if p.startswith("/"):
             raise VaultError(
                 f"path is relative to the dataset, not absolute: {path!r}")
@@ -544,6 +549,8 @@ class Dataset:
         """Dataset-relative to absolute, ALWAYS inside the dataset: no
         traversal, no symlink escaping, no .git."""
         rel = _norm(rel).lstrip("/")
+        if "\x00" in rel:
+            raise VaultError(f"path contains a NUL byte: {rel!r}")
         if not rel or rel == ".":
             p = self.root
         else:
@@ -560,7 +567,12 @@ class Dataset:
     def _skip(self, p: Path) -> bool:
         """The single exclusion rule. Every counting or listing operation goes
         through here, so they can never disagree on what counts as a file."""
-        return (not p.is_file()) or ".git" in p.parts or p.name == LOCKFILE
+        # A symlink is refused BEFORE is_file(), which follows it. `_resolve`
+        # already refused reading one that points outside the dataset; the
+        # walkers did not go through _resolve, and `search` handed back the
+        # content of a file outside the dataset through a link planted inside
+        # it. One rule, every walker: a link is not a file of this dataset.
+        return p.is_symlink() or (not p.is_file()) or ".git" in p.parts or p.name == LOCKFILE
 
     def _read_bytes(self, p: Path) -> bytes:
         size = p.stat().st_size
