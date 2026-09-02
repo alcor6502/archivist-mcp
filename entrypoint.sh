@@ -6,8 +6,11 @@ V="${VAULT_ROOT:-/vault}"
 
 # One git repository per dataset, so safe.directory has to cover every child of
 # the root. Needed both as root (here) and as the service user (below).
+# --replace-all, not --add: the service user's HOME is on the persistent volume,
+# and --add appended one more identical line to its .gitconfig at EVERY
+# restart — parsed by every git call, forever. Found on 2026-09-02 by reading.
 echo "== git init (as root) =="
-git config --global --add safe.directory '*'
+git config --global --replace-all safe.directory '*'
 python3 - <<'PY'
 import os
 from vault import VaultRoot, VaultError
@@ -34,7 +37,7 @@ echo "== dropping privileges -> uid ${U} gid ${G}, umask 000 =="
 export HOME=/data/home; mkdir -p "$HOME"; chown "$U:$G" "$HOME"
 exec setpriv --reuid "$U" --regid "$G" --clear-groups /bin/sh -c '
   umask 000
-  git config --global --add safe.directory "*" 2>/dev/null || true
+  git config --global --replace-all safe.directory "*" 2>/dev/null || true
   echo "== preflight (as the service user) =="
   python3 preflight.py || exit $?
   echo "== server =="

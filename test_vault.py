@@ -1073,6 +1073,20 @@ def template_variable_check() -> None:
        "back in the template", resurrected)
 
 
+def entrypoint_growth_check() -> None:
+    """The entrypoint runs at every restart, and the service user's HOME sits
+    on the persistent volume: a `git config --global --add` there appends one
+    more identical safe.directory line per restart, read by every git call
+    the service makes, for as long as the volume lives. `--replace-all` sets
+    the same value and leaves one line. The check reads every safe.directory
+    line and names the ones that would grow."""
+    sh = (HERE / "entrypoint.sh").read_text(encoding="utf-8")
+    lines = [l.strip() for l in sh.splitlines() if "safe.directory" in l and not l.strip().startswith("#")]
+    ok(len(lines) == 2, "entrypoint.sh sets safe.directory twice: as root and as the service user", lines)
+    growing = [l for l in lines if "--replace-all" not in l]
+    ok(not growing, "and both use --replace-all, so a restart adds no line to .gitconfig", growing)
+
+
 def log_level_checks() -> None:
     """logging.setLevel() raises on an unknown level, and it runs at import —
     after the preflight has printed a clean sheet. So the one way to get a
@@ -2141,6 +2155,9 @@ def main() -> int:
 
         print("\n[14] the Dockerfile still quiets FastMCP down")
         dockerfile_env_check()
+
+        print("\n[14a] the entrypoint does not grow a config line per restart")
+        entrypoint_growth_check()
 
         print("\n[14b] the Gate is wired to the hook it claims")
         gate_hook_check()
