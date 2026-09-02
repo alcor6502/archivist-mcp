@@ -25,8 +25,11 @@ PY
 
 echo "== permissions: chown ${U}:${G} + 666/777 on vault and data =="
 chown -R "$U:$G" "$V" /data
-find "$V" -path '*/.git' -prune -o -type d -exec chmod 777 {} +
-find "$V" -path '*/.git/*' -prune -o -type f -exec chmod 666 {} +
+# One traversal for both modes, .git pruned before it is entered: it used to be
+# two, and the second pruned at '*/.git/*' — one level too late, so it walked
+# every object under .git to decide not to touch it. Verified identical modes
+# on a sample tree before and after (2026-09-02).
+find "$V" -path '*/.git' -prune -o \( -type d -exec chmod 777 {} + \) -o \( -type f -exec chmod 666 {} + \)
 # The key registry stays 640: the service reads it, the world does not.
 if [ -f "${KEYS_FILE:-$V/keys.txt}" ]; then
   chmod 640 "${KEYS_FILE:-$V/keys.txt}"
