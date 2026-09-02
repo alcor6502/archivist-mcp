@@ -1711,6 +1711,33 @@ def main() -> int:
         _big.unlink()
         ds._commit("cleanup big")
 
+        print("\n[4c] a write costs four git processes, a boot on a clean dataset one")
+        # Counted, not timed: a process is the unit of cost here — a few ms
+        # on an idle box, tens under load — and the count is what a refactor
+        # moves without anyone noticing, while a timing hides it in the fsync.
+        # Every git call goes through subprocess.run, wrapped to record the verb.
+        import unittest.mock as _mock
+        import vault as _v
+        _verbs = []
+        _real_run = _v.subprocess.run
+        def _count(argv, *a, **k):
+            if argv and argv[0] == "git":
+                _verbs.append(argv[3])
+            return _real_run(argv, *a, **k)
+        with _mock.patch.object(_v.subprocess, "run", _count):
+            ds.write_file("count.md", "n\n", "new")
+        ok(_verbs == ["status", "add", "commit", "rev-parse"],
+           "write_file on a clean tree: status, add, commit, rev-parse — and nothing else", _verbs)
+        _verbs.clear()
+        with _mock.patch.object(_v.subprocess, "run", _count):
+            v.boot(0)
+        ok(_verbs == ["status"] * len(v.dataset_names()),
+           "boot over clean repositories: one `status` per dataset, no config rewrite", _verbs)
+        ok(ds.history("count.md", 1)["entries"][0].endswith("write: count.md")
+           and "archivist-mcp" in ds._git("log", "-1", "--format=%an <%ae>"),
+           "and the commit still carries our identity, from the environment",
+           ds._git("log", "-1", "--format=%an <%ae>"))
+
         print("\n[5] binaries")
         import base64
         b = base64.b64encode(b"\xff\xfe\x00%PDF").decode()   # deliberately not valid UTF-8

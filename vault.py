@@ -221,6 +221,22 @@ def parse_key_registry(text: str) -> tuple[list[tuple[str, str]], list[int]]:
 # the placeholder check.
 _FORBIDDEN_SEGMENTS = {"..", ".git", LOCKFILE.casefold(), ROOT_LOCKFILE.casefold()}
 
+# The identity every commit of ours carries, handed to git in the ENVIRONMENT
+# of each call rather than written into .git/config at every boot. Two `git
+# config` per dataset per restart bought nothing the environment does not: a
+# repository adopted from a folder made by hand commits under this name either
+# way. The config is still written ONCE, when the repository is created, so a
+# commit made by hand inside the dataset — over SSH, in a test — has an
+# identity too.
+_GIT_IDENTITY = {
+    "GIT_AUTHOR_NAME": "archivist-mcp", "GIT_AUTHOR_EMAIL": "archivist-mcp@localhost",
+    "GIT_COMMITTER_NAME": "archivist-mcp", "GIT_COMMITTER_EMAIL": "archivist-mcp@localhost",
+}
+
+
+def _git_env() -> dict[str, str]:
+    return {**os.environ, **_GIT_IDENTITY}
+
 
 def _has_forbidden(parts) -> bool:
     return any(_fold(x) in _FORBIDDEN_SEGMENTS for x in parts)
@@ -430,10 +446,14 @@ class VaultRoot:
         # root lock: without it, "check that it does not exist" and "create it"
         # are two steps with a gap in between, and the gap is the bug.
         with self._lock():
-            if self.exists(n):
-                real = self._actual_name(n)
+            # The directory is listed ONCE for the three questions — is it
+            # there, under which spelling, how many are there — where it was
+            # listed three times.
+            names = self.dataset_names()
+            real = next((x for x in names if _fold(x) == _fold(n)), None)
+            if real is not None:
                 raise VaultError(f"dataset {real!r} already exists (names are case-insensitive).")
-            if len(self.dataset_names()) >= MAX_DATASETS:
+            if len(names) >= MAX_DATASETS:
                 raise VaultError(f"too many datasets (max {MAX_DATASETS}).")
             d = self.root / n
             try:
@@ -472,13 +492,14 @@ class VaultRoot:
                     "To remove it: take its line out of the key registry (it then "
                     "becomes open), or delete it directly on the server.")
             ds = Dataset(self.root / n, n)
-            current = ds.manifest("")["manifest_sha256"]
+            m = ds.manifest("")   # once: it hashes every file of the dataset
+            current = m["manifest_sha256"]
             if expected_manifest != current:
                 raise VaultError(
                     f"CONFLICT: expected manifest {expected_manifest[:12]}... but the dataset "
                     f"is {current[:12]}... Re-read the manifest and retry — someone wrote "
                     "after you looked at it.")
-            n_files = ds.manifest("")["file_count"]
+            n_files = m["file_count"]
             # The root lock alone would NOT be enough: a write in flight holds
             # the DATASET lock, not this one, so rmtree and the write would
             # still tread on each other. Both locks, always in this order —
@@ -637,7 +658,7 @@ class Dataset:
         caller named something that is not there: that is an ordinary refusal
         and gets `fault=False`."""
         r = subprocess.run(["git", "-C", str(self.root), *args],
-                           capture_output=True, text=True, timeout=timeout)
+                           capture_output=True, text=True, timeout=timeout, env=_git_env())
         if check and r.returncode != 0:
             msg = f"git {' '.join(args[:2])} failed: {r.stderr.strip()[:400]}"
             raise (VaultFault if fault else VaultError)(msg)
@@ -669,8 +690,6 @@ class Dataset:
                 self._git("add", "-A")
                 self._git("commit", "-q", "--allow-empty", "-m", "archivist-mcp: initial commit")
                 return "git repository created, initial commit done"
-            self._git("config", "user.name", "archivist-mcp")
-            self._git("config", "user.email", "archivist-mcp@localhost")
             if self._git("status", "--porcelain").strip():
                 self._git("add", "-A")
                 self._git("commit", "-q", "-m", "external: changes made while the server was down")
@@ -688,10 +707,17 @@ class Dataset:
         return None
 
     def _commit(self, message: str) -> str:
+        """add, commit, and the short hash: three processes. There used to be a
+        `status` between add and commit to learn whether anything was staged —
+        git says so itself, with exit 1 and "nothing to commit" on stdout, so
+        the question was asked twice on every write."""
         self._git("add", "-A")
-        if not self._git("status", "--porcelain").strip():
+        r = subprocess.run(["git", "-C", str(self.root), "commit", "-q", "-m", message],
+                           capture_output=True, text=True, timeout=60, env=_git_env())
+        if r.returncode == 1 and "nothing to commit" in r.stdout:
             return "(nothing to commit)"
-        self._git("commit", "-q", "-m", message)
+        if r.returncode != 0:
+            raise VaultFault(f"git commit failed: {r.stderr.strip()[:400]}")
         return self._git("rev-parse", "--short", "HEAD").strip()
 
     @staticmethod
@@ -711,7 +737,10 @@ class Dataset:
                 total += int(v) * 1024
         return total
 
-    def _atomic_write(self, p: Path, data: bytes) -> bytes:
+    def _atomic_write(self, p: Path, data: bytes) -> tuple[bytes, str]:
+        """The bytes as read back, and their sha — computed once, here, and
+        handed to the caller, which used to hash the same bytes a second time
+        for the result. Three SHA-256 passes over a 2 MB payload became two."""
         p.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=".archivist-tmp-")
         try:
@@ -728,9 +757,10 @@ class Dataset:
             if os.path.exists(tmp):
                 os.unlink(tmp)
         back = p.read_bytes()
-        if _sha(back) != _sha(data):
+        sha = _sha(back)
+        if sha != _sha(data):
             raise VaultFault("post-write verification failed: read-back differs from what was written")
-        return back
+        return back, sha
 
     # ---------- status ----------
 
@@ -827,18 +857,26 @@ class Dataset:
         p = self._resolve(rel, must_exist=True)
         with self._lock():
             external = self._commit_external_if_dirty()
-            data = self._read_bytes(p)
-            add = ("" if (not data or data.endswith(b"\n")) else "\n") + text.rstrip("\n") + "\n"
+            # Only the LAST byte decides whether a newline goes first: the file
+            # is not read whole before the write — it is read whole after it,
+            # for the sha, and that read used to happen twice.
+            size = p.stat().st_size
+            if size > MAX_READ_BYTES:
+                raise VaultError(f"file too large ({size} bytes, max {MAX_READ_BYTES})")
+            with open(p, "rb") as fh:
+                fh.seek(-1, os.SEEK_END) if size else None
+                last = fh.read(1) if size else b""
+            add = ("" if (not size or last == b"\n") else "\n") + text.rstrip("\n") + "\n"
             # The ceiling is checked BEFORE the bytes land, on the size the file
             # will have. Checked after — which is what the read-back below used
             # to do on its own — the refusal arrived with the block already on
             # disk and no commit: the caller heard "no", the next tool call
             # found a dirty tree and committed the block as "external: changes
             # made outside the tools". A refusal must leave nothing behind.
-            if len(data) + len(add.encode("utf-8")) > MAX_READ_BYTES:
+            if size + len(add.encode("utf-8")) > MAX_READ_BYTES:
                 raise VaultError(
                     f"the file would exceed {MAX_READ_BYTES} bytes after the append "
-                    f"({len(data)} now): split the document instead")
+                    f"({size} now): split the document instead")
             with open(p, "ab") as fh:
                 fh.write(add.encode("utf-8"))
                 fh.flush()
@@ -880,10 +918,10 @@ class Dataset:
                         "Someone wrote after you read it: re-read, reconcile, retry.")
             elif expected_sha256 != "new":
                 raise VaultError('the file does not exist: to create it, expected_sha256 must be "new"')
-            back = self._atomic_write(p, data)
+            back, sha = self._atomic_write(p, data)
             commit = self._commit(f"{label}: {p.relative_to(self.root)}")
         return {"dataset": self.name, "path": self._rel(p), "size": len(back),
-                "sha256": _sha(back), "commit": commit,
+                "sha256": sha, "commit": commit,
                 **({"external_commit_first": external} if external else {})}
 
     def edit_file(self, rel: str, old_text: str, new_text: str, expected_sha256: str) -> dict:
@@ -912,12 +950,12 @@ class Dataset:
             out = text.replace(old_text, new_text, 1).encode("utf-8")
             if len(out) > MAX_WRITE_BYTES:
                 raise VaultError(f"result too large ({len(out)} bytes)")
-            back = self._atomic_write(p, out)
+            back, sha = self._atomic_write(p, out)
             if new_text.encode("utf-8") not in back:
                 raise VaultFault("post-edit verification failed: the new text is not in the file")
             commit = self._commit(f"edit: {p.relative_to(self.root)}")
         return {"dataset": self.name, "path": self._rel(p), "size": len(back),
-                "sha256": _sha(back), "commit": commit,
+                "sha256": sha, "commit": commit,
                 **({"external_commit_first": external} if external else {})}
 
     def move_path(self, src: str, dst: str) -> dict:
@@ -1209,13 +1247,13 @@ class Dataset:
             base = subprocess.run(
                 ["git", "-C", str(self.root), "commit-tree", tree, "-m",
                  f"archivist-mcp: history truncated, content as of {date}"],
-                capture_output=True, text=True, timeout=60)
+                capture_output=True, text=True, timeout=60, env=_git_env())
             if base.returncode != 0:
                 raise VaultError(f"commit-tree failed: {base.stderr.strip()[:200]}")
             new_base = base.stdout.strip()
             branch = self._git("rev-parse", "--abbrev-ref", "HEAD").strip()
             r = subprocess.run(["git", "-C", str(self.root), "rebase", "--onto", new_base, cutoff, branch],
-                               capture_output=True, text=True, timeout=600)
+                               capture_output=True, text=True, timeout=600, env=_git_env())
             if r.returncode != 0:
                 subprocess.run(["git", "-C", str(self.root), "rebase", "--abort"],
                                capture_output=True, timeout=60)
