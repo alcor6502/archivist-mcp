@@ -53,6 +53,7 @@ TAG_STYLES = {"t-ord": ("#f3e6df", "#9a4a1f"), "t-qual": ("#e0efe6", "#1a7f52"),
               "t-muni": ("#e4eef6", "#2E6E8E"), "t-roc": ("#efe9f5", "#6b4b9a"),
               "t-mix": ("#f2eede", "#8a6d1f"), "t-none": ("#eef0f2", "#9aa7b4")}
 LINE, BG, SEP = "#e3e8ee", "#f6f8fa", "#cdd8e2"
+GAP = 12    # the one unit of breathing room: between cards, around the stats band, under the title rule
 
 
 class RenderError(Exception):
@@ -253,7 +254,8 @@ class Stats(_Block):
     is shared equally — so the band lines up with whatever sits under it. A
     band whose contents do not fit the row is a refusal — the old script's
     assert, kept — not a squeeze."""
-    LS, VS, PAD, H, GAP = 7.4, 9.0, 8, 17, 12     # DejaVu is wider than Helvetica: a notch smaller
+    LS, VS, PAD, H = 7.4, 9.0, 8, 17     # DejaVu is wider than Helvetica: a notch smaller
+    GAP = GAP
 
     def _widths(self, p, items, width):
         need = [p.width(_str(it.get("label")), "R", self.LS) + 5
@@ -270,11 +272,11 @@ class Stats(_Block):
         if not items:
             raise RenderError(f"{self.what}: stats needs at least one item")
         self._widths(p, items, width)
-        return self.H + 10
+        return self.H + self.GAP          # the pills, then one unit before the next block
 
     def draw(self, p, x, top, width):
         items = self.spec["items"]
-        y = top - self.H - 4
+        y = top - self.H
         for it, w in zip(items, self._widths(p, items, width)):
             tone = it.get("tone", "navy")
             p.rect(x, y, w, self.H, fill=it.get("bg", TONE_BG.get(tone, "#eef1f6")), radius=8)
@@ -389,13 +391,17 @@ class Card(_Block):
             + sum(b.measure(p, inner) for b in self.children) + self.PAD
 
     def draw(self, p, x, top, width, height=None):
-        h = height or self.measure(p, width)
+        natural = self.measure(p, width)
+        h = height or natural
         p.rect(x, top - h, width, h, fill="#ffffff", stroke=LINE, radius=7)
         y = top
         if self.spec.get("title"):
             p.text(x + self.PAD, top - 18, _str(self.spec["title"]), "B", 13, "navy"); y -= self.TITLE_H
         else:
             y -= self.PAD
+        # Stretched to a neighbour's height: the content sits in the MIDDLE of
+        # the room left under the title, not at its top.
+        y -= (h - natural) / 2
         inner = width - 2 * self.PAD
         for b in self.children:
             b.draw(p, x + self.PAD, y, inner); y -= b.measure(p, inner)
@@ -403,7 +409,7 @@ class Card(_Block):
 
 class Row(_Block):
     """Blocks side by side, equal widths, cards stretched to the tallest."""
-    GAP = 12
+    GAP = GAP
 
     def __init__(self, spec, what):
         super().__init__(spec, what)
@@ -685,7 +691,7 @@ class _Doc:
             if not follows and self.title.get("value"):
                 p.text(W - M, y - 1, _str(self.title["value"]), "B", 21, "navy", "right")
             p.line(M, y - 11, W - M, y - 11, "navy", 1.6)
-            return y - 11 - 10
+            return y - 11 - GAP
 
         def new_page():
             footer(); c.showPage(); state["page"] += 1
