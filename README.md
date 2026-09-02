@@ -890,7 +890,7 @@ write_binary("Example Project", "Scans/invoice.pdf", "JVBERi0…", "new")
 pills, cards, donut, grid, gauge, a table in sections, a checklist, headings,
 paragraphs, footer), written with the same compare-and-swap as `write_binary`.
 The bytes are born on the server: ~5 KB of JSON in, ~50 KB of PDF on disk,
-and nothing base64 crosses the model. Real fonts (DejaVu, embedded), full
+and nothing base64 crosses the model. Real fonts (Liberation Sans, Helvetica metrics, embedded), full
 Unicode, max 20 pages. `forbid` is a list of regexes that must match no
 string drawn — an account number, a name — and a match is a refusal that
 writes nothing; `text_check` lists strings that must appear and comes back as

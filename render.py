@@ -42,7 +42,7 @@ MAX_DOCUMENT_BYTES = 200_000    # the JSON, serialised — a page is a few KB
 MAX_PAGES = 20
 MAX_BLOCKS = 400
 
-FONT_DIR = os.environ.get("RENDER_FONT_DIR", "/usr/share/fonts/truetype/dejavu")
+FONT_DIR = os.environ.get("RENDER_FONT_DIR", "/usr/share/fonts/truetype/liberation")
 PAGE_SIZES = {"a4": (595.2756, 841.8898), "letter": (612.0, 792.0)}
 
 TONES = {"navy": "#1F3A5F", "accent": "#2E6E8E", "muted": "#6b7280", "green": "#1a7f52",
@@ -74,9 +74,11 @@ _FONTS: dict[str, str] = {}
 
 
 def _fonts() -> dict[str, str]:
-    """Register DejaVu once and hand back the four face names. Missing files
-    are a fault: the image is built with fonts-dejavu-core, and a PDF drawn
-    with a fallback face would silently look different from every other."""
+    """Register Liberation Sans once and hand back the four face names. The
+    family is metric-compatible with Helvetica, so a layout designed on the
+    base-14 face keeps its measures. Missing files are a fault: the image is
+    built with fonts-liberation, and a PDF drawn with a fallback face would
+    silently look different from every other."""
     if _FONTS:
         return _FONTS
     try:
@@ -84,19 +86,19 @@ def _fonts() -> dict[str, str]:
         from reportlab.pdfbase.ttfonts import TTFont
     except ImportError as e:  # pragma: no cover — the suite installs reportlab
         raise RenderFault(f"reportlab is not installed: {e}")
-    faces = {"R": "DejaVuSans.ttf", "B": "DejaVuSans-Bold.ttf",
-             "I": "DejaVuSans-Oblique.ttf", "BI": "DejaVuSans-BoldOblique.ttf"}
+    faces = {"R": "LiberationSans-Regular.ttf", "B": "LiberationSans-Bold.ttf",
+             "I": "LiberationSans-Italic.ttf", "BI": "LiberationSans-BoldItalic.ttf"}
     names = {}
     for key, fn in faces.items():
         p = os.path.join(FONT_DIR, fn)
         if not os.path.isfile(p):
-            # fonts-dejavu-core ships no obliques: lean on the upright face
-            # rather than on Helvetica, so the page stays one family.
+            # a build without the italics leans on the upright face rather
+            # than on Helvetica, so the page stays one family.
             if key in ("I", "BI"):
                 names[key] = names["R" if key == "I" else "B"]
                 continue
             raise RenderFault(f"font missing in the image: {p}")
-        name = "DV-" + key
+        name = "LS-" + key
         if name not in pdfmetrics.getRegisteredFontNames():
             pdfmetrics.registerFont(TTFont(name, p))
         names[key] = name
@@ -254,7 +256,7 @@ class Stats(_Block):
     is shared equally — so the band lines up with whatever sits under it. A
     band whose contents do not fit the row is a refusal — the old script's
     assert, kept — not a squeeze."""
-    LS, VS, PAD, H = 7.4, 9.0, 8, 17     # DejaVu is wider than Helvetica: a notch smaller
+    LS, VS, PAD, H = 7.8, 9.5, 10, 17
     GAP = GAP
 
     def _widths(self, p, items, width):
@@ -483,8 +485,11 @@ class Table(_Block):
         for col, e0 in zip(self.columns[1:], edges):
             w = (edges[edges.index(e0) + 1] if edges.index(e0) + 1 < len(edges) else x + width) - e0
             align = col.get("align", "right")
+            label = _str(col.get("label")).upper()
+            if p.width(label, "B", 6.8) + (4 if align == "center" else 15) > w:
+                raise RenderError(f"{self.what}: the column label {label!r} is wider than its column: widen it or shorten the label")
             xx = e0 + w - 9 if align == "right" else (e0 + w / 2 if align == "center" else e0 + 6)
-            p.text(xx, y, _str(col.get("label")).upper(), "B", 6.8, "muted", align)
+            p.text(xx, y, label, "B", 6.8, "muted", align)
         p.line(x, y - 5, x + width, y - 5, "navy", 1.1)
         y -= self.HDR
         for row in s.get("rows", []):

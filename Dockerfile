@@ -1,8 +1,8 @@
 FROM python:3.12-slim
-# fonts-dejavu-core: the faces render_pdf embeds. A PDF drawn with a fallback
+# fonts-liberation: the faces render_pdf embeds. A PDF drawn with a fallback
 # face would silently look different from every other, so the renderer refuses
 # to draw without them — and a static check keeps this line here.
-RUN apt-get update && apt-get install -y --no-install-recommends git util-linux fonts-dejavu-core && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends git util-linux fonts-liberation && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

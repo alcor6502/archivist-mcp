@@ -43,6 +43,10 @@ if ! "$VENV/bin/python" -c 'import mcp_common_engine, reportlab' 2>/dev/null; th
     rm -rf "$WORK/engine"
     git -c advice.detachedHead=false clone -q --depth 1 --branch "$TAG" https://github.com/alcor6502/mcp-common-engine.git "$WORK/engine"
     "$PIP" install -q --no-deps "$WORK/engine"
+    # The refused install took the OTHER pins down with it (reportlab): the
+    # rest of the file comes from PyPI, which the same proxy does serve.
+    grep -v 'mcp-common-engine' "$REQ" >"$WORK/requirements-rest.txt"
+    "$PIP" install -q --no-deps -r "$WORK/requirements-rest.txt"
   fi
 fi
 

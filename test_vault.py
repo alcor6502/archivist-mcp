@@ -801,8 +801,12 @@ def engine_adoption_check() -> None:
     # render_pdf draws with faces the IMAGE carries and a library pip installs:
     # both are declared in files no test executes, so both are read here.
     dk = (HERE / "Dockerfile").read_text(encoding="utf-8")
-    ok(re.search(r"apt-get install[^\n]*fonts-dejavu-core", dk) is not None,
-       "the Dockerfile installs fonts-dejavu-core, the faces render_pdf embeds")
+    ok(re.search(r"apt-get install[^\n]*fonts-liberation", dk) is not None,
+       "the Dockerfile installs fonts-liberation, the faces render_pdf embeds")
+    ok(re.search(r"apt-get install[^\n]*fonts-liberation", wf) is not None,
+       "and so does the CI test job, which draws the same pages")
+    ok(re.search(r"^pillow==\d", req, re.MULTILINE) is not None,
+       "requirements.txt pins pillow, which reportlab imports at load and --no-deps would skip")
     ok(re.search(r"^COPY [^\n]*\brender\.py\b", dk, re.MULTILINE) is not None,
        "and copies render.py into the image")
     ok(re.search(r"^reportlab==\d", req, re.MULTILINE) is not None,
@@ -1838,6 +1842,9 @@ def main() -> int:
         must_fail("a cell wider than its column is refused instead of drawn over the neighbour",
                   lambda: ds.render_pdf("Reports/x.pdf", dict(_doc, blocks=[{"type": "table", "columns": [{"label": ""}, {"label": "V", "width": 0.1}],
                                         "sections": [{"title": "s", "rows": [{"cells": [{"text": "a"}, {"text": "$1,234,567,890,123"}]}]}]}]), "new"))
+        must_fail("a column label wider than its column is refused, not drawn into the neighbour",
+                  lambda: ds.render_pdf("Reports/x.pdf", dict(_doc, blocks=[{"type": "table", "columns": [{"label": ""}, {"label": "Guadagni YTD", "width": 0.06}],
+                                        "sections": [{"title": "s", "rows": [{"cells": [{"text": "a"}, {"text": "$1"}]}]}]}]), "new"))
         must_fail("a section taller than a page is refused, not cut",
                   lambda: ds.render_pdf("Reports/x.pdf", dict(_doc, blocks=[{"type": "table", "columns": [{"label": ""}],
                                         "sections": [{"title": "s", "rows": [{"cells": [{"text": "r"}]}] * 80}]}]), "new"))

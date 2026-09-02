@@ -37,6 +37,10 @@ jobs:
       # exactly why it can run here in under a minute.
       - run: pip install --no-deps -r requirements.txt
 
+      # The faces render_pdf embeds, the same package the Dockerfile installs:
+      # the suite draws real pages, and a runner without them fails by name.
+      - run: sudo apt-get install -y --no-install-recommends fonts-liberation
+
       - run: python3 test_vault.py
 
       # The tag and the VERSION constant are two places holding the same number,
