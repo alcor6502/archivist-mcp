@@ -2043,6 +2043,67 @@ def main() -> int:
                        and not {"measure", "draw"} <= {f.name for f in c.body if isinstance(f, ast.FunctionDef)})
         ok(not _stub, "every block defines both measure() and draw(): none falls through to the stub", _stub)
 
+        print("\n[5b-ter] card — four gaps that used to be one number, and none of them ignored")
+        # PAD was the left inset, the right inset, the top gap and the bottom
+        # gap at once, and TITLE_H a constant 24 that had no idea what size the
+        # title was drawn at. On a card holding a gauge that reads wrong: under
+        # the last line sits the gauge's tick tail AND the padding.
+        _CARD = {"type": "card", "title": "T", "blocks": [{"type": "paragraph", "text": "x", "size": 10}]}
+
+        def _card_box(ops):
+            """The white box: x, y, width, height — and its top edge."""
+            r = [o for o in ops if o[0] == "rect" and o[5] == "#ffffff"][0]
+            return r[1], r[2], r[3], r[4], r[2] + r[4]
+
+        # [c1] THE assert 3.2.0 did not have: a field that is parsed and then
+        # ignored draws exactly what the default draws, and every check that
+        # only looks at the default passes. So each field is set on its own and
+        # the drawing must MOVE.
+        _plain = _ops([_CARD])
+        for _f, _v in (("padding", 20), ("pad_top", 30), ("pad_bottom", 30), ("title_size", 20)):
+            ok(_ops([dict(_CARD, **{_f: _v})]) != _plain,
+               f"card `{_f}` changes what is drawn — a field parsed and ignored would pass without this")
+
+        # [c2] measure() and draw() read the SAME four numbers, or the box does
+        # not hold its content. Every number below is the arithmetic of the
+        # fields, not a value copied from a run.
+        _o = _ops([dict(_CARD, padding=20, pad_top=30, pad_bottom=9, title_size=26)])
+        _bx, _by, _bw, _bh, _btop = _card_box(_o)
+        _head = 30 + 26 * 12 / 13                      # pad_top + what the title adds
+        _para = 1 * 10 * 1.35 + 4                      # one line at size 10
+        ok(abs(_bh - (_head + _para + 9)) < 0.01,
+           "the box is exactly pad_top + title band + content + pad_bottom", (_bh, _head + _para + 9))
+        _ttl = [o for o in _o if o[0] == "text" and o[3] == "T"][0]
+        _txt = [o for o in _o if o[0] == "text" and o[3] == "x"][0]
+        ok(abs(_ttl[1] - (_bx + 20)) < 0.01 and abs(_ttl[2] - (_btop - 30 - 26 * 6 / 13)) < 0.01,
+           "the title sits at the padding, its baseline under pad_top and scaled to title_size", _ttl)
+        ok(abs(_txt[1] - (_bx + 20)) < 0.01 and abs(_txt[2] - (_btop - _head - 10)) < 0.01,
+           "the content starts at the padding, under the whole head", _txt)
+        ok(abs(_ttl[5] - 26) < 0.01, "the title is drawn at title_size", _ttl[5])
+
+        # [c3] and the defaults are the promise: the numbers that were written
+        # into PAD and TITLE_H come back out of the fields.
+        _o = _ops([_CARD])
+        _bx, _by, _bw, _bh, _btop = _card_box(_o)
+        _ttl = [o for o in _o if o[0] == "text" and o[3] == "T"][0]
+        _txt = [o for o in _o if o[0] == "text" and o[3] == "x"][0]
+        ok(abs(_ttl[2] - (_btop - 18)) < 0.01 and _ttl[5] == 13 and abs(_ttl[1] - (_bx + 12)) < 0.01,
+           "a card naming nothing still draws its title B 13 at 12 in and 18 down", _ttl)
+        ok(abs(_txt[2] - (_btop - 24 - 10)) < 0.01,
+           "and its content still starts 24 below the top: the old TITLE_H, now derived", _txt)
+        ok(abs(_bh - (24 + _para + 12)) < 0.01, "and the box is still 24 + content + 12", _bh)
+        _o = _ops([{k: v for k, v in _CARD.items() if k != "title"}])
+        _bx, _by, _bw, _bh, _btop = _card_box(_o)
+        ok(abs(_bh - (12 + _para + 12)) < 0.01,
+           "without a title the head is the top padding alone, as before", _bh)
+
+        must_fail("a negative card padding is refused by name",
+                  lambda: ds.render_pdf("", {"blocks": [dict(_CARD, padding=-1)]}, "new"))
+        must_fail("a negative card pad_bottom is refused by name",
+                  lambda: ds.render_pdf("", {"blocks": [dict(_CARD, pad_bottom=-1)]}, "new"))
+        must_fail("a card title_size of 0 is refused by name",
+                  lambda: ds.render_pdf("", {"blocks": [dict(_CARD, title_size=0)]}, "new"))
+
         print("\n[5c] render_report — schede already in the vault, bound into one PDF")
         # Every check here goes through the SAME door the tool uses, and the
         # fixture is a small Quadro Clinico: two groups by pattern, one by an

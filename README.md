@@ -922,6 +922,12 @@ already drew: the label line (`label_upper`, `label_face`, `label_size`,
 instead of crashing, and a face the document names — the four are `R B I BI` —
 is refused by name instead of coming back as a `KeyError` from inside the font
 dict.
+
+**3.3.0** does the same for the `card`, where one number was the left inset,
+the right inset, the top gap and the bottom gap at once: `padding`, `pad_top`,
+`pad_bottom` and `title_size`, with the title band derived from the size
+instead of a constant 24. Same promise, same three documents rendered before
+and after to prove it: a card naming none of them draws exactly as before.
 **Returns** `dataset · path · size · sha256 · commit · pages · strings_drawn · missing`
 
 ```

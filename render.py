@@ -450,32 +450,65 @@ class Donut(_Block):
 
 
 class Card(_Block):
-    PAD, TITLE_H = 12, 24
+    """A white box with a border, optionally titled.
+
+    `PAD` used to be ONE number doing four jobs — the left and right inset,
+    the top gap, the bottom gap — and `TITLE_H` a constant that had no idea
+    what size the title was drawn at. On a card holding a gauge that reads
+    wrong: under the last line there is the gauge's own tick tail AND the
+    bottom padding, while above sits a title band of 24. Each gap is now its
+    own field, and the title band is derived from the title's size.
+
+    The two title offsets are the points they are AT the default size, scaled
+    from it — written as a multiplication before the division, so at 13 they
+    come back as exactly 24 and 18 and not as 24.000000000000004."""
+    PAD, TITLE_SIZE = 12, 13
+    TITLE_LEAD = 12.0     # what a title adds under the top gap, at TITLE_SIZE
+    TITLE_DROP = 6.0      # its baseline under the top gap, at TITLE_SIZE
 
     def __init__(self, spec, what):
         super().__init__(spec, what)
         self.children = [_make(b, f"{what}.blocks[{i}]") for i, b in enumerate(spec.get("blocks", []))]
 
+    def _pads(self):
+        """The four measures, read ONCE. measure() and draw() used to agree by
+        both spelling out self.PAD; a field read by one and not the other is a
+        box that does not hold its content."""
+        spec = self.spec
+        pad = float(spec.get("padding", self.PAD))
+        top = float(spec.get("pad_top", pad))
+        bottom = float(spec.get("pad_bottom", pad))
+        for name, v in (("padding", pad), ("pad_top", top), ("pad_bottom", bottom)):
+            if v < 0:
+                raise RenderError(f"{self.what}: card {name} cannot be negative, got {v}")
+        size = float(spec.get("title_size", self.TITLE_SIZE))
+        if size <= 0:
+            raise RenderError(f"{self.what}: card title_size must be above 0, got {size}")
+        # With a title the top gap is still pad_top: the title sits IN it and
+        # the band is what the type adds under it.
+        head = top + (size * self.TITLE_LEAD / self.TITLE_SIZE if spec.get("title") else 0.0)
+        return pad, top, bottom, size, head
+
     def measure(self, p, width):
-        inner = width - 2 * self.PAD
-        return (self.TITLE_H if self.spec.get("title") else self.PAD) \
-            + sum(b.measure(p, inner) for b in self.children) + self.PAD
+        pad, _, bottom, _, head = self._pads()
+        inner = width - 2 * pad
+        return head + sum(b.measure(p, inner) for b in self.children) + bottom
 
     def draw(self, p, x, top, width, height=None):
+        pad, pad_top, _, size, head = self._pads()
         natural = self.measure(p, width)
         h = height or natural
         p.rect(x, top - h, width, h, fill="#ffffff", stroke=LINE, radius=7)
-        y = top
+        y = top - head
         if self.spec.get("title"):
-            p.text(x + self.PAD, top - 18, _str(self.spec["title"]), "B", 13, "navy"); y -= self.TITLE_H
-        else:
-            y -= self.PAD
+            p.text(x + pad, top - pad_top - size * self.TITLE_DROP / self.TITLE_SIZE,
+                   _str(self.spec["title"]), "B", size, "navy")
         # Stretched to a neighbour's height: the content sits in the MIDDLE of
         # the room left under the title, not at its top.
         y -= (h - natural) / 2
-        inner = width - 2 * self.PAD
+        inner = width - 2 * pad
         for b in self.children:
-            b.draw(p, x + self.PAD, y, inner); y -= b.measure(p, inner)
+            b.draw(p, x + pad, y, inner); y -= b.measure(p, inner)
 
 
 class Row(_Block):

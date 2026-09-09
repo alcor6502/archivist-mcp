@@ -243,15 +243,26 @@ refusal by name.
 | *legend / percent* | *fixed* `R` 8 `desc` / `B` 9.5 `navy`, right | |
 | *centre* | *fixed* `B` 10.5 `navy`, its label `R` 6.2 `muted` | |
 
-**`card`** `{title, blocks}` — a white box with a border.
-| field | default | notes |
+**`card`** `{title, blocks, padding, pad_top, pad_bottom, title_size}` — a
+white box with a border. **Each gap is its own field**: until 3.3.0 one number
+was the left inset, the right inset, the top gap and the bottom gap at once,
+which is why a card holding a gauge read bottom-heavy — under the last line
+sits the gauge's own tick tail AND the padding.
+| field | default | which gap it governs |
 |---|---|---|
-| `title` | none | with a title the content starts 24 down, without one 12 |
-| *title* | *fixed* `B` 13 `navy` | ⚠ the same as `heading` |
-| *box* | *fixed* padding 12, radius 7, border `#e3e8ee` | |
+| `title` | none | the line at the top; the band it adds is `title_size` × 12/13 |
+| `title_size` | 13 | the title's type size, and with it the band and the baseline. Above 0 or a refusal |
+| `padding` | 12 | the **left and right** inset, and the default of the two below |
+| `pad_top` | `padding` | the room above the content — **above the title when there is one**, so it moves the title too. Negative is a refusal |
+| `pad_bottom` | `padding` | the room under the last block. Negative is a refusal |
+| *title face and tone* | *fixed* `B` `navy` | ⚠ at the default size, the same as `heading` and a table title |
+| *box* | *fixed* radius 7, border `#e3e8ee`, white fill | |
 
-Stretched to a taller neighbour in a `row`, a card **centres** its content in
-the room left under the title.
+So the head above the content is `pad_top` with no title, and `pad_top +
+title_size × 12/13` with one — 12 and 24 at the defaults, which are the two
+numbers that used to be written in the renderer. Stretched to a taller
+neighbour in a `row`, a card **centres** its content in the room left over.
+
 
 **`row`** `{items:[blocks]}` — side by side, **equal widths**, gap 12; cards
 stretched to the tallest. At least one item.
@@ -311,7 +322,7 @@ Every block may sit inside a `card` or a `row`, including another `card` or
 
 `title.text` `B` 19 · `title.value` `B` 21 `navy` · subtitle `R` 8.5 `muted` ·
 badge `B` 8.5 `red` · **`heading` = card title = table title, all `B` 13
-`navy`** · checklist title `B` 12 · donut centre `B` 10.5 · table section
+`navy`** (only the card's is settable, with `title_size`) · checklist title `B` 12 · donut centre `B` 10.5 · table section
 title `BI` 10.5 · grid value `B` 11.5 · checklist text `R` 11 · `paragraph`
 9.5 · stats value `B` 9.5 · table cell `B` 8.6 bold, `R` 8.4 plain, `sub` 6.8
 · footer `R` 8 · stats label 7.8 · table column label 6.8 · gauge label 6.6 ·
