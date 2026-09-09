@@ -73,6 +73,14 @@ class RenderFault(Exception):
 _FONTS: dict[str, str] = {}
 
 
+# The four faces, in ONE place: _fonts() registers these files and _face()
+# refuses anything else by name. Written twice, a caller could pass a face the
+# guide lists and the font dict has not got — a KeyError from inside reportlab.
+FACE_FILES = {"R": "LiberationSans-Regular.ttf", "B": "LiberationSans-Bold.ttf",
+              "I": "LiberationSans-Italic.ttf", "BI": "LiberationSans-BoldItalic.ttf"}
+FACES = tuple(FACE_FILES)
+
+
 def _fonts() -> dict[str, str]:
     """Register Liberation Sans once and hand back the four face names. The
     family is metric-compatible with Helvetica, so a layout designed on the
@@ -86,10 +94,8 @@ def _fonts() -> dict[str, str]:
         from reportlab.pdfbase.ttfonts import TTFont
     except ImportError as e:  # pragma: no cover — the suite installs reportlab
         raise RenderFault(f"reportlab is not installed: {e}")
-    faces = {"R": "LiberationSans-Regular.ttf", "B": "LiberationSans-Bold.ttf",
-             "I": "LiberationSans-Italic.ttf", "BI": "LiberationSans-BoldItalic.ttf"}
     names = {}
-    for key, fn in faces.items():
+    for key, fn in FACE_FILES.items():
         p = os.path.join(FONT_DIR, fn)
         if not os.path.isfile(p):
             # a build without the italics leans on the upright face rather
@@ -185,6 +191,15 @@ class _Block:
     def __init__(self, spec: dict, what: str):
         self.spec, self.what = spec, what
 
+    def _face(self, v) -> str:
+        """A face named by the document. `"bold"` used to come back as a
+        KeyError from inside the font dict, with no block named and no clue
+        that the four names are these."""
+        f = _str(v) or "R"
+        if f not in FACES:
+            raise RenderError(f"{self.what}: unknown face {f!r} — one of {', '.join(FACES)}")
+        return f
+
     def measure(self, p: _Page, width: float) -> float:
         raise NotImplementedError
 
@@ -205,7 +220,7 @@ class Heading(_Block):
 class Paragraph(_Block):
     def _lines(self, p, width):
         size = float(self.spec.get("size", 9.5))
-        return p.wrap(_req(self.spec, "text", self.what), self.spec.get("face", "R"), size, width), size
+        return p.wrap(_req(self.spec, "text", self.what), self._face(self.spec.get("face", "R")), size, width), size
 
     def measure(self, p, width):
         lines, size = self._lines(p, width)
@@ -215,7 +230,7 @@ class Paragraph(_Block):
         lines, size = self._lines(p, width)
         y = top - size
         for ln in lines:
-            p.text(x, y, ln, self.spec.get("face", "R"), size, self.spec.get("tone", "black"))
+            p.text(x, y, ln, self._face(self.spec.get("face", "R")), size, self.spec.get("tone", "black"))
             y -= size * 1.35
 
 
@@ -318,31 +333,75 @@ class Grid(_Block):
 
 
 class Gauge(_Block):
-    """Coloured bands with a marker at `position` (0-100) and labels below."""
-    H = 46
+    """Coloured bands with a marker at `position` (0-100) and labels below.
+
+    The label line, each tick and the bar's thickness are settable, and every
+    one of them defaults to the value this block has always drawn: a document
+    that names none of them draws exactly as before.
+
+    The two label offsets are held in EMS of the label's own size, so a bigger
+    label keeps its proportions instead of sitting in a box measured for 6.6pt.
+    At the default size they are exactly the 5 and 12 that used to be written
+    here as bare numbers — that is the arithmetic below, not a coincidence."""
+    TOP_GAP = 8
+    LABEL_SIZE, LABEL_FACE, LABEL_TONE = 6.6, "R", "muted"
+    LABEL_DROP = 5.0 / LABEL_SIZE      # the label baseline under the top gap
+    LABEL_LEAD = 12.0 / LABEL_SIZE     # the line the label takes up
+    THICKNESS = 18
+    TICK_SIZE, TICK_FACE, TICK_TONE = 6.2, "R", "muted"
+    TICK_DROP = 9                      # the tick baseline under the bar
+    DESCENT = 0.25                     # room under a baseline for the descenders
+
+    def _shape(self):
+        """Everything measure() and draw() must agree on, read once. They used
+        to agree by both being written by hand, which is how H stayed 46 while
+        the drawing outgrew it."""
+        spec = self.spec
+        label = _str(spec.get("label"))
+        label_size = float(spec.get("label_size", self.LABEL_SIZE))
+        if label and label_size <= 0:
+            raise RenderError(f"{self.what}: gauge label_size must be above 0, got {label_size}")
+        thickness = float(spec.get("thickness", self.THICKNESS))
+        if thickness <= 0:
+            raise RenderError(f"{self.what}: gauge thickness must be above 0, got {thickness}")
+        ticks = spec.get("ticks") or []
+        # The tail is measured on the BIGGEST tick, not on the default: one
+        # tick asking for 12pt would otherwise hang out of the measured box.
+        tail = (self.TICK_DROP + max(float(t.get("size", self.TICK_SIZE)) for t in ticks) * self.DESCENT
+                if ticks else 0.0)
+        head = label_size * self.LABEL_LEAD if label else 0.0
+        return label, label_size, thickness, ticks, head, tail
 
     def measure(self, p, width):
         pos = float(_req(self.spec, "position", self.what))
         if not 0 <= pos <= 100:
             raise RenderError(f"{self.what}: gauge position {pos} is not within 0-100")
-        return self.H
+        _, _, thickness, _, head, tail = self._shape()
+        return self.TOP_GAP + head + thickness + tail
 
     def draw(self, p, x, top, width):
-        y = top - 8
-        if self.spec.get("label"):
-            p.text(x, y - 5, _str(self.spec["label"]).upper(), "R", 6.6, "muted"); y -= 12
-        bar_y, bar_h = y - 18, 18
+        spec = self.spec
+        label, label_size, thickness, ticks, head, _ = self._shape()
+        y = top - self.TOP_GAP
+        if label:
+            p.text(x, y - label_size * self.LABEL_DROP,
+                   label.upper() if spec.get("label_upper", True) else label,
+                   self._face(spec.get("label_face", self.LABEL_FACE)), label_size,
+                   spec.get("label_tone", self.LABEL_TONE))
+            y -= head
+        bar_y = y - thickness
         start = 0.0
-        for band in self.spec.get("bands", [{"to": 100, "color": BG}]):
+        for band in spec.get("bands", [{"to": 100, "color": BG}]):
             to = float(band.get("to", 100)) / 100
-            p.rect(x + width * start, bar_y, width * (to - start), bar_h, fill=band.get("color", BG))
+            p.rect(x + width * start, bar_y, width * (to - start), thickness, fill=band.get("color", BG))
             start = to
-        pos = float(self.spec["position"]) / 100
-        p.rect(x + width * pos - 1.5, bar_y - 2, 3, bar_h + 4, fill=self.spec.get("marker", "accent"))
-        for t in self.spec.get("ticks", []):
+        pos = float(spec["position"]) / 100
+        p.rect(x + width * pos - 1.5, bar_y - 2, 3, thickness + 4, fill=spec.get("marker", "accent"))
+        for t in ticks:
             at = float(t.get("at", 0)) / 100
-            align = t.get("align", "center")
-            p.text(x + width * at, bar_y - 9, _str(t.get("text")), "R", 6.2, "muted", align)
+            p.text(x + width * at, bar_y - self.TICK_DROP, _str(t.get("text")),
+                   self._face(t.get("face", self.TICK_FACE)), float(t.get("size", self.TICK_SIZE)),
+                   t.get("tone", self.TICK_TONE), t.get("align", "center"))
 
 
 class Donut(_Block):
@@ -481,6 +540,19 @@ class Table(_Block):
 
     def measure(self, p, width):
         return (self.TITLE_H if self.spec.get("title") else 0) + sum(self.section_height(s) for s in self.sections)
+
+    def draw(self, p, x, top, width):
+        """A table nested in a card or a row: title then every section, in the
+        room measure() asked for. Without this, Card.draw called the _Block
+        stub and the caller got `the renderer failed on a row block
+        (NotImplementedError: )` — the wrong block named and nothing to act on.
+        The page-breaking version lives in _Doc.render, and only there: inside
+        a card there is no next page to break to, so a table taller than its
+        page is refused as the card it sits in."""
+        y = top - self.draw_title(p, x, top)
+        for s in self.sections:
+            self.draw_section(p, x, y, width, s)
+            y -= self.section_height(s)
 
     def draw_title(self, p, x, top):
         if self.spec.get("title"):

@@ -149,21 +149,173 @@ The document: `{"page", "title", "footer", "forbid", "text_check", "blocks"}`.
   name) — a match is a refusal and nothing is written
 - `text_check`: strings that must appear; the missing ones come back in
   `missing`, they do not stop the render
-- `blocks`, in order, each `{"type": …}`:
-  `stats` `{items:[{label,value,tone}]}` one row of pills, refused if it does
-  not fit · `row` `{items:[blocks]}` side by side, cards stretched equal ·
-  `card` `{title, blocks}` · `donut` `{slices:[{label,value,color}], center,
-  center_label}` (a slice at 0 is listed, not drawn; a negative one is refused) · `grid` `{cols, items:[{label,value,tone}]}` · `gauge`
-  `{label, position 0-100, bands:[{to,color}], ticks:[{at,text,align}]}` ·
-  `table` `{title, columns:[{label,align,width}], sections:[{title,subtitle,
-  rows:[{cells:[…]}]}]}` — first cell `{text,sub}` name + description, others
-  `{text,sub,tone,bold}` or `{tag,style}`; a section never splits across
-  pages; a cell wider than its column is a refusal · `checklist` `{title,
-  numbered, start, items:[{cols:[…]}]}` drawn boxes, columns sized on content
-  · `heading` · `paragraph` `{text,size,face,tone}` · `note` `{text,tone,
-  align}` · `rule` · `spacer`.
-- tones: `navy accent muted green red black desc dark` or any `#rrggbb`;
-  tag styles `t-ord t-qual t-muni t-roc t-mix t-none` or `{bg,fg}`.
+
+**Faces are `R` `B` `I` `BI`** and nothing else — Liberation Sans regular,
+bold, italic, bold italic. `"bold"` is a refusal that lists the four.
+**Tones**: `navy accent muted green red black desc dark`, or any `#rrggbb`.
+Tag styles: `t-ord t-qual t-muni t-roc t-mix t-none`, or `{bg, fg}`.
+
+### The blocks
+
+Each is `{"type": …}`. **Every default below is what the renderer draws when
+the field is absent**, and a row marked *fixed* is written in the renderer:
+no field reaches it, so a page that needs it different needs a release.
+
+**`heading`** `{text}` — text required.
+| field | default | notes |
+|---|---|---|
+| *face/size/tone* | *fixed* `B` / 13 / `navy` | ⚠ **identical to a card title and to a table title.** A `heading` reached for as "bold text inside a card" gives two lines of the same weight and no hierarchy — use `paragraph` with `face: "B"` |
+| *height* | *fixed* 22 | |
+
+**`paragraph`** `{text, size, face, tone}` — text required, wraps to the width.
+| field | default | values |
+|---|---|---|
+| `size` | 9.5 | any |
+| `face` | `R` | `R` `B` `I` `BI` |
+| `tone` | `black` | a tone or `#rrggbb` |
+| *line spacing* | *fixed* 1.35 × size, +4 at the foot | |
+
+**`note`** `{text, size, tone, align, italic}` — a footnote line.
+| field | default | values |
+|---|---|---|
+| `size` | 6.5 | any |
+| `tone` | `red` | a tone or `#rrggbb` |
+| `align` | `left` | `left` `center` `right` |
+| `italic` | `true` | `false` draws `R` instead of `I` |
+
+**`rule`** `{gap, tone, lw}` — a line across the width. `gap` 8 (the block's
+whole height, the line sits in the middle), `tone` `#e3e8ee`, `lw` 0.5.
+
+**`spacer`** `{height}` — height 8, draws nothing.
+
+**`stats`** `{items:[{label, value, tone, bg}]}` — one row of pills, the
+leftover width shared equally. **A band that does not fit on one row is a
+refusal**, not a squeeze.
+| field | default | notes |
+|---|---|---|
+| `tone` | `navy` | colours the value |
+| `bg` | the tone's own pale shade | any `#rrggbb` |
+| *label / value* | *fixed* `R` 7.8 `desc` / `B` 9.5 tone | |
+| *pill* | *fixed* height 17, padding 10, radius 8, gap 12 | the block measures 29 |
+
+**`grid`** `{cols, items:[{label, value, tone}]}` — small boxes, label above,
+value below. `cols` 2, at least 1 or a refusal.
+| field | default | notes |
+|---|---|---|
+| `tone` | `navy` | colours the value |
+| *label* | *fixed* `R` 6.6 `muted`, **upper-cased** | |
+| *value* | *fixed* `B` 11.5 | |
+| *box* | *fixed* height 28, gaps 8 × 6, radius 5, fill `#f6f8fa` | |
+
+**`gauge`** `{label, position, bands, ticks, marker, thickness, label_*}` —
+coloured bands with a marker. `position` 0-100 required, outside that a refusal.
+| field | default | values |
+|---|---|---|
+| `label` | none | the line above the bar; **upper-cased unless `label_upper` is false** |
+| `label_upper` | `true` | `false` keeps the case you sent |
+| `label_face` | `R` | `R` `B` `I` `BI` |
+| `label_size` | 6.6 | above 0, or a refusal |
+| `label_tone` | `muted` | a tone or `#rrggbb` |
+| `thickness` | 18 | the bar's height, above 0 or a refusal |
+| `bands` | one band to 100, `#f6f8fa` | `[{to, color}]`, `to` a percent, cumulative left to right |
+| `marker` | `accent` | a tone or `#rrggbb` — the line at `position` |
+| `ticks` | none | `[{at, text, align, face, size, tone}]`, `at` a percent |
+| tick `align` | `center` | `left` `center` `right` |
+| tick `face` / `size` / `tone` | `R` / 6.2 / `muted` | per tick, not per gauge |
+| *top gap* | *fixed* 8 | above the label |
+| *tick baseline* | *fixed* 9 under the bar | |
+| *marker* | *fixed* 3 wide, 2 proud of the bar top and foot | |
+
+The block's height **follows what it draws**: `8 + label line + thickness +
+tick tail`, where the label line is 1.82 × `label_size` and the tail is
+`9 + 0.25 ×` the biggest tick's size. With every default and both a label and
+ticks that is 48.55 — it was a constant 46 until 3.2.0, which is why a block
+placed under a gauge used to be drawn on by the ticks.
+
+**`donut`** `{slices:[{label, value, color}], center, center_label}` — sectors
+drawn, with a legend and the percentages. The values must sum above zero; **a
+slice at 0 keeps its legend line and draws no sector**; a negative one is a
+refusal by name.
+| field | default | notes |
+|---|---|---|
+| slice `color` | `accent` | a tone or `#rrggbb` |
+| *ring* | *fixed* radius 42, hole 24, legend row 18 | |
+| *legend / percent* | *fixed* `R` 8 `desc` / `B` 9.5 `navy`, right | |
+| *centre* | *fixed* `B` 10.5 `navy`, its label `R` 6.2 `muted` | |
+
+**`card`** `{title, blocks}` — a white box with a border.
+| field | default | notes |
+|---|---|---|
+| `title` | none | with a title the content starts 24 down, without one 12 |
+| *title* | *fixed* `B` 13 `navy` | ⚠ the same as `heading` |
+| *box* | *fixed* padding 12, radius 7, border `#e3e8ee` | |
+
+Stretched to a taller neighbour in a `row`, a card **centres** its content in
+the room left under the title.
+
+**`row`** `{items:[blocks]}` — side by side, **equal widths**, gap 12; cards
+stretched to the tallest. At least one item.
+
+**`table`** `{title, columns, sections}` — see the geometry below.
+
+**`checklist`** `{title, numbered, start, items:[{cols:[…]}]}` — numbered rows
+with a **drawn** box, columns sized on this sheet's content. `numbered` true,
+`start` 1. A one-column item wraps; a multi-column row that is wider than the
+page is a refusal. Fixed: box 10.2, row 22.7, text `R` 11, title `B` 12.
+
+### Table geometry, which is where the refusals come from
+
+`columns: [{label, align, width}]`, `sections: [{title, subtitle, rows:
+[{cells:[…]}]}]`. First cell `{text, sub}` — a name and a description; the
+others `{text, sub, tone, bold}` or `{tag, style}` / `{tag, bg, fg}`.
+
+- **`width` is a fraction of the row, strictly above 0 and below 0.9.** Not
+  points. Their sum must stay under 0.9.
+- **The FIRST column's declared width is ignored**: it takes whatever the
+  others leave. Give it a `label` and no `width`.
+- **A cell wider than its column is a refusal**, never a wrap and never an
+  overflow into the neighbour. So is a column label wider than its column.
+  Only the first column's `sub` is truncated, with an ellipsis.
+- The budget is `width × usable − 14` points. On A4 portrait with margin 28
+  the usable width is 539.3pt, and a digit of the cell face (`B` 8.6) is
+  4.78pt:
+
+  | `width` | points | budget | digits | fits |
+  |---|---|---|---|---|
+  | 0.086 | 46.4 | 32.4 | 6 | `$1,234` |
+  | 0.114 | 61.5 | 47.5 | 9 | `$1,234,56` |
+  | 0.126 | 67.9 | 53.9 | 11 | `+$121,400` |
+  | 0.165 | 89.0 | 75.0 | 15 | `+$121,400 +19.6%` |
+  | 0.20 | 107.9 | 93.9 | 19 | |
+
+  A cell carrying a `sub` spends both on the same line, plus 4 between them.
+  Landscape A4 gives 785.9pt to spend instead, so the same fraction buys ~45%
+  more.
+- Fixed: section title `BI` 10.5 `navy`, its subtitle `R` 8 `muted`, column
+  labels `B` 6.8 `muted` upper-cased, the name `B` 8.6, its description `R` 8
+  `desc`, a bold cell `B` 8.6, a plain one `R` 8.4, a `sub` `R` 6.8 `muted`,
+  tags `B` 6.6. Header 17, row 16, title 22.
+- A **section never splits** across pages; a section taller than a page is a
+  refusal. The table itself flows.
+
+### What nests in what
+
+Every block may sit inside a `card` or a `row`, including another `card` or
+`row`. Two things to know before nesting:
+- a `table` inside a `card` **cannot flow to the next page** — the card is
+  measured whole, so a long table there is refused as a card taller than a
+  page. A table that needs to flow belongs at the top level.
+- a `row` inside a `row` divides the width again, and nothing warns you.
+
+### Sizes at a glance, because they are the hierarchy
+
+`title.text` `B` 19 · `title.value` `B` 21 `navy` · subtitle `R` 8.5 `muted` ·
+badge `B` 8.5 `red` · **`heading` = card title = table title, all `B` 13
+`navy`** · checklist title `B` 12 · donut centre `B` 10.5 · table section
+title `BI` 10.5 · grid value `B` 11.5 · checklist text `R` 11 · `paragraph`
+9.5 · stats value `B` 9.5 · table cell `B` 8.6 bold, `R` 8.4 plain, `sub` 6.8
+· footer `R` 8 · stats label 7.8 · table column label 6.8 · gauge label 6.6 ·
+grid label 6.6 · `note` `I` 6.5 · gauge tick 6.2.
 
 The server draws; it does not know what the numbers mean. Whatever must add
 up, add it up before calling.

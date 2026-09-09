@@ -911,7 +911,17 @@ Unicode, max 20 pages. `forbid` is a list of regexes that must match no
 string drawn — an account number, a name — and a match is a refusal that
 writes nothing; `text_check` lists strings that must appear and comes back as
 `missing`. An empty `path` returns `pdf_base64` without writing, for a sheet
-the chat consumes. The block reference is in `reference_guide("render_pdf")`.
+the chat consumes. The block reference is in `reference_guide("render_pdf")`:
+a field table per block — name, default, accepted values, and what is fixed in
+the renderer and therefore NOT reachable from a call.
+
+Since **3.2.0** the gauge is configurable, every field defaulting to what it
+already drew: the label line (`label_upper`, `label_face`, `label_size`,
+`label_tone`), each tick's own `face`, `size` and `tone`, and the bar's
+`thickness`. In the same release a `table` nested inside a `card` draws
+instead of crashing, and a face the document names — the four are `R B I BI` —
+is refused by name instead of coming back as a `KeyError` from inside the font
+dict.
 **Returns** `dataset · path · size · sha256 · commit · pages · strings_drawn · missing`
 
 ```

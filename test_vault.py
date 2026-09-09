@@ -1915,6 +1915,134 @@ def main() -> int:
         ok(ds.status()["git"] == "clean" and not (Path(root) / "Example Project" / "Reports" / "many.pdf").exists(),
            "and the live render left the tree clean")
 
+        print("\n[5b-bis] gauge — the box it declares is the box it draws, and every measure is settable")
+        # The defect: Gauge.measure returned a constant 46 while draw() put the
+        # tick baseline 47 below the top, 48.55 with the descenders. In both
+        # live dashboards the gauge is the LAST block of a card, so the overrun
+        # fell into the card's 12pt padding and nobody saw it — which is why
+        # the check below puts a block UNDER a gauge instead of measuring the
+        # gauge alone: a height nobody sits under is a height nobody checks.
+        _g_log = []
+        _g_text, _g_rect = _rm._Page.text, _rm._Page.rect
+
+        def _rec_text(self, x, y, s, face="R", size=9, tone="black", align="left"):
+            _g_log.append(("text", x, y, str(s), face, float(size), tone, align))
+            return _g_text(self, x, y, s, face, size, tone, align)
+
+        def _rec_rect(self, x, y, w, h, fill=None, stroke=None, radius=0, lw=0.7):
+            _g_log.append(("rect", x, y, float(w), float(h), fill))
+            return _g_rect(self, x, y, w, h, fill, stroke, radius, lw)
+
+        def _ops(blocks):
+            """What a document actually draws, through the SAME door the tool
+            uses. The live path (`path=""`) so nothing is written."""
+            _g_log.clear()
+            _rm._Page.text, _rm._Page.rect = _rec_text, _rec_rect
+            try:
+                ds.render_pdf("", {"title": {"text": "g"}, "blocks": blocks}, "new")
+            finally:
+                _rm._Page.text, _rm._Page.rect = _g_text, _g_rect
+            # build() renders TWICE — once to count the pages, once to print
+            # "pagina N di M" — so every op is logged twice. Deduplicated, or
+            # every count below would be double and say nothing about the page.
+            return list(dict.fromkeys(_g_log))
+
+        _GAUGE = {"type": "gauge", "label": "97.7 kg", "position": 76,
+                  "bands": [{"to": 50, "color": "#2e7d32"}, {"to": 100, "color": "#c62828"}],
+                  "ticks": [{"at": 50, "text": "91.7"}, {"at": 66, "text": "+15%"}]}
+
+        def _declared(spec):
+            return _rm.Gauge(spec, "t").measure(None, 200.0)
+
+        # [g1] THE check: a block under a gauge must not be drawn on. A grid box
+        # starts exactly where the gauge said it ends, so the tick descenders and
+        # the top edge of that box are the two numbers that must not cross.
+        _o = _ops([{"type": "card", "title": "c", "blocks": [
+            _GAUGE, {"type": "grid", "cols": 2, "items": [{"label": "a", "value": "1"}, {"label": "b", "value": "2"}]}]}])
+        _tick_ink = min(o[2] for o in _o if o[0] == "text" and o[5] == _rm.Gauge.TICK_SIZE) \
+            - _rm.Gauge.TICK_SIZE * 0.212           # Liberation Sans descends 0.212 em
+        _box_top = max(o[2] + o[4] for o in _o if o[0] == "rect" and o[4] == _rm.Grid.BOX_H)
+        ok(_tick_ink >= _box_top,
+           "the gauge ticks stay clear of the block under them: the declared box holds the drawing",
+           f"ticks reach {_tick_ink:.2f}, the box under starts at {_box_top:.2f}")
+
+        # [g2] measure() follows the content instead of standing still: each
+        # part of the drawing accounts for its own height.
+        _base = _declared(_GAUGE)
+        ok(_base == _rm.Gauge.TOP_GAP + 12 + 18 + _rm.Gauge.TICK_DROP + _rm.Gauge.TICK_SIZE * _rm.Gauge.DESCENT,
+           "the declared height is the sum of what is drawn: gap, label, bar, tick tail", _base)
+        ok(_declared(dict(_GAUGE, thickness=30)) == _base + 12,
+           "a thicker bar makes the block taller by exactly the thickness it added")
+        ok(_declared({k: v for k, v in _GAUGE.items() if k != "label"}) == _base - 12,
+           "a gauge with no label does not reserve the label's line")
+        ok(_declared({k: v for k, v in _GAUGE.items() if k != "ticks"})
+           == _base - _rm.Gauge.TICK_DROP - _rm.Gauge.TICK_SIZE * _rm.Gauge.DESCENT,
+           "a gauge with no ticks does not reserve their tail")
+        ok(_declared(dict(_GAUGE, ticks=[{"at": 50, "text": "x", "size": 12}])) > _base,
+           "the tail is measured on the BIGGEST tick, not on the default size")
+
+        # [g3] The defaults are the promise: a document that names none of the
+        # new fields draws exactly what it drew before them.
+        _o = _ops([_GAUGE])
+        _lab = [o for o in _o if o[0] == "text" and o[3] == "97.7 KG"]
+        _tk = [o for o in _o if o[0] == "text" and o[3] in ("91.7", "+15%")]
+        _bar = [o for o in _o if o[0] == "rect" and o[5] in ("#2e7d32", "#c62828")]
+        ok(len(_lab) == 1 and _lab[0][4:7] == ("R", 6.6, "muted"),
+           "the label still draws upper-case, R 6.6 muted", _lab)
+        ok(len(_tk) == 2 and all(t[4:7] == ("R", 6.2, "muted") and t[7] == "center" for t in _tk),
+           "the ticks still draw R 6.2 muted, centred", _tk)
+        ok(len(_bar) == 2 and all(b[4] == 18 for b in _bar), "the bar is still 18pt thick", _bar)
+
+        # [g4] and every one of them is now reachable from the call.
+        _o = _ops([dict(_GAUGE, label_upper=False, label_face="B", label_size=11, label_tone="navy",
+                        thickness=26, ticks=[{"at": 50, "text": "91.7", "face": "I", "size": 9, "tone": "red", "align": "left"}])])
+        _lab = [o for o in _o if o[0] == "text" and o[3] == "97.7 kg"]
+        _tk = [o for o in _o if o[0] == "text" and o[3] == "91.7"]
+        ok(len(_lab) == 1 and _lab[0][4:7] == ("B", 11.0, "navy"),
+           "label_upper, label_face, label_size and label_tone all reach the page", _lab)
+        ok(len(_tk) == 1 and _tk[0][4:7] == ("I", 9.0, "red") and _tk[0][7] == "left",
+           "a tick carries its own face, size, tone and alignment", _tk)
+        ok(any(o[0] == "rect" and o[4] == 26 for o in _o), "thickness reaches the bar")
+        must_fail("a gauge thickness of 0 is refused by name",
+                  lambda: ds.render_pdf("", {"blocks": [dict(_GAUGE, thickness=0)]}, "new"))
+        must_fail("a gauge label_size of 0 is refused by name",
+                  lambda: ds.render_pdf("", {"blocks": [dict(_GAUGE, label_size=0)]}, "new"))
+
+        # [g5] A face named by the document. `"bold"` used to come back as
+        # KeyError: 'bold' from inside the font dict — no block, no clue.
+        try:
+            ds.render_pdf("", {"blocks": [{"type": "paragraph", "text": "x", "face": "bold"}]}, "new")
+            ok(False, "an unknown face is refused")
+        except Exception as e:
+            ok("bold" in str(e) and all(f in str(e) for f in _rm.FACES),
+               f"an unknown face is refused naming it and the four that exist: {e}")
+        must_fail("an unknown face on a gauge label is refused too",
+                  lambda: ds.render_pdf("", {"blocks": [dict(_GAUGE, label_face="bold")]}, "new"))
+
+        # [g6] A table inside a card used to reach the _Block stub: the caller
+        # got `the renderer failed on a row block (NotImplementedError: )`,
+        # which names the wrong block and says nothing.
+        # Caught, and not left to raise: a check that dies in a traceback takes
+        # the rest of the suite with it and never says WHICH block was the one
+        # without a draw().
+        try:
+            _nested = ds.render_pdf("", {"title": {"text": "n"}, "blocks": [{"type": "card", "title": "c", "blocks": [
+                {"type": "table", "title": "t", "columns": [{"label": ""}, {"label": "V", "width": 0.2}],
+                 "sections": [{"title": "s", "rows": [{"cells": [{"text": "AAA"}, {"text": "$1"}]}]}]}]}]},
+                "new")
+            ok(_nested["pages"] == 1 and _nested["missing"] == [],
+               "a table nested in a card draws instead of crashing", _nested)
+        except Exception as _e:
+            ok(False, "a table nested in a card draws instead of crashing", _e)
+
+        # [g7] The audit, kept alive: a block registered without a draw() is the
+        # same defect waiting for the next block type.
+        _rt = ast.parse((HERE / "render.py").read_text(encoding="utf-8"))
+        _stub = sorted(c.name for c in _rt.body if isinstance(c, ast.ClassDef)
+                       and any(getattr(b, "id", "") == "_Block" for b in c.bases)
+                       and not {"measure", "draw"} <= {f.name for f in c.body if isinstance(f, ast.FunctionDef)})
+        ok(not _stub, "every block defines both measure() and draw(): none falls through to the stub", _stub)
+
         print("\n[5c] render_report — schede already in the vault, bound into one PDF")
         # Every check here goes through the SAME door the tool uses, and the
         # fixture is a small Quadro Clinico: two groups by pattern, one by an
