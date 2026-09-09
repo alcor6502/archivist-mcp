@@ -388,7 +388,7 @@ hand. Every field carries its own description in the UI; here is the summary.
 | `ALLOWED_GITHUB_LOGIN` | your GitHub username |
 | `JWT_SIGNING_KEY` | `openssl rand -hex 32` |
 | `PORT` | `3000` |
-| `ALLOWED_CIDRS` | `160.79.104.0/21 # documented egress of the model provider` |
+| `ALLOWED_CIDRS` | empty: no IP filter, OAuth alone decides (the default since 3.0.0, so that a client whose egress is not published can connect). To add the filter: `160.79.104.0/21 # documented egress of the model provider` |
 
 Updating from an earlier version: there is nothing to do about `ALLOWED_CIDRS`.
 The previous name `ANTHROPIC_CIDR` is deprecated but still honoured, so a
