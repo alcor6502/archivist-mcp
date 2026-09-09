@@ -812,6 +812,32 @@ def engine_adoption_check() -> None:
     ok(re.search(r"^reportlab==\d", req, re.MULTILINE) is not None,
        "requirements.txt pins reportlab to one version")
 
+    # render_report leans on more of the image than render_pdf does: the faces
+    # (DejaVu, for the µ × ⁹ → the schede are full of), the text engine
+    # WeasyPrint dlopens through cffi, and the subsetter that keeps an embedded
+    # face down to the glyphs used. None of the three is imported by anything a
+    # test runs, so all three are read here — and asked of the CI job too, which
+    # renders the same pages the image will.
+    for pkg in ("fonts-dejavu-core", "libpangoft2-1\.0-0", "libharfbuzz-subset0"):
+        ok(re.search(rf"apt-get install[^\n]*{pkg}", dk) is not None,
+           f"the Dockerfile installs {pkg.replace(chr(92), '')}, which render_report draws with")
+        ok(re.search(rf"apt-get install[^\n]*{pkg}", wf) is not None,
+           f"and so does the CI test job: {pkg.replace(chr(92), '')}")
+    ok(re.search(r"^COPY [^\n]*\breport\.py\b", dk, re.MULTILINE) is not None,
+       "and the image carries report.py, not only render.py")
+    # WeasyPrint's own dependency tree, pinned line by line: every install in
+    # this project is --no-deps, so a dependency nobody pinned is a module that
+    # is simply not there. Read from the package metadata rather than typed out,
+    # which is what makes it notice the day weasyprint grows one.
+    import importlib.metadata as _md
+    pinned = {ln.split("==")[0].strip().lower() for ln in req.splitlines() if "==" in ln}
+    for dist in ("weasyprint", "markdown"):
+        ok(dist in pinned, f"requirements.txt pins {dist} to one version")
+        need = {re.split(r"[<>=!;\[ ]", r)[0].strip().lower()
+                for r in (_md.requires(dist) or []) if "extra ==" not in r}
+        ok(need <= pinned, f"and every distribution {dist} needs is pinned beside it",
+           sorted(need - pinned))
+
 
 def dockerfile_env_check() -> None:
     """FastMCP reads its settings when it is IMPORTED, so they cannot be set
@@ -1423,7 +1449,8 @@ def guide_signature_check() -> None:
     kb = lambda n: f"{n // 1_000} KB"
     ok(_v.MAX_READ_BYTES == _v.MAX_WRITE_BYTES,
        "reads and writes share one ceiling, as one card claims for both")
-    import render as _r  # the renderer's own ceiling, read from the constant
+    import render as _r      # the renderer's own ceiling, read from the constant
+    import report as _rp     # and the other renderer's, which is a different number
     limits = [("write_file", mb(_v.MAX_WRITE_BYTES)),
               ("read_binary", mb(_v.MAX_BINARY_BYTES)),
               ("write_binary", mb(_v.MAX_BINARY_BYTES)),
@@ -1433,7 +1460,9 @@ def guide_signature_check() -> None:
               ("diff", kb(_v.MAX_DIFF_BYTES)),
               ("archive", mb(_v.MAX_ARCHIVE_OUT_BYTES)),
               ("dataset_create", f"{_v.MAX_DATASETS} datasets"),
-              ("render_pdf", f"{_r.MAX_PAGES} pages")]
+              ("render_pdf", f"{_r.MAX_PAGES} pages"),
+              ("render_report", f"{_rp.MAX_PAGES} pages"),
+              ("render_report", f"{_rp.MAX_SOURCE_BYTES // 1_000_000} MB of Markdown")]
     for name, shown in limits:
         ok(name in cards and shown in cards[name],
            f"the card for {name} still states the limit the code enforces", shown)
@@ -1885,6 +1914,241 @@ def main() -> int:
            "an empty path renders for the chat: pages counted, base64 back, nothing written", _r2["pages"])
         ok(ds.status()["git"] == "clean" and not (Path(root) / "Example Project" / "Reports" / "many.pdf").exists(),
            "and the live render left the tree clean")
+
+        print("\n[5c] render_report — schede already in the vault, bound into one PDF")
+        # Every check here goes through the SAME door the tool uses, and the
+        # fixture is a small Quadro Clinico: two groups by pattern, one by an
+        # explicit list, one that matches nothing, and a scheda filed one level
+        # down that must NOT print.
+        import report as _rp
+        _sch = ds.root / "Schede"
+        _sch.mkdir()
+        (_sch / "00 Stato.md").write_text(
+            "# Stato\n\nValore **fuori range**, e un [rimando](#altrove) interno.\n"
+            "<!-- nota di servizio: non deve stampare -->\n", encoding="utf-8")
+        (_sch / "01 Sangue — Emocromo.md").write_text(
+            "# Emocromo\n\n| Data | Hb | Unità |\n|---|---|---|\n"
+            "| 2026-Set-01 | 14.2 | ×10⁹/µL |\n", encoding="utf-8")
+        (_sch / "01 Sangue — Ferro.md").write_text("# Ferro\n\nFerritina 120.\n", encoding="utf-8")
+        (_sch / "02 Cardio.md").write_text("# Cardio\n\n```\n  pedigree\n  ├─ ASCII\n```\n", encoding="utf-8")
+        (_sch / "Sotto").mkdir()
+        (_sch / "Sotto" / "01 Sangue — Nascosto.md").write_text("# Nascosto\n", encoding="utf-8")
+        _src = {"base": "Schede", "groups": [
+            {"title": "Stato attuale", "files": ["00 Stato.md"]},
+            {"title": "Laboratorio — Sangue", "pattern": "01 Sangue — *.md", "landscape": True},
+            {"title": "Apparati", "pattern": "0[0-9] *.md", "exclude": ["00 *", "01 *"]},
+            {"title": "Vuoto", "pattern": "99 *.md"}]}
+        _lay = {"title": "Quadro", "subtitle": "edizione di prova",
+                "footer": "non è un parere medico",
+                "text_check": ["Emocromo", "MAI-SCRITTO"]}
+        _rr = ds.render_report("Reports/quadro.pdf", _src, _lay, "new")
+        _pdf = Path(root) / "Example Project" / "Reports" / "quadro.pdf"
+        ok(_pdf.read_bytes()[:5] == b"%PDF-" and _rr["size"] == _pdf.stat().st_size,
+           "render_report writes a real PDF, and the result measures the file on disk", _rr["size"])
+        ok(_rr["files"] == 4 and _rr["pages"] >= 6, "four schede, one section each, on their own pages",
+           f"{_rr['files']} files, {_rr['pages']} pages")
+        ok([s["file"] for s in _rr["sections"]] ==
+           ["00 Stato.md", "01 Sangue — Emocromo.md", "01 Sangue — Ferro.md", "02 Cardio.md"],
+           "the groups print in the order given, and the patterns alphabetically",
+           [s["file"] for s in _rr["sections"]])
+        # The index is the renderer's own answer to "where did it land", not a
+        # second count of pages: cover, index, then one page each at least.
+        _pg = [s["page"] for s in _rr["sections"]]
+        ok(_pg[0] == 3 and _pg == sorted(_pg) and len(set(_pg)) == len(_pg) and _pg[-1] <= _rr["pages"],
+           "`sections` gives each scheda a real, distinct, increasing page", _pg)
+        ok(_rr["empty_groups"] == ["Vuoto"],
+           "a pattern that matches nothing is an empty group, reported, not a refusal", _rr["empty_groups"])
+        ok(_rr["missing"] == ["MAI-SCRITTO"],
+           "text_check comes back with what is NOT on the page, and only that", _rr["missing"])
+        # Non-recursive, and this is the counter-proof: the hidden scheda matches
+        # the same pattern as the two that printed, and is one folder down.
+        ok(not any("Nascosto" in s["file"] for s in _rr["sections"]),
+           "the listing never descends: a scheda in a subfolder does not print")
+        # The three §4.3 rules, observed on the PAGE through the guards
+        # themselves rather than on the HTML: the comment is gone, the internal
+        # link is now plain text, and the bold word is still there.
+        _seen = ds.render_report("Reports/q2.pdf", _src,
+                                 dict(_lay, text_check=["rimando", "fuori range", "nota di servizio"]),
+                                 "new")["missing"]
+        ok(_seen == ["nota di servizio"],
+           "HTML comments are dropped, the internal link keeps its text, bold prints", _seen)
+
+        print("\n  [5c-1] the refusals: nothing is written, and each one names the cause")
+        _head = lambda: ds._git("rev-parse", "HEAD")
+        must_fail("an empty path (a report never travels as base64)",
+                  lambda: ds.render_report("", _src, _lay, "new"))
+        must_fail("a file listed in `files` that is not there",
+                  lambda: ds.render_report("Reports/x.pdf",
+                                           {"base": "Schede", "groups": [{"title": "T", "files": ["00 Mai.md"]}]}, {}, "new"))
+        must_fail("a file that is not Markdown",
+                  lambda: ds.render_report("Reports/x.pdf",
+                                           {"base": "Schede", "groups": [{"title": "T", "files": ["00 Stato.txt"]}]}, {}, "new"))
+        must_fail("the same scheda in two groups",
+                  lambda: ds.render_report("Reports/x.pdf", {"base": "Schede", "groups": [
+                      {"title": "A", "pattern": "01 Sangue — *.md"},
+                      {"title": "B", "pattern": "*.md"}]}, {}, "new"))
+        must_fail("a group with neither `files` nor `pattern`",
+                  lambda: ds.render_report("Reports/x.pdf", {"base": "Schede", "groups": [{"title": "T"}]}, {}, "new"))
+        must_fail("a group with both",
+                  lambda: ds.render_report("Reports/x.pdf", {"base": "Schede", "groups": [
+                      {"title": "T", "files": ["00 Stato.md"], "pattern": "*.md"}]}, {}, "new"))
+        # A typo in an optional key is the failure this one is really about: with
+        # unknown keys ignored, `landscpae` prints the whole group portrait and
+        # nothing anywhere says why.
+        must_fail("a misspelled key in a group",
+                  lambda: ds.render_report("Reports/x.pdf", {"base": "Schede", "groups": [
+                      {"title": "T", "pattern": "*.md", "landscpae": True}]}, {}, "new"))
+        must_fail("a misspelled key in the layout",
+                  lambda: ds.render_report("Reports/x.pdf", _src, dict(_lay, foooter="x"), "new"))
+        must_fail("a page size that is not a4 or letter",
+                  lambda: ds.render_report("Reports/x.pdf", _src, dict(_lay, page="a3"), "new"))
+        must_fail("a `forbid` that is not a regex",
+                  lambda: ds.render_report("Reports/x.pdf", _src, dict(_lay, forbid=["[unclosed"]), "new"))
+        must_fail("groups that select no file at all",
+                  lambda: ds.render_report("Reports/x.pdf", {"base": "Schede", "groups": [
+                      {"title": "T", "pattern": "99 *.md"}]}, {}, "new"))
+        must_fail("a base that is not a folder",
+                  lambda: ds.render_report("Reports/x.pdf", {"base": "Schede/00 Stato.md", "groups": [
+                      {"title": "T", "pattern": "*.md"}]}, {}, "new"))
+        # A scheda really IS in Trash while this runs: with the folder empty the
+        # call is refused for having selected nothing, and the check would pass
+        # with the Trash guard removed. It goes away straight after, or the
+        # purge test further down counts one file too many.
+        (ds.root / "Trash").mkdir(exist_ok=True)
+        (ds.root / "Trash" / "buttata.md").write_text("# buttata\n", encoding="utf-8")
+        must_fail("a report printed out of Trash/",
+                  lambda: ds.render_report("Reports/x.pdf", {"base": "Trash", "groups": [
+                      {"title": "T", "pattern": "*.md"}]}, {}, "new"))
+        (ds.root / "Trash" / "buttata.md").unlink()
+        (_sch / "03 Binaria.md").write_bytes(b"# \xff\xfe not utf-8\n")
+        must_fail("a .md that is not UTF-8",
+                  lambda: ds.render_report("Reports/x.pdf", {"base": "Schede", "groups": [
+                      {"title": "T", "files": ["03 Binaria.md"]}]}, {}, "new"))
+        (_sch / "03 Binaria.md").unlink()
+        ok(not (Path(root) / "Example Project" / "Reports" / "x.pdf").exists(),
+           "not one of those refusals left a PDF behind")
+
+        print("\n  [5c-2] the guards, each one shown refusing and shown passing")
+        # forbid reads the strings on the page — footer and index included, which
+        # is why the pattern below is looked for in a scheda AND the counter-proof
+        # is a pattern that is nowhere.
+        _before = _head()
+        try:
+            ds.render_report("Reports/f.pdf", _src, dict(_lay, forbid=[r"Ferritina \d+"]), "new")
+            ok(False, "a forbidden pattern on the page is a refusal")
+        except VaultError as e:
+            ok("Ferritina" in str(e) and "nothing written" in str(e),
+               "a forbidden pattern on the page is a refusal that quotes it", e)
+        ok(not (Path(root) / "Example Project" / "Reports" / "f.pdf").exists() and _head() == _before,
+           "and the refusal left neither a file nor a commit behind")
+        ok(ds.render_report("Reports/f.pdf", _src, dict(_lay, forbid=[r"Ferritina \d{9}"]), "new")["pages"] >= 6,
+           "the same guard, one digit count away, lets the report through")
+        # §4.4 — a table that does not fit even at 6.2 pt. Injected on purpose:
+        # 24 columns of long cells, which is the shape that used to print with
+        # the last columns cut off at the edge of the paper.
+        (_sch / "04 Larga.md").write_text(
+            "# Larga\n\n| " + " | ".join(f"colonna {i} lunga" for i in range(18)) + " |\n"
+            "|" + "---|" * 18 + "\n| " + " | ".join(f"valore {i} lungo assai" for i in range(18)) + " |\n",
+            encoding="utf-8")
+        _wide = {"base": "Schede", "groups": [{"title": "Larga", "files": ["04 Larga.md"]}]}
+        try:
+            ds.render_report("Reports/w.pdf", _wide, {"title": "T"}, "new")
+            ok(False, "a table wider than the margin is a refusal")
+        except VaultError as e:
+            ok("04 Larga.md" in str(e) and "18 columns" in str(e),
+               "a table that does not fit is a refusal naming the scheda and the columns", e)
+        # The counter-proof that matters: the SAME scheda, landscape, fits — so
+        # the guard is measuring the page and not refusing every wide table.
+        ok(ds.render_report("Reports/w.pdf", {"base": "Schede", "groups": [
+            {"title": "Larga", "files": ["04 Larga.md"], "landscape": True}]}, {"title": "T"}, "new")["pages"] >= 2,
+           "and the same table, printed landscape, goes through")
+        (_sch / "04 Larga.md").unlink()
+        # Nothing is fetched, ever: not an image, not a stylesheet, not a font.
+        (_sch / "05 Immagine.md").write_text(
+            '# Immagine\n\n<img src="file:///etc/passwd">\n', encoding="utf-8")
+        try:
+            ds.render_report("Reports/i.pdf", {"base": "Schede", "groups": [
+                {"title": "I", "files": ["05 Immagine.md"]}]}, {"title": "T"}, "new")
+            ok(False, "a scheda asking for an external resource is a refusal")
+        except VaultError as e:
+            ok("/etc/passwd" in str(e),
+               "a scheda that names an external resource is refused, and the URL is quoted", e)
+        (_sch / "05 Immagine.md").unlink()
+        # A scheda does not get to restyle the report: markdown passes raw HTML
+        # through, and one <style> block would quietly move every measure in §4
+        # — but only in the reports that scheda is in.
+        (_sch / "06 Stile.md").write_text(
+            "# Stile\n\n<style>section { break-before: avoid }</style>\n", encoding="utf-8")
+        try:
+            ds.render_report("Reports/s.pdf", {"base": "Schede", "groups": [
+                {"title": "S", "files": ["06 Stile.md"]}]}, {"title": "T"}, "new")
+            ok(False, "a scheda carrying a <style> block is a refusal")
+        except VaultError as e:
+            ok("06 Stile.md" in str(e) and "<style>" in str(e),
+               "a scheda that tries to restyle the report is refused, and named", e)
+        # The counter-proof: the same characters inside a fenced code block are
+        # documentation, and they print.
+        (_sch / "06 Stile.md").write_text(
+            "# Stile\n\n```\n<style>section { break-before: avoid }</style>\n```\n", encoding="utf-8")
+        ok(ds.render_report("Reports/s.pdf", {"base": "Schede", "groups": [
+            {"title": "S", "files": ["06 Stile.md"]}]},
+            {"title": "T", "text_check": ["<style>"]}, "new")["missing"] == [],
+           "the same tag inside a fenced code block prints as text")
+        (_sch / "06 Stile.md").unlink()
+        must_fail("a footer with a newline in it, which would break the CSS that draws it",
+                  lambda: ds.render_report("Reports/x.pdf", _src, dict(_lay, footer="a\nb"), "new"))
+        # The faces are the image's, and a build without them is a FAULT with a
+        # name — never a page silently drawn in whatever fontconfig answers.
+        _fd = _rp.FONT_DIR
+        try:
+            _rp.FONT_DIR = "/nonexistent/fonts"
+            ds.render_report("Reports/x.pdf", _src, _lay, "new")
+            ok(False, "fonts missing from the image is a fault")
+        except Exception as e:
+            ok(type(e).__name__ == "VaultFault" and "DejaVuSans.ttf" in str(e),
+               "fonts missing from the image is a fault naming the file, not a fallback face", e)
+        finally:
+            _rp.FONT_DIR = _fd
+        # The two ceilings, each proved by moving it under the same call rather
+        # than by building a 200-page report.
+        _pages_was, _bytes_was = _rp.MAX_PAGES, _rp.MAX_SOURCE_BYTES
+        try:
+            _rp.MAX_PAGES = 3
+            must_fail("a report over the page ceiling", lambda: ds.render_report("Reports/x.pdf", _src, _lay, "new"))
+            _rp.MAX_PAGES = _pages_was
+            _rp.MAX_SOURCE_BYTES = 50
+            must_fail("more Markdown in than the ceiling allows",
+                      lambda: ds.render_report("Reports/x.pdf", _src, _lay, "new"))
+        finally:
+            _rp.MAX_PAGES, _rp.MAX_SOURCE_BYTES = _pages_was, _bytes_was
+        # The page is read through a private weasyprint attribute, and both the
+        # overflow guard and forbid depend on it: a version that renames it must
+        # fail here rather than quietly find nothing to check.
+        try:
+            _rp._page_box(object())
+            ok(False, "a page that will not open its box tree is a fault")
+        except _rp.ReportFault as e:
+            ok("page box" in str(e), "a page that will not open its box tree is a fault, not a silent pass", e)
+
+        print("\n  [5c-3] the CAS, and the pages that turn")
+        must_fail('"new" over a report that exists',
+                  lambda: ds.render_report("Reports/quadro.pdf", _src, _lay, "new"))
+        must_fail("a stale sha", lambda: ds.render_report("Reports/quadro.pdf", _src, _lay, "0" * 64))
+        _rr2 = ds.render_report("Reports/quadro.pdf", _src, _lay, _rr["sha256"])
+        ok(_rr2["sha256"] != "" and _rr2["commit"] != _rr["commit"],
+           "the right sha rewrites it, and the rewrite is its own commit", _rr2["commit"])
+        # §3: the orientation is per GROUP, so one PDF holds both. Read off the
+        # module's own HTML — the same string build() renders — because a PDF
+        # keeps its page boxes in a compressed object stream.
+        from weasyprint import HTML as _WH
+        _groups = _rp.select(_src, sorted(p.name for p in _sch.iterdir() if p.is_file()))
+        for _g in _groups:
+            _g["text"] = {n: (_sch / n).read_text(encoding="utf-8") for n in _g["files"]}
+        _doc_html, _secs = _rp._document(_groups, _rp.check_layout(_lay), {})
+        _rendered = _WH(string=_doc_html).render().pages
+        _shape = [(p.width > p.height) for p in _rendered]
+        ok(_shape[0] is False and any(_shape) and not all(_shape),
+           "the cover is portrait and the landscape group really turns: one PDF, both", _shape)
 
         print("\n[6] search and archive")
         s = ds.search("line", "")

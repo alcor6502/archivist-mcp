@@ -167,6 +167,48 @@ The document: `{"page", "title", "footer", "forbid", "text_check", "blocks"}`.
 The server draws; it does not know what the numbers mean. Whatever must add
 up, add it up before calling.
 
+## render_report(dataset, path, sources, layout=None, expected_sha256='new', key='')
+
+Markdown **already in the dataset**, bound into one PDF laid out by the server
+and written with the same CAS as `write_binary`. The twin of `render_pdf` seen
+from the other side: there you compose a page the vault has not got, here the
+vault already holds the schede and the call only says which ones and in what
+order — about a kilobyte for a thirty-file report. Max 200 pages and
+5 MB of Markdown in. `path` is **required**: a report never comes back as
+base64.
+Returns `size · sha256 · commit · pages · files · empty_groups · missing ·
+sections`, where `sections` is `[{"file", "page"}]` — the index as printed, so
+the chat can say "Emocromo on page 7" without reopening the PDF.
+
+`sources`: `{"base": "", "groups": [ … ]}`. `base` is the folder to start from
+(empty = the dataset root) and the listing is **not recursive**: a pattern on
+the root never reaches a subfolder, `Trash/` included. Each group is
+`{"title", "landscape", "files" | "pattern", "exclude"}`:
+- `files`: an explicit list, printed in the order given; a name that is not
+  there is a refusal, and so is one that is not `.md`
+- `pattern`: one glob on the file name, alphabetical; matches nothing = an
+  empty group, reported in `empty_groups`, not a refusal
+- `exclude`: globs removed afterwards · `landscape`: that group's pages turn,
+  so one PDF holds both orientations
+- the same file in two groups is a refusal: a scheda prints once.
+
+`layout`, all optional: `title` (the cover, defaults to "Report") · `subtitle`
+· `cover_note` · `footer` — one line on every page, the server appends
+`· pag. N di M` · `page` `"a4"|"letter"` · `toc` (default true: an index after
+the cover, one section per group, real page numbers with leader dots and
+internal links) · `font_pt` (default 9.5) · `forbid` and `text_check`, exactly
+as in `render_pdf` — checked on the strings that are ON THE PAGE, footer and
+index included.
+
+Layout is fixed and not a parameter: one section per file always on a fresh
+page, the file name as a breadcrumb, HTML comments dropped, internal links
+flattened to text, bold in dark red, tables at 8 pt (7 pt over 11 columns,
+6.2 pt over 15) with the header row shaded, a row never split across pages,
+fenced code in DejaVu Sans Mono. A table that still does not fit the margin is
+a **refusal** naming the file and the column count: a column cut off at the
+edge is worse than a report that does not print. Nothing external is ever
+fetched — an `<img src="…">` in a scheda is a refusal, not a download.
+
 ## edit_file(dataset, path, old_text, new_text, expected_sha256, key='')
 
 Replaces `old_text` — which must occur EXACTLY once — with `new_text`.

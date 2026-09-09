@@ -37,9 +37,11 @@ jobs:
       # exactly why it can run here in under a minute.
       - run: pip install --no-deps -r requirements.txt
 
-      # The faces render_pdf embeds, the same package the Dockerfile installs:
-      # the suite draws real pages, and a runner without them fails by name.
-      - run: sudo apt-get install -y --no-install-recommends fonts-liberation
+      # The faces the two renderers embed and the text engine WeasyPrint dlopens,
+      # the same packages the Dockerfile installs: the suite draws real pages, and
+      # a runner without them fails by name. Every pip install here is --no-deps,
+      # so WeasyPrint's own tree is pinned in requirements.txt beside it.
+      - run: sudo apt-get install -y --no-install-recommends fonts-liberation fonts-dejavu-core libpangoft2-1.0-0 libharfbuzz-subset0
 
       - run: python3 test_vault.py
 

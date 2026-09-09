@@ -11,3 +11,21 @@ mcp-common-engine @ https://github.com/alcor6502/mcp-common-engine/archive/refs/
 # this line the suite (and the CI job) die on `import render`.
 reportlab==5.0.1
 pillow==12.3.0
+# render_report lays Markdown out with WeasyPrint, which draws text through
+# Pango and fontconfig: those come from the image (libpangoft2, libharfbuzz,
+# fonts-dejavu-core), not from pip. Every install here is --no-deps, so
+# WeasyPrint's own tree is pinned beside it — without these lines the suite
+# and the CI job die on `import weasyprint`, exactly as they did on Pillow.
+weasyprint==70.0
+markdown==3.10.3
+pydyf==0.12.1
+tinycss2==1.5.1
+tinyhtml5==2.1.0
+cssselect2==0.10.1
+webencodings==0.6.1
+Pyphen==0.18.1
+fonttools==4.64.0
+cffi==2.1.1
+pycparser==3.0
+Brotli==1.2.0
+zopfli==0.4.3

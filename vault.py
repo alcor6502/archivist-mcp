@@ -984,6 +984,77 @@ class Dataset:
         out = self._write_bytes(rel, data, expected_sha256, "render-pdf")
         return {**out, **verdict}
 
+    def render_report(self, rel: str, sources: dict, layout: dict | None = None,
+                      expected_sha256: str = "new") -> dict:
+        """Markdown ALREADY in this dataset, bound into one PDF written here.
+
+        The twin of render_pdf, and the same bargain seen from the other side:
+        there the model composes a page the vault does not have, here the vault
+        already holds thirty schede and what crosses the wire is only which
+        ones and in which order. Same CAS, same commit, same "a refusal leaves
+        nothing behind".
+
+        With one difference on purpose: there is no base64 door. `render_pdf`
+        has one because a one-page sheet consumed in the chat is a real case;
+        a thirty-file report handed back as base64 is precisely the cost this
+        pair exists to avoid, so an empty path is refused.
+
+        The files are read through the same walker every other tool uses, so
+        `.git`, the lockfiles and symlinks are not files of this dataset here
+        either, and the listing is NOT recursive: a pattern on the root cannot
+        reach a subfolder, `Trash/` included.
+        """
+        import report as _report
+        if not rel:
+            raise VaultError("a report does not travel as base64: give it a path "
+                             "inside the dataset to write it to")
+        if not isinstance(sources, dict):
+            raise VaultError("sources must be a JSON object: see reference_guide('render_report')")
+        try:
+            layout = _report.check_layout(layout)
+        except _report.ReportError as e:
+            raise VaultError(f"layout refused: {e}") from None
+        base_rel = sources.get("base", "")
+        if not isinstance(base_rel, str):
+            raise VaultError("sources.base must be a folder path inside the dataset")
+        base = self._resolve(base_rel, must_exist=True)
+        if not base.is_dir():
+            raise VaultError(f"sources.base is not a folder: {self._rel(base)!r}")
+        if _fold(Path(self._rel(base)).parts[0] if self._rel(base) else "") == "trash":
+            raise VaultError("a report is not printed out of Trash/")
+        # One level, on purpose (§2): os.walk would descend, and a pattern
+        # written for the root would silently start matching schede filed away
+        # in a subfolder months ago.
+        names = sorted(p.name for p in base.iterdir() if not self._skip(p))
+        try:
+            groups = _report.select(sources, names)
+        except _report.ReportError as e:
+            raise VaultError(f"sources refused: {e}") from None
+        total = 0
+        for g in groups:
+            g["text"] = {}
+            for name in g["files"]:
+                data = self._read_bytes(base / name)
+                total += len(data)
+                if total > _report.MAX_SOURCE_BYTES:
+                    raise VaultError(f"over {_report.MAX_SOURCE_BYTES} bytes of Markdown in: "
+                                     "narrow the groups")
+                try:
+                    g["text"][name] = data.decode("utf-8")
+                except UnicodeDecodeError:
+                    raise VaultError(f"not UTF-8: {name!r} — this prints text only") from None
+        try:
+            pdf, verdict = _report.build(groups, layout)
+        except _report.ReportError as e:
+            raise VaultError(f"report refused: {e}") from None
+        except _report.ReportFault as e:
+            raise VaultFault(f"render machinery: {e}") from None
+        if len(pdf) > MAX_BINARY_BYTES:
+            raise VaultError(f"the PDF came out at {len(pdf)} bytes, over {MAX_BINARY_BYTES}: "
+                             "print fewer groups")
+        out = self._write_bytes(rel, pdf, expected_sha256, "render-report")
+        return {**out, **verdict}
+
     def _write_bytes(self, rel: str, data: bytes, expected_sha256: str, label: str) -> dict:
         p = self._resolve(rel, must_exist=False)
         with self._lock():

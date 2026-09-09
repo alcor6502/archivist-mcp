@@ -2,11 +2,17 @@ FROM python:3.12-slim
 # fonts-liberation: the faces render_pdf embeds. A PDF drawn with a fallback
 # face would silently look different from every other, so the renderer refuses
 # to draw without them — and a static check keeps this line here.
-RUN apt-get update && apt-get install -y --no-install-recommends git util-linux fonts-liberation && rm -rf /var/lib/apt/lists/*
+# libpangoft2 + libharfbuzz-subset: the text engine WeasyPrint dlopens for
+# render_report, and the subsetter that keeps an embedded face down to the
+# glyphs actually used. fonts-dejavu-core: the faces that report embeds, and
+# the reason it is DejaVu and not Liberation is the schede themselves — µ × ⁹
+# → ▸ are in them, and Liberation has holes there. Missing files are a fault
+# with a name, never a silent fallback to whatever fontconfig answers.
+RUN apt-get update && apt-get install -y --no-install-recommends git util-linux fonts-liberation fonts-dejavu-core libpangoft2-1.0-0 libharfbuzz-subset0 && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY vault.py render.py server.py preflight.py entrypoint.sh reference-guide.md ./
+COPY vault.py render.py report.py server.py preflight.py entrypoint.sh reference-guide.md ./
 RUN chmod +x entrypoint.sh
 # Python's stdout is block-buffered, stderr is not: the service logs on stderr
 # and entrypoint.sh echoes on stdout, so the two drain at different moments and

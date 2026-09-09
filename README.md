@@ -921,6 +921,39 @@ render_pdf("Example Project", "Reports/2026-Set-02.pdf",
    "sha256": "c1d2…", "commit": "9f3e0a1", "pages": 1, "strings_drawn": 7, "missing": []}
 ```
 
+**`render_report(dataset, path, sources, layout=None, expected_sha256="new")`** —
+the twin of `render_pdf`, seen from the other side: Markdown **already in the
+dataset**, bound into one PDF laid out by the server. There the model composes
+a page the vault has not got; here the vault already holds the schede and the
+call only says which ones and in what order — about a kilobyte for a thirty-file
+report. `sources` gives the groups, each with an explicit `files` list or one
+`pattern` (plus `exclude` and its own `landscape`, so one PDF holds both
+orientations); the listing is **not recursive**, so a pattern on the root never
+reaches a subfolder or `Trash/`. `layout` is the cover, the footer, the page
+size and whether to print the index — an index with real page numbers, leader
+dots and internal links. `forbid` and `text_check` work as in `render_pdf`, on
+the strings that are on the page. One section per file, always on a fresh page;
+tables shrink by column count and a table that still does not fit the margin is
+a refusal naming the file, because a column cut off at the edge is worse than a
+report that does not print. Nothing external is ever fetched. Max 200 pages,
+5 MB of Markdown in, and **`path` is required**: a report never comes back as
+base64. **Returns** `dataset · path · size · sha256 · commit · pages · files ·
+empty_groups · missing · sections`, where `sections` is the index as printed —
+`[{"file": …, "page": …}]` — so the chat can say where a scheda landed without
+reopening the PDF.
+
+```
+render_report("Health Tracking", "Quadro Clinico — 2026-Set-09.pdf",
+              {"groups": [
+                  {"title": "Stato attuale", "files": ["00 Stato Attuale.md"]},
+                  {"title": "Laboratorio — Sangue", "pattern": "01 Sangue — *.md",
+                   "landscape": True}]},
+              {"title": "Quadro Clinico", "footer": "non è un parere medico"})
+→ {"dataset": "Health Tracking", "path": "Quadro Clinico — 2026-Set-09.pdf",
+   "size": 258033, "sha256": "7b1e…", "commit": "abc1234", "pages": 49, "files": 30,
+   "empty_groups": [], "missing": [], "sections": [{"file": "00 Stato Attuale.md", "page": 3}, …]}
+```
+
 **`edit_file(dataset, path, old_text, new_text, expected_sha256)`** — replaces
 `old_text`, which must occur **exactly once**, with `new_text`. Only the two
 fragments travel, not the file. Same compare-and-swap as `write_file`.

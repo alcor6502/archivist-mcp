@@ -82,7 +82,7 @@ from mcp_common_engine.refusals import make_tool
 from preflight import HTTP_MODES, http_mode_from_env
 from vault import VaultRoot, VaultError, VaultFault, guide_for
 
-VERSION = "3.0.0"
+VERSION = "3.1.0"
 
 # The shape of a line of ours. It is a NAME because it is used twice: here, and
 # again below where fastmcp's own handlers are given the same shape. Written out
@@ -367,6 +367,15 @@ def render_pdf(dataset: str, path: str, document: dict, expected_sha256: str = "
     and written with CAS; an empty path returns it as base64, unwritten."""
     ds, rel = vault.open(dataset, path, key)
     return ds.render_pdf(rel, document, expected_sha256)
+
+
+@tool
+def render_report(dataset: str, path: str, sources: dict, layout: dict | None = None,
+                  expected_sha256: str = "new", key: str = "") -> dict:
+    """Markdown files of the dataset bound into one PDF, laid out by the
+    server and written with CAS. `path` is required: no base64."""
+    ds, rel = vault.open(dataset, path, key)
+    return ds.render_report(rel, sources, layout, expected_sha256)
 
 
 @tool
