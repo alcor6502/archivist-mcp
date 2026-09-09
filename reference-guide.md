@@ -55,7 +55,8 @@ transport, use SMB or scp. Do not push a big binary through `write_binary`:
 the base64 is typed by the model, a token every two or three characters, so a
 500 KB PDF is tens of minutes for a write the server does in a millisecond —
 drop it over SMB and the next write to the dataset adopts it, sha included —
-and a PDF made of data is not typed at all: `render_pdf` draws it here.
+and a PDF made of data is not typed at all: `render_pdf` draws it here, and a
+PDF of documents this vault already holds is `render_report`.
 Do not read a directory file by file to audit it —
 `archive` once, or `manifest` if you only need to know whether anything changed.
 Do not read files looking for something — `search`, then `read_file` on the

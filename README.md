@@ -671,6 +671,7 @@ changes from outside were committed separately before yours.
 | rewrite the file, or create it | `write_file` | yes (`"new"` if new) |
 | write a PDF or a binary | `write_binary` | yes |
 | draw a PDF from data, server-side | `render_pdf` | yes |
+| bind Markdown that is ALREADY in the dataset into one PDF | `render_report` | yes |
 | move, rename, trash | `move_path` | no |
 | know whether something exists, and where | `search` | — |
 | know which files exist | `list_files` | — |
@@ -892,7 +893,8 @@ server side is not where the time goes. Use it for files up to a few tens of
 KB; anything bigger travels **outside the model** — over SMB from a machine
 that mounts the vault — and is adopted by the next write to that dataset (or
 at boot), with its sha in `list_files` like any other file. And a PDF made of
-data is not typed at all: `render_pdf` draws it on the server.
+data is not typed at all: `render_pdf` draws it on the server, and a PDF of
+documents the vault already holds is `render_report`.
 **Returns** `dataset · path · size · sha256 · commit`
 
 ```
@@ -1169,6 +1171,7 @@ between projects, not a defence against an attacker. That is what OAuth is for.
 | `archivist-mcp.xml` | Unraid template, every field documented |
 | `archivist-icon.png` | the icon, used in **two** places — see below |
 | `render.py` | the PDF renderer behind `render_pdf`: twelve blocks, two passes, a draw log |
+| `report.py` | the one behind `render_report`: Markdown of the dataset laid out with WeasyPrint, an index with real page numbers, and a fetcher that serves nothing |
 | `test_vault.py` | the engine checks, no network needed |
 | `scripts/test.sh` · `scripts/ship.sh` | the suite on a fresh bench, and a delivery from the clone alone |
 
