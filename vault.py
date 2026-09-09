@@ -400,18 +400,37 @@ class VaultRoot:
                 f"path must be relative to the dataset: drop the leading {parts[0] + '/'!r}")
         return "/".join(parts)
 
+    def _dataset(self, name: str) -> "Dataset":
+        """The one constructor behind both doors, and where a dataset that
+        appeared while the server was running gets its repository.
+
+        `boot` adopts what is on disk at startup. A directory copied in over
+        SMB an hour later had no .git until the next restart, and every call
+        on it failed with `git status failed: fatal: not a git repository` —
+        a message that names git when the fault was a boot that had not
+        happened yet. The check is one stat per call; the adoption runs once
+        in a dataset's life, under the dataset lock exactly as at boot, and
+        commits what the copy brought as the first commit.
+
+        Here and not in the tools: the two doors are the only way a tool
+        reaches a dataset, so a tool cannot forget to adopt."""
+        ds = Dataset(self.root / name, name)
+        if not (ds.root / ".git").is_dir():
+            ds.ensure_git()
+        return ds
+
     def open(self, dataset: str, path: str = "", key: str = "") -> tuple["Dataset", str]:
         """(unlocked dataset, validated relative path) — the one door every
         path-bearing tool goes through, reads included."""
         name = self.resolve_dataset(dataset)
         self.check_key(name, key)
-        return Dataset(self.root / name, name), self.check_path(name, path)
+        return self._dataset(name), self.check_path(name, path)
 
     def open_by_name(self, dataset: str, key: str = "") -> "Dataset":
         """The same, for the tools that act on a whole dataset."""
         name = self.resolve_dataset(dataset)
         self.check_key(name, key)
-        return Dataset(self.root / name, name)
+        return self._dataset(name)
 
     # ---------- status ----------
 
@@ -525,7 +544,8 @@ class VaultRoot:
     def boot(self, retention_months: int = 0) -> list[str]:
         """Adoption plus pruning, once at startup. Every top-level directory
         without a .git gets git init and a first commit: this is how a dataset
-        created by hand (file manager, SMB) enters service on its own."""
+        created by hand (file manager, SMB) enters service on its own. One that
+        appears LATER is adopted by `_dataset` on its first call."""
         lines = []
         for n in self.dataset_names():
             ds = Dataset(self.root / n, n)

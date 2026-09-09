@@ -2237,6 +2237,27 @@ def main() -> int:
            "and it says WHICH line, which is what you actually need to fix it",
            verdict.replace(SECRET, "<redacted>")[:120])
 
+        print("\n[11c] a directory that appears while the server runs is adopted at first touch")
+        # Boot adopted what was on disk at startup; this one lands afterwards,
+        # the way a folder copied over SMB does. Before the cure every call on
+        # it failed with `not a git repository` until the next restart.
+        late = Path(root) / "Late Arrival"
+        os.makedirs(late)
+        (late / "note.md").write_text("copied in while the server was up\n")
+        ok(not (late / ".git").is_dir(), "no repository yet: boot has already run")
+        ds_late = v.open_by_name("Late Arrival")
+        ok((late / ".git").is_dir(), "the first call, a read, gives it a repository")
+        st_late = ds_late.status()
+        ok(st_late["git"] == "clean" and st_late["total_commits"] == 1,
+           "and the files it brought are its first commit, so nothing is 'external'",
+           (st_late["git"], st_late["total_commits"]))
+        ds_late2, rel = v.open("Late Arrival", "note.md")
+        ok(rel == "note.md" and ds_late2.status()["total_commits"] == 1,
+           "the other door finds it adopted and does not adopt twice")
+        w = ds_late2.write_file("second.md", "a write works at once\n", "new")
+        ok(w.get("commit") and ds_late2.status()["total_commits"] == 2,
+           "a write on it commits like on any dataset", w.get("commit"))
+
         print("\n[12] history pruning")
         os.makedirs(Path(root) / "Old")
         v.boot(0)

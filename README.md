@@ -272,9 +272,10 @@ chmod -R 777 "/mnt/<ssd-pool>/Vault"
 ```
 
 Copy your files in with `rsync` or `scp`. The git repository is created by the
-server at first boot: no `git init` by hand, and the files need not belong to
-anyone in particular — the entrypoint declares `safe.directory` to avoid git's
-*dubious ownership*.
+server — at boot, or at the first call on a directory that appeared while it
+was running: no `git init` by hand, no restart, and the files need not belong
+to anyone in particular — the entrypoint declares `safe.directory` to avoid
+git's *dubious ownership*.
 
 ⚠ **ZFS snapshots on the `Vault` dataset**, not on individual projects. Snapshots
 are the net for a catastrophe and they protect the `.git` directories too;
@@ -1009,7 +1010,7 @@ is not usable inside a conversation anyway. A talking refusal beats a silent
 failure further down. Above that threshold — and in practice above a few tens
 of KB, because every base64 byte is a token the model has to type — files
 travel over SMB or `scp`, and the vault acts as the archivist: it adopts what
-appears on disk at the next write, or at boot.
+appears on disk at the next call, or at boot.
 
 </details>
 
