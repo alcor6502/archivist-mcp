@@ -149,10 +149,11 @@ def c_keys():
     entries, malformed = parse_key_registry(text)
     if malformed:
         raise RuntimeError(
-            f"{len(malformed)} registry lines carry no separator, at line(s) "
-            f"{', '.join(str(n) for n in malformed[:5])} — a TAB is required "
-            f"(two or more spaces are tolerated). The lines are not printed: "
-            f"they contain keys")
+            f"{len(malformed)} registry lines are not `name | key`, at line(s) "
+            f"{', '.join(str(n) for n in malformed[:5])} — one '|' between the "
+            f"dataset name and its key, nothing else (until 3.0.0 the separator "
+            f"was a TAB: rewrite the file). The lines are not printed: they "
+            f"contain keys")
     known = {d.casefold() for d in _datasets()}
     orphans = [name for name, _ in entries if name.casefold() not in known]
     note = f"; {len(orphans)} orphan lines ({', '.join(orphans[:3])}): no such dataset" if orphans else ""

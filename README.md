@@ -289,13 +289,19 @@ day-to-day rollback is git's job, not theirs.
 <summary><b>4 · The key registry</b></summary>
 
 ```sh
-printf 'Example Project\tk7m2xq4p\n' > "/mnt/<ssd-pool>/Vault/keys.txt"
+printf 'Example Project | k7m2xq4p\n' > "/mnt/<ssd-pool>/Vault/keys.txt"
 chown 99:100 "/mnt/<ssd-pool>/Vault/keys.txt"
 chmod 640    "/mnt/<ssd-pool>/Vault/keys.txt"
 ```
 
-Dataset name, **TAB**, key. One line per dataset; blank lines and lines starting
-with `#` are comments.
+Dataset name, **`|`**, key. Spaces around the bar are ignored. One line per
+dataset; blank lines and lines starting with `#` are comments.
+
+Why a bar and not a TAB, which it was until 3.0.0: an editor set to expand tabs
+writes a *single* space when the name ends next to a tab stop, a single space is
+also what a name may contain, and the line came out malformed with nothing
+visible to blame — and the service did not start. A bar is typed the same on
+every keyboard, no editor rewrites it, and no dataset name may contain it.
 
 Eight alphanumeric characters are plenty: OAuth is already in front, and the
 threat is a conversation guessing, not a brute-force attack. Avoid `0/O` and
@@ -501,6 +507,12 @@ image is the one running rather than the old one restarting.
 
 If the update changed the tool surface, do step 8 as well.
 
+**Crossing 3.0.0**: the key registry changes shape — `name | key`, where it was
+`name` TAB `key` — and the old shape is not read any more. Rewrite `keys.txt`
+before you Apply: a registry the new preflight cannot read stops the service
+with the line numbers, and stays stopped until the file is fixed. Nothing else
+moves: keys, datasets, tokens and the connector are untouched.
+
 **The way back** costs one field: the previous tag is still on the registry, so
 put it in `Repository` in place of `:latest` and Apply. It is a change of
 surface like any other, so step 8 applies to it too. Nothing else moves: the
@@ -561,7 +573,7 @@ Preflight names the failing check. The frequent ones:
 |---|---|
 | `datasets` | the vault mount is wrong, or points at an empty folder |
 | `git` | the repositories do not exist yet: relaunch, boot creates them |
-| `keys` | `keys.txt` is not readable by `99:100`, or a line has no TAB |
+| `keys` | `keys.txt` is not readable by `99:100`, or a line is not `name \| key` |
 | `oauth` | a variable is still a placeholder, or `BASE_URL` is not https |
 | `token_store` | `FASTMCP_HOME` is not under `/data`: tokens would not survive |
 | `funnel` | the Funnel is off, or publishes a port other than `PORT` |

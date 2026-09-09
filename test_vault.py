@@ -1453,7 +1453,7 @@ def main() -> int:
         (Path(root) / "Example Project" / "Other Project" / "note.md").write_text("homonym\n")
         os.makedirs(Path(root) / "Other Project")
         (Path(root) / "Other Project" / "b.md").write_text("elsewhere\n")
-        (Path(root) / "keys.txt").write_text(f"Example Project\t{KEY}\n")
+        (Path(root) / "keys.txt").write_text(f"Example Project | {KEY}\n")
 
         v = VaultRoot(root)
         v.boot(0)
@@ -2139,7 +2139,7 @@ def main() -> int:
         kf.write_text("# no keys\n"); time.sleep(0.02)
         ok(v.status("t")["datasets"][0]["state"] == "open", "removing the line opens the dataset")
         ok(v.open("Example Project", "log.md", "")[1] == "log.md", "no key needed now")
-        kf.write_text(f"Example Project\t{KEY}\n"); time.sleep(0.02)
+        kf.write_text(f"Example Project | {KEY}\n"); time.sleep(0.02)
         ok(v.status("t")["datasets"][0]["state"] == "locked", "putting the line back locks it")
         must_fail("and it blocks again", lambda: v.open("Example Project", "log.md", ""))
 
@@ -2151,32 +2151,43 @@ def main() -> int:
         # protected dataset went into the container log in clear.
         from vault import parse_key_registry
         SECRET = "SuperSecretKey123"
+        # The separator is a bar and NOTHING else, since 3.0.0. It was a TAB
+        # with two-or-more spaces tolerated, and the tolerance is what broke on
+        # 2026-09-09: an editor expanding tabs wrote ONE space next to a tab
+        # stop, which is also what a name contains, and the service did not
+        # start. The old shapes are asserted malformed here, on purpose: a
+        # tolerance that creeps back would pass a registry nobody wrote.
         for label, text, expect_entries, expect_bad in (
-                ("a TAB, the documented form", f"Example Project\t{SECRET}\n",
+                ("a bar, the one form", f"Example Project | {SECRET}\n",
                  [("Example Project", SECRET)], []),
-                ("two spaces, tolerated because file managers eat tabs",
-                 f"Example Project  {SECRET}\n", [("Example Project", SECRET)], []),
-                ("four spaces — the shape that was in the real registry",
-                 f"MCP Projects    {SECRET}\n", [("MCP Projects", SECRET)], []),
+                ("spaces around the bar are stripped, absent or many",
+                 f"Example Project|{SECRET}\n   MCP Projects   |   {SECRET}   \n",
+                 [("Example Project", SECRET), ("MCP Projects", SECRET)], []),
+                ("a name with two consecutive spaces needs no special form",
+                 f"Two  Spaces | {SECRET}\n", [("Two  Spaces", SECRET)], []),
+                ("a TAB — the form until 3.0.0 — is malformed now, by NUMBER",
+                 f"Example Project\t{SECRET}\n", [], [1]),
+                ("two spaces, once tolerated, are malformed now",
+                 f"Example Project  {SECRET}\n", [], [1]),
+                ("ONE space — what an editor writes for a tab next to a tab stop, "
+                 "the shape that stopped the service — is malformed, and says so",
+                 f"Example Project {SECRET}\n", [], [1]),
+                ("two bars are malformed: a key cannot contain the separator",
+                 f"Example Project | {SECRET} | extra\n", [], [1]),
                 ("comments and blank lines count as nothing",
-                 f"# a note\n\n   \nExample Project\t{SECRET}\n",
+                 f"# a note\n\n   \nExample Project | {SECRET}\n",
                  [("Example Project", SECRET)], []),
                 ("a line with no separator is malformed, by NUMBER",
-                 f"Example Project\t{SECRET}\nnoseparator\n",
+                 f"Example Project | {SECRET}\nnoseparator\n",
                  [("Example Project", SECRET)], [2]),
                 ("a name with no key is malformed too",
-                 f"Example Project\t\n", [], [1]),
+                 f"Example Project |\n", [], [1]),
+                ("a key with no name is malformed too",
+                 f"| {SECRET}\n", [], [1]),
                 ("two malformed lines, both numbered",
                  "one\ntwo\n", [], [1, 2])):
             got = parse_key_registry(text)
             ok(got == (expect_entries, expect_bad), f"registry: {label}", got)
-
-        # The trap, asserted rather than described: the tolerated form splits on
-        # the FIRST run of spaces, so a name carrying two of them needs a TAB.
-        ok(parse_key_registry(f"Two  Spaces  {SECRET}\n")[0] == [("Two", f"Spaces  {SECRET}")],
-           "a dataset name with two consecutive spaces MUST use a real tab — the "
-           "space form would eat half the name, and this is what that looks like",
-           parse_key_registry(f"Two  Spaces  {SECRET}\n")[0])
 
         # And the half that was the leak: no return value may carry the key.
         # ⚠ The `extra` of these checks reports a COUNT and a TYPE, never the
@@ -2184,8 +2195,8 @@ def main() -> int:
         # terminal and pasted into a chat, so a check that proves a secret did
         # not leak, and prints the secret when it fails, has moved the leak
         # rather than closed it. The refinement is codifier's, 2026-08-14.
-        for text in (f"Example Project\t{SECRET}\n", "noseparator-line\n",
-                     f"Example Project  {SECRET}\n"):
+        for text in (f"Example Project | {SECRET}\n", "noseparator-line\n",
+                     f"Example Project\t{SECRET}\n"):
             _, bad = parse_key_registry(text)
             ok(all(isinstance(n, int) for n in bad),
                "malformed lines come back as NUMBERS, never as text — a caller "
@@ -2197,7 +2208,7 @@ def main() -> int:
         # and NOT the secret. This is the injection that proves the cure.
         old_keys = os.environ.get("KEYS_FILE")
         bad_registry = Path(root) / "bad-keys.txt"
-        bad_registry.write_text(f"Example Project\t{SECRET}\nnoseparator\n")
+        bad_registry.write_text(f"Example Project | {SECRET}\nnoseparator\n")
         try:
             import importlib
             os.environ["KEYS_FILE"] = str(bad_registry)

@@ -179,26 +179,29 @@ def parse_key_registry(text: str) -> tuple[list[tuple[str, str]], list[int]]:
     protected dataset went into the container log in clear, which is where it
     was found on 2026-08-13. A caller cannot leak what it is never handed.
 
-    Format: TAB is the separator. Two or more spaces are tolerated, because a
-    registry is often edited in a file manager that eats tabs — and then the
-    split is on the FIRST run of spaces, so a dataset whose name contains two
-    consecutive spaces must use a real TAB. Blank lines and lines starting with
-    '#' are comments and are not counted as anything.
+    Format: `name | key`, and the bar is the ONLY separator. Until 3.0.0 it
+    was a TAB, with two or more spaces tolerated because file managers eat
+    tabs — and the tolerance is what could not be checked: an editor set to
+    expand tabs writes ONE space when the name ends next to a tab stop, one
+    space is also what a name may contain, and the line came out malformed
+    with nothing visible to blame (2026-09-09, and the service did not start).
+    A bar is typed the same on every keyboard, no editor rewrites it, and no
+    dataset name may contain it. Spaces around it are stripped, so a name with
+    two consecutive spaces needs no special form any more. A line with no bar,
+    with two, or with an empty side is malformed and reported by NUMBER. Blank
+    lines and lines starting with '#' are comments and are not counted as
+    anything.
     """
     entries: list[tuple[str, str]] = []
     malformed: list[int] = []
     for n, line in enumerate(text.splitlines(), start=1):
         if not line.strip() or line.lstrip().startswith("#"):
             continue
-        if "\t" in line:
-            name, key = line.split("\t", 1)
-        else:  # tolerated: two or more spaces instead of a tab
-            parts = _re.split(r"\s{2,}", line.strip(), maxsplit=1)
-            if len(parts) != 2:
-                malformed.append(n)
-                continue
-            name, key = parts
-        name, key = _norm(name), key.strip()
+        parts = line.split("|")
+        if len(parts) != 2:
+            malformed.append(n)
+            continue
+        name, key = _norm(parts[0]), parts[1].strip()
         if name and key:
             entries.append((name, key))
         else:
@@ -296,7 +299,7 @@ class VaultRoot:
         """Read keys.txt, hot-reloading on mtime change, so a dataset can be
         protected or opened from a file manager without restarting anything.
 
-        Format: `dataset name` TAB `key`, one line per dataset. Blank lines and
+        Format: `dataset name | key`, one line per dataset. Blank lines and
         lines starting with '#' are comments.
         """
         try:
