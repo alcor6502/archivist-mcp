@@ -3,38 +3,53 @@
 `reference_guide()` is this page: the model, and only what a signature cannot
 tell you. `reference_guide("append")` is one command's card. Ask for the card.
 
+## IN SHORT
+
+- Every call names its `dataset`; `path` is relative to it. A locked dataset
+  needs `key` on every call: pass it BY NAME — it is always the last
+  parameter. The key is in the instructions of the project it belongs to.
+- No need for `vault_status()` before working: call it to learn the datasets'
+  names. Before the first call of a tool you have not used, read its card,
+  `reference_guide("<tool>")` — not the whole manual.
+- Fewest round trips: several files → ONE `read_files`, not a `read_file`
+  each. Looking for something → `search` (the argument is `pattern`), then
+  read the match. Changing text → `edit_file` (`old_text`/`new_text`; several
+  changes in ONE call with `edits`) or `append`. Never rewrite a file to
+  change a line.
+- Every write returns the new `sha256`: use it for the next write to the same
+  file, with no re-read. `CONFLICT` → re-read, reconcile, retry. A write lost
+  in transport → `list_files`, compare the sha, then retry.
+- `archive` is a base64 tar.gz: for clients that run code, not for a chat.
+
 ## THE MODEL
 
 The vault root holds **datasets**: top-level directories, each with its own git.
-Every call names its dataset in `dataset` — except `dataset_create`, where it
-does not exist yet and the parameter is `name`. `path` is relative to that
-dataset; **an empty path means the whole dataset**; repeating the dataset at the
-head of `path` is refused, never silently corrected.
+`dataset_create` is the one tool whose parameter is `name`, not `dataset`.
+**An empty path means the whole dataset**; repeating the dataset at the head of
+`path` is refused, never silently corrected.
 
-A **locked** dataset needs its key in `key` on every call. `vault_status()` says
-which is which, and it is the call you make first — if it does not answer, stop
-and say so. **`key` is always the LAST parameter: pass it by name**, or it lands
-in an optional slot you did not know was there and fails for the wrong reason.
+The key registry on the server decides access, and nothing else: a dataset is
+**locked** (key on every call), **open** (no key) or **closed** (no line in
+the registry: every call refused). `vault_status()` says which. No tool opens,
+closes or locks a dataset, and a new one is born closed.
 
 Each dataset has its own git, so `HEAD~3` is three commits back *in that
-dataset*. Writing a path never creates a dataset; a tool never locks one.
+dataset*. Writing a path never creates a dataset.
 
 ## FOUR THINGS THAT ARE NOT LIKE ELSEWHERE
 
 1. **The sha256 is the unit of truth.** Every read gives it, every write demands
-   it and hands back the new one — so a chain of writes needs no re-read in
-   between. `"new"` for a file that does not exist yet. A different sha means
-   someone wrote after you: re-read, reconcile, retry. Never retry a `CONFLICT`
-   unchanged.
+   it and hands back the new one. `"new"` for a file that does not exist yet.
+   Never retry a `CONFLICT` unchanged.
 2. **Nothing is deleted.** There is no delete tool. Disposal is `move_path` into
    `Trash/`.
 3. **Nothing makes a directory**, because git does not keep empty ones. They
    appear as a side effect of writing a file inside them, and **an empty folder
    appears nowhere** — not in `list_files`, `manifest` or `archive`. A folder
    that must stay visible needs a file in it.
-4. **Every write is atomic, verified and committed**, which costs a few seconds.
-   A failed tool leaves the vault exactly as it was; there is no partial write.
-   Do not retry because a call felt slow — that is how a duplicate is made.
+4. **Every write is atomic, verified and committed.** A failed tool leaves the
+   vault exactly as it was; there is no partial write. Do not retry because a
+   call felt slow — that is how a duplicate is made.
 
 ## THE CEILING THAT IS NOT THIS SERVER'S
 
@@ -42,26 +57,18 @@ Our limits are on the cards and fail loudly. The one you meet first is not ours:
 **the cap your client puts on a tool result.** Above it a client does not
 truncate — it writes the result to a file and hands you a path. That is
 excellent if the file lands where your code runs, and useless otherwise.
+Not there → keep results small: fewer files per `read_files`, and a
+`max_chars` on `archive` so it refuses with the size instead of losing it.
 
-**Test it once:** the first time a result comes back as a path, run
-`ls <that path>` where your code runs. There → work freely. Not there → keep
-results small, and give `archive` a `max_chars` so it refuses with the size
-instead of losing the payload.
-
-## FOUR WRONG TURNS
+## WRONG TURNS
 
 Do not split a file to get past a size limit — above 2 MB the vault is not the
 transport, use SMB or scp. Do not push a big binary through `write_binary`:
-the base64 is typed by the model, a token every two or three characters, so a
-500 KB PDF is tens of minutes for a write the server does in a millisecond —
-drop it over SMB and the next write to the dataset adopts it, sha included —
-and a PDF made of data is not typed at all: `render_pdf` draws it here, and a
-PDF of documents this vault already holds is `render_report`.
-Do not read a directory file by file to audit it —
-`archive` once, or `manifest` if you only need to know whether anything changed.
-Do not read files looking for something — `search`, then `read_file` on the
-match. Do not rewrite a file to add a line or change a number — `append`,
-`edit_file`.
+the base64 is typed by the model, a token every two or three characters —
+drop it over SMB and the next write to the dataset adopts it, sha included.
+A PDF made of data is not typed at all: `render_pdf` draws it here, and a PDF
+of documents this vault already holds is `render_report`. To know whether a
+tree changed, `manifest`: one number, no content.
 
 # COMMANDS
 
@@ -69,8 +76,11 @@ One card each. `reference_guide("<name>")` returns just one.
 
 ## vault_status()
 
-Is the vault alive, and which datasets exist. No key needed.
-The call you make first. If it does not answer, stop — nothing else will work.
+Which datasets exist, each `locked`, `open` or `closed`. No key needed.
+Not a ritual before every task: call it when you do not know a dataset's name,
+or when calls start failing — if it does not answer, stop and say so. It also
+lists `orphan_registry_lines`: names in the key registry that match no dataset,
+which is what a typo looks like (the dataset next to it shows up `closed`).
 
 ## reference_guide(name='')
 
@@ -79,7 +89,10 @@ card; an unknown name gives the list of names. No key needed.
 
 ## dataset_create(name)
 
-A new dataset: open, empty, with its own git.
+A new, empty dataset with its own git. **It is born `closed`**: every call on it
+is refused until the vault's owner adds `name |` (open) or `name | key` (locked)
+to the key registry on the server. No tool writes the registry — say so to the
+person, and wait.
 Name: no `/`, no leading `.` or `_`. The vault is full at 200 datasets.
 The parameter is `name`, not `dataset` — this is the one tool where it is.
 
@@ -87,8 +100,9 @@ The parameter is `name`, not `dataset` — this is the one tool where it is.
 
 Deletes a dataset and its git repository. Irreversible.
 Demands the current `manifest_sha256`, so it cannot be aimed at the wrong
-dataset by accident, and it **refuses outright on a locked dataset**: to destroy
-a protected one, remove its line from the key registry on the server by hand.
+dataset by accident, and it **works on open datasets only**: to destroy a
+locked or closed one, its line in the key registry must first become `name |`,
+by hand, on the server.
 That is the point, not an obstacle — the one irreversible tool cannot be reached
 from a chat alone.
 
@@ -109,7 +123,17 @@ Binaries live here: `search` will not find them, this will.
 A UTF-8 text file: content plus sha256. That sha is what `write_file` and
 `edit_file` want back.
 A long document is exactly where you meet your client's result cap — see the
-model page.
+model page. More than one file → `read_files`.
+
+## read_files(dataset, paths, key='')
+
+Several UTF-8 text files in ONE call: `files` holds, for each path in the order
+asked, `path`, `size`, `sha256` and `content` — the same as `read_file`, so each
+sha is what `edit_file` wants back. A file that cannot be read (missing, binary,
+not a file) comes back as `{path, error}` and the others still arrive; `errors`
+counts them. A path no read could accept (`..`, absolute, the dataset repeated)
+refuses the whole call. At most 50 paths, and 2 MB in all — the ceiling of one
+read: ask for fewer at a time, not around it.
 
 ## append(dataset, path, text, expected_sha256='', key='')
 
@@ -383,11 +407,19 @@ a **refusal** naming the file and the column count: a column cut off at the
 edge is worse than a report that does not print. Nothing external is ever
 fetched — an `<img src="…">` in a scheda is a refusal, not a download.
 
-## edit_file(dataset, path, old_text, new_text, expected_sha256, key='')
+## edit_file(dataset, path, expected_sha256, old_text='', new_text='', edits=None, key='')
 
 Replaces `old_text` — which must occur EXACTLY once — with `new_text`.
-Same CAS as `write_file`. Only the two fragments travel, not the file: on an
+Same CAS as `write_file`. Only the fragments travel, not the file: on an
 80 KB document that is the difference between a light call and a heavy one.
+The names are `old_text` and `new_text` — not `old_string`, not `old_str`.
+
+**Several changes to one file are ONE call**:
+`edits=[{"old_text": "a", "new_text": "b"}, {"old_text": "c", "new_text": "d"}]`.
+They apply in order, each on the text the previous one left, each matching
+exactly once at its turn; one that fails and nothing is written, with a message
+naming which (`edit 2 of 3: ...`). One commit, one new sha. Up to 50. Use either
+`old_text`/`new_text` or `edits`, never both.
 `old_text NOT found` means copy it again, spaces and newlines included.
 `found N times` means widen it by a line or two — not by a page.
 
@@ -402,7 +434,8 @@ There is no second dataset to move to: to copy across, `read_file` in one and
 
 ## search(dataset, pattern, path='', regex=False, key='')
 
-Greps the dataset server-side: `file:line:text`, nothing downloaded.
+Greps the dataset server-side: `file:line:text`, nothing downloaded. The text
+to find goes in `pattern` — there is no `query`.
 **Literal unless `regex=True`** — a pattern full of `.` and `*` is looked for as
 those characters. Stops at 200 lines: narrow `path`, or make the pattern precise.
 Text only. A PDF that does not come up is not missing — find binaries by name
@@ -421,7 +454,7 @@ Required by `dataset_drop` and `dataset_restore`.
 to hand you less than you asked for, silently.
 
 Every file matching `pattern` under `path`, in ONE call, as a base64 tar.gz.
-Needs a sandbox to extract it in.
+Needs a sandbox to extract it in. In a chat without one, `read_files`.
 
 - **The default is `pattern='*.md'`.** An archive taken without thinking about it
   holds the Markdown and nothing else — no PDFs, no images, no binaries. Pass
@@ -429,8 +462,8 @@ Needs a sandbox to extract it in.
   applied and how many files it skipped: read that line.
 - **The ceiling you meet first is your client's, not the 5 MB here.** Over it,
   the result becomes a file path instead of data — useful only if that file
-  lands where your code runs. Until you have run the `ls` test on the model
-  page, `max_chars=20000` works everywhere.
+  lands where your code runs: the first time a result comes back as a path,
+  `ls` it where your code runs. Until then, `max_chars=20000` works everywhere.
 - **`max_chars` refuses instead of producing.** The refusal says how many
   characters it would have been, so one round trip tells you the size instead of
   losing you the payload. It is 0 by default, meaning "no ceiling of mine".
@@ -488,6 +521,7 @@ modified: a document from 2024 thrown away yesterday survives
 | Message | Cure |
 |---|---|
 | `dataset ... is protected: a key is required` | the key is in the project's instructions |
+| `dataset ... is closed: it has no line in the key registry` | only the vault's owner can open it, on the server: tell the person |
 | `no such dataset` | `vault_status` lists them; it goes in `dataset`, not in `path` |
 | `path must be relative to the dataset` | the dataset is repeated at the head of `path`: drop it |
 | `path is relative to the dataset, not absolute` | drop the leading `/` |
@@ -496,10 +530,12 @@ modified: a document from 2024 thrown away yesterday survives
 | `the file does not exist` | the opposite: pass `"new"` |
 | `old_text NOT found` | copy the fragment exactly, spaces and newlines included |
 | `old_text found N times` | widen the context until it is unique |
+| `edit N of M: ...` | that change of the list failed, and none was written: fix it, resend the list |
+| `nothing to edit` | the names are `old_text`/`new_text`, or a list in `edits` |
 | `path not allowed` | a segment is `..`, `.git`, or a lockfile |
 | `destination already exists` | `move_path` never overwrites: choose another name |
 | `more than 3000 files` | go one level deeper with `path` |
-| `has a key and cannot be dropped` | take its line out of the key registry first |
+| `is locked and cannot be dropped` / `is closed and cannot be dropped` | only an open dataset can be dropped: its line must become `name \|` first |
 | `CONFLICT: expected manifest ...` | re-read the manifest, then retry |
 | `block too large` | `append` is not for rewrites: `write_file` |
 | `file too large` | above 2 MB, move it over SMB/scp |

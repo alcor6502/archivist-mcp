@@ -10,8 +10,12 @@ The model
   dataset". There is no root-level operation at all: the entire protection
   model follows from that single rule, which up to v1.8 was expressed by
   making the dataset the first segment of the path.
-- A dataset listed in keys.txt is LOCKED and every call must carry its key.
-  Without a line it is OPEN.
+- Access is decided by keys.txt, one line per dataset, and by nothing else.
+  `name | key` makes it LOCKED: every call must carry the key. `name |`, the
+  bar and nothing after it, makes it OPEN. NO LINE makes it CLOSED: every
+  call is refused. Closed is the default since 4.0.0 — until then a dataset
+  without a line was open, and a typo in a name opened a dataset its owner
+  believed protected (2026-11-03). Now the same typo closes it.
 - keys.txt lives in the vault root and is unreachable BY CONSTRUCTION: it is
   not a dataset, so it cannot be named in `dataset`, and as a `path` it is
   only ever looked for INSIDE a dataset. It is not even expressible.
@@ -48,6 +52,8 @@ MAX_BINARY_BYTES = 2_000_000       # read/write binary: above this, use SMB/scp
 MAX_ARCHIVE_BYTES = 30_000_000     # sum of files packed by archive() (input)
 MAX_ARCHIVE_OUT_BYTES = 5_000_000  # cap on the PRODUCED tgz: that is what crosses the context
 MAX_SEARCH_HITS = 200
+MAX_READ_FILES = 50                # paths in one read_files(); their total obeys MAX_READ_BYTES
+MAX_EDITS = 50                     # replacements in one edit_file(edits=...)
 MAX_APPEND_BYTES = 64_000          # largest block for append()
 MAX_DATASETS = 200
 
@@ -111,6 +117,29 @@ def guide_for(text: str, name: str = "") -> dict:
     if key not in cards:
         raise VaultError(f"no card for {name!r}: {', '.join(sorted(cards))}")
     return {"command": key, "guide": cards[key]}
+
+
+INSTRUCTIONS_HEADING = "## IN SHORT"
+
+
+def server_instructions(text: str) -> str:
+    """The `## IN SHORT` section of the manual: what the server hands the client
+    at connection time as its MCP `instructions`, so a chat starts knowing the
+    rules instead of spending its first round trips on vault_status() and
+    reference_guide().
+
+    Cut FROM the manual and not written beside it, because a second copy of
+    the rules is a second copy that drifts — and the one that drifted would be
+    the one the model reads first. The section lives in the model page, so
+    reference_guide() still shows it to a client that ignores instructions."""
+    model, _ = split_guide(text)
+    head, sep, rest = model.partition(f"\n{INSTRUCTIONS_HEADING}\n")
+    if not sep:
+        raise VaultFault(f"the guide has no '{INSTRUCTIONS_HEADING}' section: the image is wrong")
+    body = rest.split("\n## ", 1)[0].strip()
+    if not body:
+        raise VaultFault(f"the guide's '{INSTRUCTIONS_HEADING}' section is empty")
+    return body
 
 
 class VaultError(Exception):
@@ -188,9 +217,14 @@ def parse_key_registry(text: str) -> tuple[list[tuple[str, str]], list[int]]:
     A bar is typed the same on every keyboard, no editor rewrites it, and no
     dataset name may contain it. Spaces around it are stripped, so a name with
     two consecutive spaces needs no special form any more. A line with no bar,
-    with two, or with an empty side is malformed and reported by NUMBER. Blank
+    with two, or with an empty NAME is malformed and reported by NUMBER. Blank
     lines and lines starting with '#' are comments and are not counted as
     anything.
+
+    An empty KEY is not malformed since 4.0.0: `name |` is how a dataset is
+    declared OPEN, and it comes back as `(name, "")`. Until 4.0.0 the line was
+    malformed and the absence of a line meant open; now the absence means
+    CLOSED, so opening has to be something written down, and this is it.
     """
     entries: list[tuple[str, str]] = []
     malformed: list[int] = []
@@ -202,7 +236,7 @@ def parse_key_registry(text: str) -> tuple[list[tuple[str, str]], list[int]]:
             malformed.append(n)
             continue
         name, key = _norm(parts[0]), parts[1].strip()
-        if name and key:
+        if name:
             entries.append((name, key))
         else:
             malformed.append(n)
@@ -297,10 +331,13 @@ class VaultRoot:
 
     def keys(self) -> dict[str, str]:
         """Read keys.txt, hot-reloading on mtime change, so a dataset can be
-        protected or opened from a file manager without restarting anything.
+        protected, opened or closed from a file manager without restarting
+        anything.
 
-        Format: `dataset name | key`, one line per dataset. Blank lines and
-        lines starting with '#' are comments.
+        Format: `dataset name | key` (locked) or `dataset name |` (open), one
+        line per dataset; the value is "" for an open one. A dataset with no
+        entry here is CLOSED — and that includes every dataset when the file
+        is missing. Blank lines and lines starting with '#' are comments.
         """
         try:
             m = self.keys_file.stat().st_mtime
@@ -317,20 +354,32 @@ class VaultRoot:
         # Malformed lines are ignored HERE and reported by the preflight, which
         # is the half that blocks: a registry the service half-understands must
         # stop the boot, not quietly protect fewer datasets than it was told to.
+        # Ignored at a hot reload, a malformed line leaves its dataset with no
+        # entry — CLOSED since 4.0.0, where until then it fell OPEN.
         for name, key in parse_key_registry(text)[0]:
             out[_fold(name)] = key
         self._keys_cache, self._keys_mtime = out, m
         return out
 
-    def is_locked(self, name: str) -> bool:
-        return _fold(name) in self.keys()
+    def state(self, name: str, keys: dict[str, str] | None = None) -> str:
+        """`locked`, `open` or `closed`, from the registry alone. `keys` lets a
+        caller that lists every dataset read the registry once."""
+        k = (self.keys() if keys is None else keys).get(_fold(name))
+        if k is None:
+            return "closed"
+        return "locked" if k else "open"
 
     def check_key(self, name: str, key: str) -> None:
-        """Raise if the dataset is locked and the key does not match. The
-        message reveals nothing about the correct key."""
+        """Raise if the dataset is closed, or locked and the key does not
+        match. The message reveals nothing about the correct key."""
         expected = self.keys().get(_fold(name))
         if expected is None:
-            return  # open dataset
+            raise VaultError(
+                f"dataset {name!r} is closed: it has no line in the key registry. "
+                "Only the vault's owner can open it, by adding a line on the "
+                "server; no tool can.")
+        if not expected:
+            return  # open dataset: a key, if one was passed, is not needed
         if not key:
             raise VaultError(
                 f"dataset {name!r} is protected: a key is required. "
@@ -439,23 +488,46 @@ class VaultRoot:
         else — this is the first call anyone makes and it must cost almost
         nothing."""
         keys = self.keys()
-        return {
+        names = self.dataset_names()
+        out = {
             "vault": "ok",
             "version": version,
             "guide": "reference_guide() for the model; reference_guide(name) "
                      "for one command's card",
-            "datasets": [
-                {"name": n, "state": "locked" if _fold(n) in keys else "open"}
-                for n in self.dataset_names()
-            ],
+            "datasets": [{"name": n, "state": self.state(n, keys)} for n in names],
         }
+        # The closed ones are LISTED, not hidden: a typo in a registry line
+        # shows up here as a closed dataset next to an orphan line, at the
+        # first call, instead of a dataset that silently vanished. The orphans
+        # are NAMES taken from the registry — never a key, never a line.
+        if any(d["state"] == "closed" for d in out["datasets"]):
+            out["closed"] = ("a closed dataset has no line in the key registry: "
+                             "every call on it is refused until the owner adds one")
+        known = {_fold(n) for n in names}
+        names_in_registry = {_fold(n): n for n in self._registry_names()}
+        orphans = [shown for f, shown in names_in_registry.items() if f not in known]
+        if orphans:
+            out["orphan_registry_lines"] = sorted(orphans)
+        return out
+
+    def _registry_names(self) -> list[str]:
+        """The registry's dataset names as WRITTEN — the spelling a
+        person typed, which is what an orphan has to be reported by. The
+        cache keeps folded names only, so this rereads the file; it is called
+        by vault_status alone, which is not on any hot path."""
+        try:
+            text = self.keys_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return []
+        return [n for n, _ in parse_key_registry(text)[0]]
 
     # ---------- create and drop ----------
 
     def create(self, name: str) -> dict:
-        """Create an OPEN, empty dataset with git init and a first commit.
-        No password: an empty box is not a capability. If something worth
-        protecting ends up in it, add a line to keys.txt."""
+        """Create an empty dataset with git init and a first commit. It is born
+        CLOSED unless the registry already has its line: since 4.0.0 access is
+        whatever keys.txt says, and the service never writes keys.txt — who
+        can reach a dataset is decided by the vault's owner alone."""
         n = _norm(name)
         if not _NAME_OK.match(n):
             raise VaultError(
@@ -492,13 +564,20 @@ class VaultRoot:
                 pass
             ds = Dataset(d, n)
             result = ds.ensure_git()
-        return {"dataset": n, "state": "open", "git": result,
-                "note": "open: add a line to the key registry to protect it"}
+        st = self.state(n)
+        notes = {
+            "closed": f"closed: nothing can use it until the vault's owner adds "
+                      f"`{n} |` (open) or `{n} | <key>` (locked) to the key "
+                      f"registry. No tool can do it.",
+            "open": "open: the key registry already declares it open",
+            "locked": "locked: the key registry already holds its key",
+        }
+        return {"dataset": n, "state": st, "git": result, "note": notes[st]}
 
     def drop(self, name: str, expected_manifest: str) -> dict:
-        """Delete an OPEN dataset. A dataset with a key is NOT droppable: to
-        remove it, first take its line out of keys.txt (a manual act on the
-        server) or delete it over SMB.
+        """Delete an OPEN dataset. A locked or closed one is NOT droppable: to
+        remove it, first make its line `name |` in keys.txt (a manual act on
+        the server) or delete it over SMB.
 
         expected_manifest is the current manifest_sha256: you cannot throw away
         what you have not looked at, and if someone wrote in the meantime the
@@ -508,11 +587,13 @@ class VaultRoot:
             n = self._actual_name(name)
             if n is None:
                 raise VaultError(f"no such dataset: {name!r}")
-            if self.is_locked(n):
+            st = self.state(n)
+            if st != "open":
                 raise VaultError(
-                    f"dataset {n!r} has a key and cannot be dropped. "
-                    "To remove it: take its line out of the key registry (it then "
-                    "becomes open), or delete it directly on the server.")
+                    f"dataset {n!r} is {st} and cannot be dropped: only an open "
+                    "one can. To remove it: make its line in the key registry "
+                    f"`{n} |` (it then becomes open), or delete it directly on "
+                    "the server.")
             ds = Dataset(self.root / n, n)
             m = ds.manifest("")   # once: it hashes every file of the dataset
             current = m["manifest_sha256"]
@@ -839,6 +920,45 @@ class Dataset:
         return {"dataset": self.name, "path": self._rel(p), "size": len(data),
                 "sha256": _sha(data), "content": text}
 
+    def read_files(self, rels: list[str]) -> dict:
+        """Several text files in ONE call, each with its sha256.
+
+        It exists for speed, and the speed is not the server's: a read costs
+        about a millisecond here and seconds on the way to the client and back
+        (relay, ingress, DERP). Reading five files was five round trips. The
+        other door that reads many files at once, `archive`, hands back a
+        base64 tar.gz, which a model in a chat without code execution cannot
+        open — so in practice it read one file at a time.
+
+        A file that cannot be read is an ERROR ENTRY, not a refusal of the
+        call: one missing file must not cost the other four a second round
+        trip. What does refuse the whole call is the shape of the request —
+        too many paths, a path no read could ever accept (checked before this
+        by the vault's door), or a total above the single-read ceiling, which
+        is the same ceiling read_file obeys: batching is not a way around it."""
+        if not rels:
+            raise VaultError("paths is empty: name at least one file")
+        if len(rels) > MAX_READ_FILES:
+            raise VaultError(f"{len(rels)} paths: at most {MAX_READ_FILES} per call")
+        out, total = [], 0
+        for rel in rels:
+            try:
+                r = self.read_file(rel)
+            except VaultFault:
+                raise
+            except VaultError as e:
+                out.append({"path": rel, "error": str(e)})
+                continue
+            total += r["size"]
+            if total > MAX_READ_BYTES:
+                raise VaultError(
+                    f"the files add up to more than {MAX_READ_BYTES:,} bytes (the "
+                    "ceiling of a single read): ask for fewer per call")
+            del r["dataset"]
+            out.append(r)
+        return {"dataset": self.name, "count": len(out),
+                "errors": sum(1 for f in out if "error" in f), "files": out}
+
     def read_binary(self, rel: str) -> dict:
         p = self._resolve(rel, must_exist=True)
         if not p.is_file():
@@ -1075,11 +1195,60 @@ class Dataset:
                 "sha256": sha, "commit": commit,
                 **({"external_commit_first": external} if external else {})}
 
-    def edit_file(self, rel: str, old_text: str, new_text: str, expected_sha256: str) -> dict:
-        if old_text == new_text:
-            raise VaultError("old_text and new_text are identical: nothing to do")
-        if not old_text:
-            raise VaultError("old_text is empty: to create content use write_file or append")
+    @staticmethod
+    def _edit_pairs(old_text: str, new_text: str, edits: list | None) -> list[tuple[str, str]]:
+        """The replacements of one edit_file call, validated before the file is
+        touched. Either ONE pair in old_text/new_text, or a list in `edits` —
+        never both, because two sources for one answer is a call whose meaning
+        depends on which one we read first.
+
+        The field names inside `edits` are checked by name, and a wrong one is
+        refused WITH the right one: the container log shows models reaching
+        for `old_string`/`new_string` and `old_str`/`new_str`, the names other
+        editors use. Each wrong guess was a round trip; the refusal now spends
+        it once and says what to send."""
+        if edits:
+            if old_text or new_text:
+                raise VaultError("pass either old_text/new_text or edits, not both")
+            if not isinstance(edits, list):
+                raise VaultError("edits is a list of {old_text, new_text} objects")
+            if len(edits) > MAX_EDITS:
+                raise VaultError(f"{len(edits)} edits: at most {MAX_EDITS} per call")
+            pairs = []
+            for i, e in enumerate(edits, 1):
+                if not isinstance(e, dict) or set(e) != {"old_text", "new_text"}:
+                    got = sorted(e) if isinstance(e, dict) else type(e).__name__
+                    raise VaultError(
+                        f"edit {i} of {len(edits)}: each edit is exactly "
+                        f"{{\"old_text\": ..., \"new_text\": ...}} — got {got}")
+                if not isinstance(e["old_text"], str) or not isinstance(e["new_text"], str):
+                    raise VaultError(f"edit {i} of {len(edits)}: old_text and new_text are strings")
+                pairs.append((e["old_text"], e["new_text"]))
+        else:
+            if not old_text and not new_text:
+                raise VaultError(
+                    "nothing to edit: pass old_text and new_text (those names — "
+                    "not old_string/new_string), or a list in edits")
+            pairs = [(old_text, new_text)]
+        for i, (o, n) in enumerate(pairs, 1):
+            where = f"edit {i} of {len(pairs)}: " if len(pairs) > 1 else ""
+            if o == n:
+                raise VaultError(f"{where}old_text and new_text are identical: nothing to do")
+            if not o:
+                raise VaultError(f"{where}old_text is empty: to create content use write_file or append")
+        return pairs
+
+    def edit_file(self, rel: str, old_text: str, new_text: str, expected_sha256: str,
+                  edits: list | None = None) -> dict:
+        """Replace text in a file under CAS — one pair, or several in `edits`.
+
+        Several pairs are applied IN ORDER, each on the text the previous one
+        left, and each must match exactly once at its turn. All or nothing:
+        one pair that does not match and the file is untouched, with one
+        commit for the whole set when they all do. That is the point of the
+        list — three changes to one file were three calls, each waiting for
+        the sha the previous one returned."""
+        pairs = self._edit_pairs(old_text, new_text, edits)
         p = self._resolve(rel, must_exist=True)
         with self._lock():
             external = self._commit_external_if_dirty()
@@ -1093,20 +1262,30 @@ class Dataset:
                 text = data.decode("utf-8")
             except UnicodeDecodeError:
                 raise VaultError("not UTF-8: edit_file is for text only")
-            n = text.count(old_text)
-            if n == 0:
-                raise VaultError("old_text NOT found in the file: re-read it and copy the exact fragment")
-            if n > 1:
-                raise VaultError(f"old_text found {n} times: ambiguous — widen the context until it is unique")
-            out = text.replace(old_text, new_text, 1).encode("utf-8")
+            for i, (o, n_) in enumerate(pairs, 1):
+                where = f"edit {i} of {len(pairs)}: " if len(pairs) > 1 else ""
+                n = text.count(o)
+                if n == 0:
+                    raise VaultError(f"{where}old_text NOT found in the file: re-read it "
+                                     "and copy the exact fragment. Nothing was written")
+                if n > 1:
+                    raise VaultError(f"{where}old_text found {n} times: ambiguous — widen "
+                                     "the context until it is unique. Nothing was written")
+                text = text.replace(o, n_, 1)
+            out = text.encode("utf-8")
             if len(out) > MAX_WRITE_BYTES:
                 raise VaultError(f"result too large ({len(out)} bytes)")
             back, sha = self._atomic_write(p, out)
-            if new_text.encode("utf-8") not in back:
+            # The last pair's new text must be in the file. Only the last: an
+            # earlier one may legitimately be rewritten by a later pair. The
+            # whole result is verified byte for byte by _atomic_write anyway.
+            if pairs[-1][1].encode("utf-8") not in back:
                 raise VaultFault("post-edit verification failed: the new text is not in the file")
-            commit = self._commit(f"edit: {p.relative_to(self.root)}")
+            what = "edit" if len(pairs) == 1 else f"edit ({len(pairs)} changes)"
+            commit = self._commit(f"{what}: {p.relative_to(self.root)}")
         return {"dataset": self.name, "path": self._rel(p), "size": len(back),
                 "sha256": sha, "commit": commit,
+                **({"edits": len(pairs)} if len(pairs) > 1 else {}),
                 **({"external_commit_first": external} if external else {})}
 
     def move_path(self, src: str, dst: str) -> dict:

@@ -16,8 +16,9 @@ Datasets and keys:
   repository;
 - every call names its dataset explicitly in `dataset`, and `path` is relative
   to it; an empty path means "the whole dataset";
-- a dataset listed in keys.txt is LOCKED: every call must carry its key in the
-  `key` parameter. Without a line it is OPEN.
+- keys.txt decides access: `name | key` is LOCKED (every call carries the key
+  in `key`), `name |` is OPEN, and a dataset with NO line is CLOSED — every
+  call refused. Closed is the default since 4.0.0.
 
 Environment:
   VAULT_ROOT              vault root inside the container (default /vault)
@@ -80,9 +81,9 @@ from mcp_common_engine.refusals import make_tool
 # fastmcp in) and cannot import this file, so a knob resolved here would be a
 # knob nothing exercises.
 from preflight import HTTP_MODES, http_mode_from_env
-from vault import VaultRoot, VaultError, VaultFault, guide_for
+from vault import VaultRoot, VaultError, VaultFault, guide_for, server_instructions
 
-VERSION = "3.4.0"
+VERSION = "4.0.0"
 
 # The shape of a line of ours. It is a NAME because it is used twice: here, and
 # again below where fastmcp's own handlers are given the same shape. Written out
@@ -225,7 +226,23 @@ auth = GitHubProvider(
 ICON_URL = ("https://raw.githubusercontent.com/alcor6502/archivist-mcp"
             "/main/archivist-icon.png")
 
-mcp = FastMCP("archivist-mcp", auth=auth,
+_GUIDE = Path(__file__).with_name("reference-guide.md")
+
+# The instructions the client receives when it connects (MCP `initialize`),
+# and why they exist: every round trip to this server costs seconds on the
+# way (relay, ingress, DERP) and a millisecond here. A chat used to spend its
+# first two on vault_status() and reference_guide() just to learn the rules.
+# The text is the guide's own `## IN SHORT` section, cut by vault.py — one
+# text, served twice, never two that drift. If the guide cannot be read the
+# service still starts, without instructions, and says so: a missing manual
+# is reference_guide()'s refusal to give, not a reason to refuse every tool.
+try:
+    INSTRUCTIONS: str | None = server_instructions(_GUIDE.read_text(encoding="utf-8"))
+except (OSError, VaultError) as e:
+    INSTRUCTIONS = None
+    log.error("no server instructions: %s", e)
+
+mcp = FastMCP("archivist-mcp", auth=auth, instructions=INSTRUCTIONS,
               icons=[Icon(src=ICON_URL, mimeType="image/png",
                           sizes=["256x256"])])
 
@@ -283,14 +300,13 @@ tool = make_tool(mcp, log, refusal=VaultError, fault=VaultFault)
 mcp.add_middleware(Gate(log=log, allowed_login=ALLOWED_LOGIN,
                         allowed_cidrs=ALLOWED_CIDRS))
 
-_GUIDE = Path(__file__).with_name("reference-guide.md")
-
 
 # ============================ vault level ============================
 
 @tool
 def vault_status() -> dict:
-    """Is the vault alive, and which datasets exist. Start here."""
+    """Which datasets exist and their state: locked, open, closed. Not needed
+    before every task — call it when you do not know a dataset's name."""
     return vault.status(VERSION)
 
 
@@ -311,7 +327,8 @@ def reference_guide(name: str = "") -> dict:
 
 @tool
 def dataset_create(name: str) -> dict:
-    """A new dataset: open, empty, with its own git."""
+    """A new, empty dataset with its own git. Born CLOSED: unusable until the
+    vault's owner gives it a line in the key registry."""
     return vault.create(name)
 
 
@@ -338,9 +355,17 @@ def list_files(dataset: str, path: str = "", key: str = "") -> dict:
 
 @tool
 def read_file(dataset: str, path: str, key: str = "") -> dict:
-    """Read a text file: content plus sha256."""
+    """Read ONE text file: content plus sha256. For several, read_files."""
     ds, rel = vault.open(dataset, path, key)
     return ds.read_file(rel)
+
+
+@tool
+def read_files(dataset: str, paths: list[str], key: str = "") -> dict:
+    """Read SEVERAL text files in one call, content plus sha256 each. One
+    round trip instead of one per file; a missing file is an error entry."""
+    ds = vault.open_by_name(dataset, key)
+    return ds.read_files([vault.check_path(ds.name, p) for p in paths])
 
 
 @tool
@@ -355,7 +380,8 @@ def append(dataset: str, path: str, text: str, expected_sha256: str = "",
 @tool
 def write_file(dataset: str, path: str, content: str,
                expected_sha256: str, key: str = "") -> dict:
-    """Write the WHOLE file. CAS on expected_sha256, "new" if new."""
+    """Write the WHOLE file. CAS on expected_sha256, "new" if new. To change
+    part of a file use edit_file; to add at the end, append."""
     ds, rel = vault.open(dataset, path, key)
     return ds.write_file(rel, content, expected_sha256)
 
@@ -379,11 +405,14 @@ def render_report(dataset: str, path: str, sources: dict, layout: dict | None = 
 
 
 @tool
-def edit_file(dataset: str, path: str, old_text: str, new_text: str,
-              expected_sha256: str, key: str = "") -> dict:
-    """Replace old_text — exactly one occurrence — with new_text. CAS."""
+def edit_file(dataset: str, path: str, expected_sha256: str, old_text: str = "",
+              new_text: str = "", edits: list[dict[str, str]] | None = None,
+              key: str = "") -> dict:
+    """Replace old_text (exactly one occurrence) with new_text — or several
+    changes at once: edits=[{"old_text": ..., "new_text": ...}, ...], applied
+    in order, all or nothing, one commit. CAS on expected_sha256."""
     ds, rel = vault.open(dataset, path, key)
-    return ds.edit_file(rel, old_text, new_text, expected_sha256)
+    return ds.edit_file(rel, old_text, new_text, expected_sha256, edits)
 
 
 @tool
@@ -400,7 +429,8 @@ def move_path(dataset: str, src: str, dst: str, key: str = "") -> dict:
 @tool
 def search(dataset: str, pattern: str, path: str = "",
            regex: bool = False, key: str = "") -> dict:
-    """Grep the dataset server-side. Literal unless regex=True."""
+    """Grep the dataset server-side: the text goes in `pattern` (not
+    `query`). Literal unless regex=True. Answers path:line: text."""
     ds, rel = vault.open(dataset, path, key)
     return ds.search(pattern, rel, regex)
 
@@ -415,7 +445,8 @@ def manifest(dataset: str, path: str = "", key: str = "") -> dict:
 @tool
 def archive(dataset: str, path: str = "", pattern: str = "*.md",
             max_chars: int = 0, key: str = "") -> dict:
-    """Every file matching `pattern`, in one call, as a base64 tar.gz.
+    """Every file matching `pattern`, in one call, as a base64 tar.gz — only
+    useful where you can run code to unpack it; in a chat use read_files.
     READ reference_guide('archive') FIRST — its defaults and its
     ceilings hand you less than you asked for, silently."""
     ds, rel = vault.open(dataset, path, key)

@@ -122,9 +122,17 @@ def c_git():
 
 @check("keys")
 def c_keys():
-    # The registry may be absent (all datasets open): not an error. If it is
-    # there it must be readable and syntactically sane, or a dataset you believe
-    # is protected would silently be open.
+    # The registry may be absent: not an error, and since 4.0.0 not a hole
+    # either — with no registry every dataset is CLOSED, so the service starts
+    # and says so. If it is there it must be readable and syntactically sane:
+    # a malformed line would leave its dataset closed, which is safe, but it is
+    # still a registry that says something other than what its owner wrote.
+    #
+    # It counts the three states and the orphans, because an orphan is what a
+    # typo looks like: on 2026-10-30 a renamed dataset and a registry line with
+    # the other spelling left the dataset OPEN for days, while this check said
+    # `1 orphan lines` and passed. Under 4.0.0 the same typo CLOSES the dataset,
+    # and this line names it closed next to the orphan.
     #
     # The parsing is NOT done here. It used to be, with a second implementation
     # that split on TAB only while the format also tolerates two-or-more
@@ -139,25 +147,34 @@ def c_keys():
     # file needs only the engine's root, so an unimportable vault.py has to
     # come out as one named FAILED check — not as a traceback that takes the
     # whole preflight with it.
-    from vault import parse_key_registry
+    from vault import parse_key_registry, _fold
 
     if not os.path.exists(KEYS):
-        return f"no registry at {KEYS}: every dataset is open"
+        return f"no registry at {KEYS}: every dataset is closed"
     if not os.access(KEYS, os.R_OK):
         raise RuntimeError(f"{KEYS} is not readable by the service user: check owner and mode (99:100, 640)")
     text = open(KEYS, encoding="utf-8", errors="replace").read()
     entries, malformed = parse_key_registry(text)
     if malformed:
         raise RuntimeError(
-            f"{len(malformed)} registry lines are not `name | key`, at line(s) "
-            f"{', '.join(str(n) for n in malformed[:5])} — one '|' between the "
-            f"dataset name and its key, nothing else (until 3.0.0 the separator "
+            f"{len(malformed)} registry lines are not `name | key` or `name |`, at "
+            f"line(s) {', '.join(str(n) for n in malformed[:5])} — one '|' after "
+            f"the dataset name, then the key or nothing (until 3.0.0 the separator "
             f"was a TAB: rewrite the file). The lines are not printed: they "
             f"contain keys")
-    known = {d.casefold() for d in _datasets()}
-    orphans = [name for name, _ in entries if name.casefold() not in known]
-    note = f"; {len(orphans)} orphan lines ({', '.join(orphans[:3])}): no such dataset" if orphans else ""
-    return f"{len(entries)} protected datasets{note}"
+    datasets = _datasets()
+    known = {_fold(d) for d in datasets}
+    registry = {_fold(name): k for name, k in entries}
+    orphans = [name for name, _ in entries if _fold(name) not in known]
+    locked = sum(1 for d in datasets if registry.get(_fold(d)))
+    opened = sum(1 for d in datasets if registry.get(_fold(d)) == "")
+    closed = [d for d in datasets if _fold(d) not in registry]
+    note = ""
+    if closed:
+        note += f"; closed (no line): {', '.join(closed[:5])}"
+    if orphans:
+        note += f"; {len(orphans)} orphan lines ({', '.join(orphans[:3])}): no such dataset"
+    return f"{locked} locked, {opened} open, {len(closed)} closed{note}"
 
 
 @check("oauth")

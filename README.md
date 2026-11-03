@@ -79,8 +79,22 @@ form and never complain.
 
 ### Keys
 
-A dataset with a line in `keys.txt` is **locked**: every call must carry its
-key. Without a line it is **open**.
+`keys.txt` decides access, and nothing else does. Three states:
+
+| Line in `keys.txt` | State | A call |
+|---|---|---|
+| `name \| key` | **locked** | must carry the key |
+| `name \|` (the bar, nothing after it) | **open** | needs no key |
+| no line at all | **closed** | is refused |
+
+**Closed is the default since 4.0.0.** Until then a dataset without a line was
+open, and that is how a typo hurt: a dataset renamed, a registry line still
+carrying the old spelling, and a dataset its owner believed protected sat open
+for days with a warning in a log nobody read. Now the same typo closes it — the
+mistake makes a dataset unreachable, never exposed. `vault_status()` lists the
+closed ones and the registry lines that match no dataset, so a typo shows up at
+the first call. No tool writes `keys.txt`: who reaches what is decided on the
+server, by hand.
 
 The key is not there to keep strangers out — OAuth does that, and only one
 account gets in at all. It is there to **separate projects from each other**.
@@ -290,13 +304,15 @@ day-to-day rollback is git's job, not theirs.
 <summary><b>4 · The key registry</b></summary>
 
 ```sh
-printf 'Example Project | k7m2xq4p\n' > "/mnt/<ssd-pool>/Vault/keys.txt"
+printf 'Example Project | k7m2xq4p\nScratch |\n' > "/mnt/<ssd-pool>/Vault/keys.txt"
 chown 99:100 "/mnt/<ssd-pool>/Vault/keys.txt"
 chmod 640    "/mnt/<ssd-pool>/Vault/keys.txt"
 ```
 
-Dataset name, **`|`**, key. Spaces around the bar are ignored. One line per
-dataset; blank lines and lines starting with `#` are comments.
+Dataset name, **`|`**, key — or nothing after the bar for an open dataset. A
+dataset with no line is closed. Spaces around the bar are ignored. One line per
+dataset; blank lines and lines starting with `#` are comments. With no file at
+all every dataset is closed: the service starts, and says so.
 
 Why a bar and not a TAB, which it was until 3.0.0: an editor set to expand tabs
 writes a *single* space when the name ends next to a tab stop, a single space is
@@ -312,7 +328,8 @@ threat is a conversation guessing, not a brute-force attack. Avoid `0/O` and
 root-only — the service does not run as root and could not open it.
 
 The file is **hot-reloaded**: add or remove a line from a file manager and it
-takes effect immediately, with no restart.
+takes effect immediately, with no restart. A line that does not parse while the
+service runs is ignored, and its dataset stays **closed**.
 
 It lives inside the vault yet is unreachable from the tools, because its name is
 not a dataset name — the same check that stops `..` and `.git` stops it.
@@ -469,8 +486,8 @@ Try these first, in order:
 vault_status()                                  → must list the datasets
 dataset_status("Example Project", "")           → must be REFUSED
 dataset_status("Example Project", "k7m2xq4p")   → must answer
-dataset_create("Scratch")                       → created open
-list_files("Scratch")                           → works with no key
+dataset_create("Scratch")                       → created closed — unless keys.txt already says `Scratch |`
+list_files("Scratch")                           → works with no key once `Scratch |` is in keys.txt
 dataset_drop("Example Project", "<manifest>")   → must be REFUSED
 ```
 
@@ -513,6 +530,12 @@ If the update changed the tool surface, do step 8 as well.
 before you Apply: a registry the new preflight cannot read stops the service
 with the line numbers, and stays stopped until the file is fixed. Nothing else
 moves: keys, datasets, tokens and the connector are untouched.
+
+**Crossing 4.0.0**: a dataset with no line in `keys.txt` turns from open to
+**closed**. Before you Apply, give every dataset you want reachable without a
+key a line of its own, `name |`. Datasets that already have a key are
+untouched. The tool surface moves (`read_files` is new, `edit_file` takes
+`edits`, the server sends instructions at connection time): do step 8.
 
 **The way back** costs one field: the previous tag is still on the registry, so
 put it in `Repository` in place of `:latest` and Apply. It is a change of
@@ -667,7 +690,7 @@ changes from outside were committed separately before yours.
 | You want to | Use | Sha? |
 |---|---|---|
 | add lines to a register or log | `append` | no |
-| change a phrase or a number | `edit_file` | yes |
+| change a phrase or a number | `edit_file` — several changes in one call with `edits` | yes |
 | rewrite the file, or create it | `write_file` | yes (`"new"` if new) |
 | write a PDF or a binary | `write_binary` | yes |
 | draw a PDF from data, server-side | `render_pdf` | yes |
@@ -679,6 +702,7 @@ changes from outside were committed separately before yours.
 | know how big a dataset is, how dirty, how many commits | `dataset_status` | — |
 | know when something changed, and get its hash | `history` | — |
 | read text | `read_file` | — |
+| read several text files at once | `read_files` — one round trip instead of one per file | — |
 | read a PDF or a binary | `read_binary` (needs a sandbox) | — |
 | read a whole tree at once | `archive` (needs a sandbox, mind `pattern`, mind the client's ceiling) | — |
 | read how it was before | `read_at` | — |
@@ -694,8 +718,16 @@ changes from outside were committed separately before yours.
 possible, so there is nothing to protect. It is the right operation for logs and
 registers.
 
-`edit_file` sends only the two fragments instead of the whole file: on an 80 KB
+`edit_file` sends only the fragments instead of the whole file: on an 80 KB
 file that is the difference between a light call and a heavy one.
+
+**Fewer calls is the speed that matters.** A call costs about a millisecond on
+the server and seconds on the way to the client and back. So the tools that do
+several things in one call — `read_files`, `edit_file` with `edits`, `search`
+before any read — are the fast path, and the server says so to every client at
+connection time: its MCP `instructions` are the `IN SHORT` section of the
+manual, so a conversation starts knowing the rules without spending its first
+calls on `vault_status()` and `reference_guide()`.
 
 </details>
 
@@ -712,15 +744,22 @@ before yours — that is information, not an error.
 
 ### Vault level — no key
 
-**`vault_status()`** — is the vault alive, and which datasets exist.
-**Returns** `vault · version · guide · datasets[{name, state}]`
+**`vault_status()`** — is the vault alive, which datasets exist, and their
+state: `locked`, `open` or `closed`. `closed` and `orphan_registry_lines` appear
+only when there is something to say: the second lists names in `keys.txt` that
+match no dataset — never a key.
+**Returns** `vault · version · guide · datasets[{name, state}]` · `closed` ·
+`orphan_registry_lines`
 
 ```
 vault_status()
 → {"vault": "ok", "version": "…",
    "guide": "reference_guide() for the model; reference_guide(name) for one command's card",
    "datasets": [{"name": "Example Project", "state": "open"},
-                {"name": "Ledger",          "state": "locked"}]}
+                {"name": "Ledger",          "state": "locked"},
+                {"name": "Ledgr",           "state": "closed"}],
+   "closed": "a closed dataset has no line in the key registry: …",
+   "orphan_registry_lines": ["Ledgre"]}
 ```
 
 **`reference_guide(name="")`** — the manual, served from the image, in two
@@ -739,7 +778,9 @@ reference_guide("archive")
    "guide": "archive(dataset, path='', pattern='*.md', max_chars=0, key='')\n…"}
 ```
 
-**`dataset_create(name)`** — a new dataset: open, empty, its own git.
+**`dataset_create(name)`** — a new, empty dataset with its own git. It is born
+**closed** unless `keys.txt` already has its line: give it `name |` to open it,
+`name | key` to lock it. The service never writes `keys.txt`.
 **Returns** `dataset · state · git · note`
 
 ```
@@ -748,7 +789,8 @@ dataset_create("Scratch")
 
 **`dataset_drop(dataset, expected_manifest)`** — delete an **open** dataset and
 everything in it. `expected_manifest` is the current `manifest_sha256`: you
-cannot throw away what you have not looked at. A locked dataset refuses.
+cannot throw away what you have not looked at. A locked or closed dataset
+refuses.
 **Returns** `dropped · files_removed · note`
 
 ```
@@ -795,6 +837,20 @@ the one `write_file` and `edit_file` want back.
 read_file("Example Project", "01 Notes/a.md")
 → {"dataset": "Example Project", "path": "01 Notes/a.md", "size": 412,
    "sha256": "a3f9…", "content": "# Notes\n…"}
+```
+
+**`read_files(dataset, paths)`** — several UTF-8 text files in one call, each
+with its `sha256`, in the order asked. A file that cannot be read comes back as
+`{path, error}` and the others still arrive. At most 50 paths and 2 MB in all,
+the ceiling of a single read.
+**Returns** `dataset · count · errors · files[{path, size, sha256, content} | {path, error}]`
+
+```
+read_files("Example Project", ["01 Notes/a.md", "log.md", "nope.md"])
+→ {"dataset": "Example Project", "count": 3, "errors": 1,
+   "files": [{"path": "01 Notes/a.md", "size": 412, "sha256": "a3f9…", "content": "…"},
+             {"path": "log.md", "size": 80, "sha256": "19c2…", "content": "…"},
+             {"path": "nope.md", "error": "no such file: 'nope.md' in dataset 'Example Project'"}]}
 ```
 
 **`read_binary(dataset, path)`** — any file as base64. Max 2 MB. Useless
@@ -983,14 +1039,19 @@ render_report("Health Tracking", "Quadro Clinico — 2026-Set-09.pdf",
    "empty_groups": [], "missing": [], "sections": [{"file": "00 Stato Attuale.md", "page": 3}, …]}
 ```
 
-**`edit_file(dataset, path, old_text, new_text, expected_sha256)`** — replaces
-`old_text`, which must occur **exactly once**, with `new_text`. Only the two
-fragments travel, not the file. Same compare-and-swap as `write_file`.
-**Returns** `dataset · path · size · sha256 · commit`
+**`edit_file(dataset, path, expected_sha256, old_text="", new_text="", edits=None)`**
+— replaces `old_text`, which must occur **exactly once**, with `new_text`. Only
+the fragments travel, not the file. Same compare-and-swap as `write_file`.
+Several changes to one file go in **one** call, as `edits`: applied in order,
+each on the text the previous one left, all or nothing, one commit.
+**Returns** `dataset · path · size · sha256 · commit` · `edits` (with a list)
 
 ```
 read_file("Example Project", "a.md")       # → sha256: a3f9…
-edit_file("Example Project", "a.md", "retention: 0", "retention: 6", "a3f9…")
+edit_file("Example Project", "a.md", "a3f9…", old_text="retention: 0", new_text="retention: 6")
+edit_file("Example Project", "a.md", "5d0b…",
+          edits=[{"old_text": "draft", "new_text": "final"},
+                 {"old_text": "v1", "new_text": "v2"}])
 ```
 
 **`move_path(dataset, src, dst)`** — move, rename or trash. Both paths are
@@ -1127,7 +1188,9 @@ call.
 Written with `X` for the dataset.
 
 ```
-change a number:      read_file → sha → edit_file(X, path, old, new, sha)
+change a number:      read_file → sha → edit_file(X, path, sha, old_text=old, new_text=new)
+change several:       read_file → sha → edit_file(X, path, sha, edits=[…])   one call
+read a few files:     read_files(X, [path, path, path])                        one call
 add to a log:         append(X, path, line)
 create a document:    write_file(X, path, content, "new")
 archive something:    move_path(X, "doc.md", "Trash/doc.md")
@@ -1159,12 +1222,14 @@ copy across datasets: read_file("A", "x.md") → write_file("B", "x.md", …, "n
 | `the file does not exist` | the opposite: pass `"new"` |
 | `old_text NOT found` | re-read and copy the exact fragment |
 | `old_text found N times` | widen the context until it is unique |
+| `edit N of M: ...` | that change of the list failed and nothing was written: fix it and resend the list |
+| `dataset ... is closed: it has no line in the key registry` | add `name \|` (open) or `name \| key` (locked) to `keys.txt` on the server |
 | `path not allowed` | a segment is `..`, `.git`, or a lockfile: those names never appear in a path |
 | `destination already exists` | `move_path` never overwrites |
 | `more than 3000 files` | go one level deeper |
 | `block too large` | `append` is not for rewrites |
 | `too many datasets` | the vault is full at 200: nothing to widen |
-| `has a key and cannot be dropped` | take its line out of the key registry on the server first |
+| `is locked and cannot be dropped` / `is closed …` | only an open dataset can be dropped: make its line `name \|` on the server first |
 | `CONFLICT: expected manifest ...` | someone wrote after you looked: re-read the manifest, then retry |
 
 A failing tool never leaves a partial write.

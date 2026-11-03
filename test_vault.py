@@ -44,6 +44,17 @@ def ok(cond, label, extra=""):
         print(f"  FAIL  {label}  {extra}")
 
 
+def refusal(fn) -> str | None:
+    """The refusal's TEXT, or None if the call went through. must_fail says
+    THAT a call was refused; a guard whose message is part of the cure — it
+    names the change that failed, or the field name to use — needs the words."""
+    try:
+        fn()
+    except VaultError as e:
+        return str(e)
+    return None
+
+
 def must_fail(label, fn):
     global OK, FAIL
     try:
@@ -163,12 +174,22 @@ def single_door_check() -> None:
         if not isinstance(fn, ast.FunctionDef):
             continue
         args = [a.arg for a in fn.args.args]
-        pathish = [a for a in args if a in ("path", "src", "dst")]
-        if not pathish:
-            continue
         calls = {n.func.attr for n in ast.walk(fn)
                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                  and isinstance(n.func.value, ast.Name) and n.func.value.id == "vault"}
+        # A LIST of paths (read_files, 4.0.0) cannot come out of vault.open,
+        # which takes one: the dataset goes through the by-name door, which
+        # checks the key, and every path through check_path on its own.
+        if "paths" in args:
+            checked += 1
+            ok({"open_by_name", "check_path"} <= calls,
+               f"{fn.name}() opens its dataset by name and validates EVERY path "
+               "through vault.check_path()", sorted(calls))
+            ok("dataset" in args, f"{fn.name}() names its dataset explicitly", args)
+            continue
+        pathish = [a for a in args if a in ("path", "src", "dst")]
+        if not pathish:
+            continue
         checked += 1
         ok("open" in calls, f"{fn.name}() resolves its path through vault.open()", sorted(calls))
         # A second path in the same call cannot come out of vault.open: it has
@@ -178,7 +199,7 @@ def single_door_check() -> None:
                f"{fn.name}() validates its second path through vault.check_path()",
                sorted(calls))
         ok("dataset" in args, f"{fn.name}() names its dataset explicitly", args)
-    ok(checked >= 14, "the single-door check covered the path-taking tools", checked)
+    ok(checked >= 15, "the single-door check covered the path-taking tools", checked)
 
 
 def lock_discipline_check() -> None:
@@ -1321,6 +1342,62 @@ def ship_scripts_check() -> None:
        "ship.sh never pushes a tag: it prints the release link instead")
 
 
+def instructions_check() -> None:
+    """The MCP `instructions` are the cheapest speed in the release: the client
+    reads them at connection time, so a chat stops spending its first round
+    trips on vault_status() and reference_guide(). Three ways to lose them
+    without anything failing: server.py stops handing them to FastMCP (the
+    service runs, the client gets nothing); the section is cut wrong (the
+    client gets something else); the text names a tool or a parameter that
+    does not exist (the client is sent to a door that is not there, which is
+    the round trip the instructions were meant to save). server.py cannot be
+    imported without fastmcp, so the wiring is read off its source."""
+    import vault as _v
+    src = (HERE / "server.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    fm = next((n for n in ast.walk(tree) if isinstance(n, ast.Call)
+               and isinstance(n.func, ast.Name) and n.func.id == "FastMCP"), None)
+    kw = {k.arg: k.value for k in fm.keywords} if fm else {}
+    ok(isinstance(kw.get("instructions"), ast.Name) and kw["instructions"].id == "INSTRUCTIONS",
+       "FastMCP is handed instructions=INSTRUCTIONS", ast.unparse(fm) if fm else "no FastMCP call")
+    assigned = [n for n in ast.walk(tree) if isinstance(n, (ast.Assign, ast.AnnAssign))
+                and any(isinstance(tg, ast.Name) and tg.id == "INSTRUCTIONS"
+                        for tg in (n.targets if isinstance(n, ast.Assign) else [n.target]))
+                and n.value is not None and "server_instructions(" in ast.unparse(n.value)]
+    ok(assigned, "INSTRUCTIONS comes from vault.server_instructions, cut from the guide — "
+                 "not a second text written in server.py")
+
+    guide = (HERE / "reference-guide.md").read_text(encoding="utf-8")
+    text = _v.server_instructions(guide)
+    model, cards = _v.split_guide(guide)
+    ok(text and text in model, "the instructions are a part of the model page, so a client "
+       "that ignores them still finds them in reference_guide()")
+    ok(not text.lstrip().startswith("#") and "\n## " not in text,
+       "the cut stops at the next section: nothing of the rest of the manual rides along",
+       text[:80])
+    # Paid on EVERY connection, so it is kept short; the number is the check's
+    # own, not a copy of anything else.
+    ok(len(text) < 2000, "the instructions stay short: they are read at every connection",
+       len(text))
+    # The rules the release is about must be in them, by the words a model
+    # will match: the tools that save round trips, and the two parameter names
+    # the container log shows models getting wrong.
+    for must in ("read_files", "edits", "`pattern`", "`old_text`", "BY NAME", "sha256"):
+        ok(must in text, f"the instructions say {must!r}")
+    # Every tool named in them exists: a backticked name that looks like a
+    # tool and is not one is a door that is not there.
+    named = set(re.findall(r"`([a-z_]+)(?:\(|`)", text))
+    toolish = {n for n in named if "_" in n or n in cards}
+    ghosts = sorted(n for n in toolish if n not in cards
+                    and n not in ("old_text", "new_text", "expected_sha256"))
+    ok(not ghosts, "every tool the instructions name is a real tool", ghosts)
+    ok({"read_files", "search", "edit_file", "append", "archive", "vault_status",
+        "reference_guide", "list_files"} <= toolish,
+       "and the check really read the names (it found the ones written there)",
+       sorted(toolish))
+
+
 def guide_signature_check() -> None:
     """The manual travels inside the image and is served by reference_guide(),
     so it is read by the caller far more often than the code is. A manual that
@@ -1483,7 +1560,17 @@ def main() -> int:
         (Path(root) / "Example Project" / "Other Project" / "note.md").write_text("homonym\n")
         os.makedirs(Path(root) / "Other Project")
         (Path(root) / "Other Project" / "b.md").write_text("elsewhere\n")
-        (Path(root) / "keys.txt").write_text(f"Example Project | {KEY}\n")
+        # Since 4.0.0 a dataset with no line is CLOSED, so the open one has to be
+        # declared open, with the bar and nothing after it.
+        REGISTRY = Path(root) / "keys.txt"
+        BASE_REGISTRY = f"Example Project | {KEY}\nOther Project |\n"
+        REGISTRY.write_text(BASE_REGISTRY)
+
+        def grant(name: str) -> None:
+            """Open a dataset the way its owner does: a line in the registry."""
+            with REGISTRY.open("a") as fh:
+                fh.write(f"{name} |\n")
+            time.sleep(0.02)
 
         v = VaultRoot(root)
         v.boot(0)
@@ -1494,6 +1581,9 @@ def main() -> int:
         ok(st["datasets"] == [{"name": "Example Project", "state": "locked"},
                               {"name": "Other Project", "state": "open"}],
            "dataset list and state", st["datasets"])
+        ok({d["name"]: d["state"] for d in st["datasets"]}.get("Other Project") == "open",
+           "`Other Project |` — the bar and nothing after it — declares the dataset OPEN",
+           st["datasets"])
 
         print("\n[2] protection — everything here MUST fail")
         must_fail("no key", lambda: v.open("Example Project", "log.md", ""))
@@ -1735,6 +1825,91 @@ def main() -> int:
         ok(ds.write_file("new.md", "hi\n", "new")["size"] == 3, "write_file new")
         must_fail('"new" on an existing file', lambda: ds.write_file("new.md", "x", "new"))
         must_fail("append over 64 KB", lambda: ds.append("log.md", "x" * 70_000))
+
+        print("\n[4e] fewer round trips: read_files, and edit_file with a list")
+        # Both exist for speed, and the speed is the client's: a call costs a
+        # millisecond here and seconds on the way there and back.
+        import vault as _vv
+        (Path(root) / "Example Project" / "multi.md").write_text("alpha\nbeta\ngamma\n")
+        ds._commit("setup multi")
+        asked = ["multi.md", "log.md", "missing.md", "01 Notes/a.md"]
+        try:
+            rf = ds.read_files(asked)
+        except VaultError as e:
+            # Caught here so the red names the defect instead of a traceback
+            # ending the suite: one missing path must not refuse the call.
+            ok(False, "a missing file is an error ENTRY, and the call survives it",
+               f"the whole call was refused: {e}")
+            rf = {"dataset": None, "count": 0, "errors": 0,
+                  "files": [{}, {}, {}, {}]}
+        ok(rf["dataset"] == "Example Project" and rf["count"] == 4 and rf["errors"] == 1,
+           "read_files: four asked, four answered, one of them an error",
+           (rf["count"], rf["errors"]))
+        ok([f.get("path") for f in rf["files"]] == asked, "read_files answers in the order asked",
+           [f.get("path") for f in rf["files"]])
+        one = ds.read_file("multi.md")
+        ok(rf["files"][0] == {k: one[k] for k in ("path", "size", "sha256", "content")},
+           "each entry is what read_file returns, minus the repeated dataset", rf["files"][0])
+        ok(set(rf["files"][2]) == {"path", "error"} and "no such file" in rf["files"][2].get("error", ""),
+           "a missing file is an error ENTRY, and the call survives it", rf["files"][2])
+        must_fail("read_files with no paths", lambda: ds.read_files([]))
+        must_fail("read_files over the path count",
+                  lambda: ds.read_files(["multi.md"] * (_vv.MAX_READ_FILES + 1)))
+        # The total obeys the single-read ceiling: batching is not a way round it.
+        half = Path(root) / "Example Project" / "half.md"
+        half.write_text("x" * (_vv.MAX_READ_BYTES // 2 + 10))
+        ds._commit("setup half")
+        ok(ds.read_files(["half.md"])["errors"] == 0, "one file under the ceiling reads")
+        must_fail("two that add up past the single-read ceiling are refused",
+                  lambda: ds.read_files(["half.md", "half.md"]))
+        half.unlink()
+        ds._commit("cleanup half")
+
+        sha = ds.read_file("multi.md")["sha256"]
+        n_before = len(ds.history("multi.md", 50)["entries"])
+        try:
+            r = ds.edit_file("multi.md", "", "", sha, edits=[
+                {"old_text": "alpha", "new_text": "one"},
+                {"old_text": "one\nbeta", "new_text": "two"}])
+        except VaultError as e:
+            # The second change only matches if the first was applied: a
+            # refusal here IS the defect, so it is named rather than raised.
+            ok(False, "edits apply in ORDER, each on the text the previous one left",
+               f"refused: {e}")
+            r = {"edits": None, "sha256": None}
+        ok(ds.read_file("multi.md")["content"] == "two\ngamma\n",
+           "edits apply in ORDER, each on the text the previous one left",
+           ds.read_file("multi.md")["content"])
+        ok(r["edits"] == 2 and r["sha256"] == ds.read_file("multi.md")["sha256"],
+           "one answer, one new sha, with the count of changes", r)
+        ok(len(ds.history("multi.md", 50)["entries"]) == n_before + 1,
+           "the whole list is ONE commit", (n_before, len(ds.history("multi.md", 50)["entries"])))
+        sha = ds.read_file("multi.md")["sha256"]
+        msg = refusal(lambda: ds.edit_file("multi.md", "", "", sha, edits=[
+            {"old_text": "two", "new_text": "three"}, {"old_text": "NOT THERE", "new_text": "x"}]))
+        ok(msg is not None and "edit 2 of 2" in msg,
+           "a change of the list that fails is refused BY NUMBER", msg)
+        ok(ds.read_file("multi.md")["sha256"] == sha,
+           "and nothing was written: all or nothing — the first change is not on disk")
+        msg = refusal(lambda: ds.edit_file("multi.md", "", "", sha, edits=[
+            {"old_string": "two", "new_string": "three"}]))
+        ok(msg is not None and "old_text" in msg,
+           "an edit with the field names of another editor is refused WITH the right ones", msg)
+        msg = refusal(lambda: ds.edit_file("multi.md", "", "", sha))
+        ok(msg is not None and "old_text" in msg,
+           "a call carrying neither old_text nor edits names what to send", msg)
+        must_fail("old_text and edits together are refused", lambda: ds.edit_file(
+            "multi.md", "two", "three", sha, edits=[{"old_text": "gamma", "new_text": "g"}]))
+        must_fail("an ambiguous change inside the list is refused", lambda: ds.edit_file(
+            "multi.md", "", "", sha, edits=[{"old_text": "\n", "new_text": "-"}]))
+        must_fail("more changes than the ceiling are refused", lambda: ds.edit_file(
+            "multi.md", "", "", sha,
+            edits=[{"old_text": "two", "new_text": "three"}] * (_vv.MAX_EDITS + 1)))
+        must_fail("a list on a stale sha is a CONFLICT like any edit", lambda: ds.edit_file(
+            "multi.md", "", "", "0" * 64, edits=[{"old_text": "two", "new_text": "three"}]))
+        ok(ds.read_file("multi.md")["sha256"] == sha, "after every refusal the file is as it was")
+        (Path(root) / "Example Project" / "multi.md").unlink()
+        ds._commit("cleanup multi")
 
         print("\n[4b] a refused append leaves NOTHING on disk")
         # A file a few bytes under the read ceiling, plus a block that crosses
@@ -2673,11 +2848,24 @@ def main() -> int:
 
         print("\n[10] dataset administration")
         c = v.create("Scratch")
-        ok(c["state"] == "open", "dataset created open")
+        ok(c["state"] == "closed", "a dataset is born CLOSED", c["state"])
+        ok("Scratch |" in c["note"], "and the answer says which line opens it", c["note"])
+        ok("Scratch |" not in REGISTRY.read_text(), "the service did not write the registry")
+        msg = refusal(lambda: v.open_by_name("Scratch", ""))
+        ok(msg is not None and "closed" in msg, "a closed dataset refuses every call", msg)
+        must_fail("a closed dataset refuses even a key", lambda: v.open_by_name("Scratch", KEY))
         for bad in ("scratch", "_reserved", ".hidden", "a/b", "..", ""):
             must_fail(f"create {bad!r}", lambda n=bad: v.create(n))
+        grant("Scratch")
         ds2 = v.open_by_name("Scratch", "")
-        ok(ds2.status()["dataset"] == "Scratch", "open dataset needs no key")
+        ok(ds2.status()["dataset"] == "Scratch", "`Scratch |` opens it: no key needed")
+        # A closed dataset cannot be dropped either, even with its manifest in hand.
+        v.create("Sealed")
+        sealed_m = Dataset(Path(root) / "Sealed", "Sealed").manifest("")["manifest_sha256"]
+        msg = refusal(lambda: v.drop("Sealed", sealed_m))
+        ok(msg is not None and "closed" in msg, "drop a CLOSED dataset is refused", msg)
+        ok((Path(root) / "Sealed").is_dir(), "and it is still there")
+        shutil.rmtree(Path(root) / "Sealed")
         must_fail("drop a dataset that has a key",
                   lambda: v.drop("Example Project", ds.manifest("")["manifest_sha256"]))
         must_fail("drop with a wrong manifest", lambda: v.drop("Scratch", "0" * 64))
@@ -2712,7 +2900,9 @@ def main() -> int:
         # dataset design turned down. Making it SAY so costs nothing, and the
         # difference is whether the log records a refusal or a page of
         # traceback under the word FAULT.
-        v.create("Doomed")
+        grant("Doomed")
+        ok(v.create("Doomed")["state"] == "open",
+           "a dataset whose line was written BEFORE it existed is born with that state")
         doomed = v.open_by_name("Doomed", "")
         v.drop("Doomed", doomed.manifest("")["manifest_sha256"])
         try:
@@ -2730,6 +2920,7 @@ def main() -> int:
         # reading. This is the only check that puts two operating-system
         # processes on the same file at the same time — which is the situation
         # flock exists for, and the one a single-process test cannot stage.
+        grant("Concurrent")
         v.create("Concurrent")
         cds = v.open_by_name("Concurrent", "")
         cds.write_file("log.md", "start\n", "new")
@@ -2784,12 +2975,44 @@ def main() -> int:
             ok(not preflight.is_placeholder(good), f"real value let through: {good[:34]!r}")
 
         print("\n[11] key registry hot reload")
-        kf = Path(root) / "keys.txt"
-        kf.write_text("# no keys\n"); time.sleep(0.02)
-        ok(v.status("t")["datasets"][0]["state"] == "open", "removing the line opens the dataset")
+        kf = REGISTRY
+        # From the BASE registry, not the file as it stands: the lines granted
+        # above name datasets since dropped, and would read as orphans here.
+        kept = BASE_REGISTRY.replace(f"Example Project | {KEY}\n", "")
+        kf.write_text(kept); time.sleep(0.02)
+        ok(v.status("t")["datasets"][0]["state"] == "closed",
+           "removing the line CLOSES the dataset — until 4.0.0 it opened it")
+        must_fail("closed: refused without the key", lambda: v.open("Example Project", "log.md", ""))
+        must_fail("closed: refused WITH the key", lambda: v.open("Example Project", "log.md", KEY))
+        kf.write_text(kept + "Example Project |\n"); time.sleep(0.02)
+        ok(v.status("t")["datasets"][0]["state"] == "open", "`name |` opens it")
         ok(v.open("Example Project", "log.md", "")[1] == "log.md", "no key needed now")
-        kf.write_text(f"Example Project | {KEY}\n"); time.sleep(0.02)
-        ok(v.status("t")["datasets"][0]["state"] == "locked", "putting the line back locks it")
+        kf.write_text(kept + f"Example Project  {KEY}\n"); time.sleep(0.02)
+        ok(v.status("t")["datasets"][0]["state"] == "closed",
+           "a line malformed at a hot reload leaves its dataset CLOSED, not open")
+        # The typo of 2026-10-30, replayed: the line carries another spelling.
+        TYPO_KEY = "TypoKey9"
+        kf.write_text(kept + f"Exampel Project | {TYPO_KEY}\n"); time.sleep(0.02)
+        st_typo = v.status("t")
+        ok(st_typo["datasets"][0]["state"] == "closed",
+           "a registry line with a typo in the name closes the dataset instead of opening it")
+        ok(st_typo.get("orphan_registry_lines") == ["Exampel Project"],
+           "and vault_status names the orphan line, as written", st_typo.get("orphan_registry_lines"))
+        ok("closed" in st_typo, "and says what closed means", sorted(st_typo))
+        import json as _json
+        ok(TYPO_KEY not in _json.dumps(st_typo),
+           "vault_status never carries a key, not even an orphan's",
+           f"{_json.dumps(st_typo).count(TYPO_KEY)} key(s) inside")
+        kf.rename(kf.with_suffix(".away")); time.sleep(0.02)
+        ok({d["state"] for d in v.status("t")["datasets"]} == {"closed"},
+           "with no registry at all every dataset is closed")
+        must_fail("no registry: the dataset that had a key is closed too",
+                  lambda: v.open("Example Project", "log.md", KEY))
+        kf.with_suffix(".away").rename(kf)
+        kf.write_text(BASE_REGISTRY); time.sleep(0.02)
+        ok(v.status("t")["datasets"][0]["state"] == "locked", "putting the key line back locks it")
+        ok("orphan_registry_lines" not in v.status("t") and "closed" not in v.status("t"),
+           "with every dataset accounted for, vault_status says nothing extra", sorted(v.status("t")))
         must_fail("and it blocks again", lambda: v.open("Example Project", "log.md", ""))
 
         print("\n[11b] the registry has ONE reader, and it never hands back a line")
@@ -2829,8 +3052,10 @@ def main() -> int:
                 ("a line with no separator is malformed, by NUMBER",
                  f"Example Project | {SECRET}\nnoseparator\n",
                  [("Example Project", SECRET)], [2]),
-                ("a name with no key is malformed too",
-                 f"Example Project |\n", [], [1]),
+                ("a name and the bar with nothing after it is an OPEN line since 4.0.0",
+                 f"Example Project |\n", [("Example Project", "")], []),
+                ("spaces after the bar are still nothing: open",
+                 f"Example Project |   \n", [("Example Project", "")], []),
                 ("a key with no name is malformed too",
                  f"| {SECRET}\n", [], [1]),
                 ("two malformed lines, both numbered",
@@ -2886,6 +3111,44 @@ def main() -> int:
            "and it says WHICH line, which is what you actually need to fix it",
            verdict.replace(SECRET, "<redacted>")[:120])
 
+        print("\n[11b2] the preflight counts the three states and names the closed")
+        # The line that said `1 orphan lines` and passed, while a dataset sat
+        # open, is the reason. Under 4.0.0 the typo closes the dataset, and the
+        # preflight has to SAY which one is closed next to the orphan.
+        pf_reg = Path(root) / "pf-keys.txt"
+        pf_reg.write_text(f"Example Project | {SECRET}\nOther Project |\nGhost Line | {SECRET}\n")
+        os.makedirs(Path(root) / "Unlisted")
+        try:
+            import importlib
+            import preflight as _pf
+            os.environ["VAULT_ROOT"] = str(root)
+            os.environ["KEYS_FILE"] = str(pf_reg)
+            importlib.reload(_pf)
+            _pf.c_keys()
+            _name, _passed, verdict = _pf.RESULTS[-1]
+            ok(_passed, "a registry with locked, open and orphan lines passes", verdict)
+            ok("1 locked, 1 open, 1 closed" in verdict,
+               "and counts the three states", verdict.replace(SECRET, "<redacted>"))
+            ok("Unlisted" in verdict, "and NAMES the dataset with no line, the closed one",
+               verdict.replace(SECRET, "<redacted>"))
+            ok("Ghost Line" in verdict, "and names the orphan line",
+               verdict.replace(SECRET, "<redacted>"))
+            ok(SECRET not in verdict, "and carries no key",
+               f"{verdict.count(SECRET)} secret(s) inside the message")
+            os.environ["KEYS_FILE"] = str(Path(root) / "no-such-registry.txt")
+            importlib.reload(_pf)
+            _pf.c_keys()
+            _name, _passed, verdict = _pf.RESULTS[-1]
+            ok(_passed and "every dataset is closed" in verdict,
+               "no registry at all does not block the boot, and says every dataset is closed",
+               verdict)
+        finally:
+            os.environ.pop("VAULT_ROOT", None)
+            os.environ.pop("KEYS_FILE", None)
+            if old_keys is not None:
+                os.environ["KEYS_FILE"] = old_keys
+            shutil.rmtree(Path(root) / "Unlisted")
+
         print("\n[11c] a directory that appears while the server runs is adopted at first touch")
         # Boot adopted what was on disk at startup; this one lands afterwards,
         # the way a folder copied over SMB does. Before the cure every call on
@@ -2894,6 +3157,10 @@ def main() -> int:
         os.makedirs(late)
         (late / "note.md").write_text("copied in while the server was up\n")
         ok(not (late / ".git").is_dir(), "no repository yet: boot has already run")
+        must_fail("a late arrival with no line is closed like any other",
+                  lambda: v.open_by_name("Late Arrival"))
+        ok(not (late / ".git").is_dir(), "and a refused call does not adopt it")
+        grant("Late Arrival")
         ds_late = v.open_by_name("Late Arrival")
         ok((late / ".git").is_dir(), "the first call, a read, gives it a repository")
         st_late = ds_late.status()
@@ -3065,6 +3332,9 @@ def main() -> int:
 
         print("\n[14c] the manual says what the code actually offers")
         guide_signature_check()
+
+        print("\n[14c2] the instructions a client receives are the manual's, and reach it")
+        instructions_check()
 
         print("\n[14d] the log level cannot kill the service at import")
         log_level_checks()
