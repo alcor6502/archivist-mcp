@@ -928,6 +928,17 @@ the right inset, the top gap and the bottom gap at once: `padding`, `pad_top`,
 `pad_bottom` and `title_size`, with the title band derived from the size
 instead of a constant 24. Same promise, same three documents rendered before
 and after to prove it: a card naming none of them draws exactly as before.
+
+**3.4.0** keeps every string inside the box of the block that draws it — a
+printed test page showed a card title through the top border, a big tick in
+the bar and a grid label under its neighbour, and a sweep found the same in
+every block that drew a line it never measured. Text is now placed by its
+ink, not its baseline, so `pad_top` and the gap under a gauge bar are clear
+space at any size. A title that does not fit is refused by name (a card
+title first shrinks, down to 75%); a descriptive label is cut with an
+ellipsis; a long note wraps. **The defaults move**, judged on paper: card
+title 11 (was 13), gauge bar 14 (was 18), ticks 7pt clear of the bar, and a
+stretched card keeps its content under its title instead of centring it.
 **Returns** `dataset · path · size · sha256 · commit · pages · strings_drawn · missing`
 
 ```

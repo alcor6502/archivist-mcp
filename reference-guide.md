@@ -161,10 +161,10 @@ Each is `{"type": …}`. **Every default below is what the renderer draws when
 the field is absent**, and a row marked *fixed* is written in the renderer:
 no field reaches it, so a page that needs it different needs a release.
 
-**`heading`** `{text}` — text required.
+**`heading`** `{text}` — text required, one line: **wider than its width is a refusal**.
 | field | default | notes |
 |---|---|---|
-| *face/size/tone* | *fixed* `B` / 13 / `navy` | ⚠ **identical to a card title and to a table title.** A `heading` reached for as "bold text inside a card" gives two lines of the same weight and no hierarchy — use `paragraph` with `face: "B"` |
+| *face/size/tone* | *fixed* `B` / 13 / `navy` | ⚠ **identical to a table title**, and bigger than a card title (11). A `heading` reached for as "bold text inside a card" outweighs the card's own title — use `paragraph` with `face: "B"` |
 | *height* | *fixed* 22 | |
 
 **`paragraph`** `{text, size, face, tone}` — text required, wraps to the width.
@@ -175,7 +175,8 @@ no field reaches it, so a page that needs it different needs a release.
 | `tone` | `black` | a tone or `#rrggbb` |
 | *line spacing* | *fixed* 1.35 × size, +4 at the foot | |
 
-**`note`** `{text, size, tone, align, italic}` — a footnote line.
+**`note`** `{text, size, tone, align, italic}` — a footnote; a long one wraps to
+the width (until 3.4.0 it ran off the page), and each line keeps `align`.
 | field | default | values |
 |---|---|---|
 | `size` | 6.5 | any |
@@ -203,34 +204,37 @@ value below. `cols` 2, at least 1 or a refusal.
 | field | default | notes |
 |---|---|---|
 | `tone` | `navy` | colours the value |
-| *label* | *fixed* `R` 6.6 `muted`, **upper-cased** | |
-| *value* | *fixed* `B` 11.5 | |
+| *label* | *fixed* `R` 6.6 `muted`, **upper-cased** | a label wider than its box is **cut with an ellipsis** |
+| *value* | *fixed* `B` 11.5 | a value wider than its box is a **refusal** — a number cut short is another number |
 | *box* | *fixed* height 28, gaps 8 × 6, radius 5, fill `#f6f8fa` | |
 
 **`gauge`** `{label, position, bands, ticks, marker, thickness, label_*}` —
 coloured bands with a marker. `position` 0-100 required, outside that a refusal.
 | field | default | values |
 |---|---|---|
-| `label` | none | the line above the bar; **upper-cased unless `label_upper` is false** |
+| `label` | none | the line above the bar; **upper-cased unless `label_upper` is false**. Wider than the gauge is a refusal |
 | `label_upper` | `true` | `false` keeps the case you sent |
 | `label_face` | `R` | `R` `B` `I` `BI` |
 | `label_size` | 6.6 | above 0, or a refusal |
 | `label_tone` | `muted` | a tone or `#rrggbb` |
-| `thickness` | 18 | the bar's height, above 0 or a refusal |
+| `thickness` | 14 | the bar's height, above 0 or a refusal (18 until 3.4.0) |
 | `bands` | one band to 100, `#f6f8fa` | `[{to, color}]`, `to` a percent, cumulative left to right |
 | `marker` | `accent` | a tone or `#rrggbb` — the line at `position` |
 | `ticks` | none | `[{at, text, align, face, size, tone}]`, `at` a percent |
 | tick `align` | `center` | `left` `center` `right` |
 | tick `face` / `size` / `tone` | `R` / 6.2 / `muted` | per tick, not per gauge |
 | *top gap* | *fixed* 8 | above the label |
-| *tick baseline* | *fixed* 9 under the bar | |
+| *tick gap* | *fixed* 7 | clear space from the bar's foot to the top of the tick's ink, **at any tick size** |
+| *tick at an end* | | slides inward so its ink stays within the bar's width, whatever its `align` |
 | *marker* | *fixed* 3 wide, 2 proud of the bar top and foot | |
 
 The block's height **follows what it draws**: `8 + label line + thickness +
 tick tail`, where the label line is 1.82 × `label_size` and the tail is
-`9 + 0.25 ×` the biggest tick's size. With every default and both a label and
-ticks that is 48.55 — it was a constant 46 until 3.2.0, which is why a block
-placed under a gauge used to be drawn on by the ticks.
+`7 + 0.978 ×` the biggest tick's size (its ink, 0.728 em, and room under the
+baseline, 0.25 em). With every default and both a label and ticks that is
+47.06. It was a constant 46 until 3.2.0, which is why a block placed under a
+gauge used to be drawn on by the ticks; and until 3.4.0 the ticks hung at a
+fixed baseline, so a big one rose into the bar.
 
 **`donut`** `{slices:[{label, value, color}], center, center_label}` — sectors
 drawn, with a legend and the percentages. The values must sum above zero; **a
@@ -240,7 +244,7 @@ refusal by name.
 |---|---|---|
 | slice `color` | `accent` | a tone or `#rrggbb` |
 | *ring* | *fixed* radius 42, hole 24, legend row 18 | |
-| *legend / percent* | *fixed* `R` 8 `desc` / `B` 9.5 `navy`, right | |
+| *legend / percent* | *fixed* `R` 8 `desc` / `B` 9.5 `navy`, right | a label longer than the room its percentage leaves is cut with an ellipsis |
 | *centre* | *fixed* `B` 10.5 `navy`, its label `R` 6.2 `muted` | |
 
 **`card`** `{title, blocks, padding, pad_top, pad_bottom, title_size}` — a
@@ -250,18 +254,19 @@ which is why a card holding a gauge read bottom-heavy — under the last line
 sits the gauge's own tick tail AND the padding.
 | field | default | which gap it governs |
 |---|---|---|
-| `title` | none | the line at the top; the band it adds is `title_size` × 12/13 |
-| `title_size` | 13 | the title's type size, and with it the band and the baseline. Above 0 or a refusal |
+| `title` | none | the line at the top; the band it adds is `title_size` × 1.19 (its ink and the room under it). **Wider than the insets, it shrinks to fit, down to 75% of `title_size`; past that a refusal** |
+| `title_size` | 11 | the title's type size (13 until 3.4.0), and with it the band. Above 0 or a refusal |
 | `padding` | 12 | the **left and right** inset, and the default of the two below |
-| `pad_top` | `padding` | the room above the content — **above the title when there is one**, so it moves the title too. Negative is a refusal |
+| `pad_top` | `padding` | the clear room above the content — **above the title's ink when there is one**, so it moves the title too. Negative is a refusal |
 | `pad_bottom` | `padding` | the room under the last block. Negative is a refusal |
-| *title face and tone* | *fixed* `B` `navy` | ⚠ at the default size, the same as `heading` and a table title |
+| *title face and tone* | *fixed* `B` `navy` | at 13 it is the same as `heading` and a table title |
 | *box* | *fixed* radius 7, border `#e3e8ee`, white fill | |
 
 So the head above the content is `pad_top` with no title, and `pad_top +
-title_size × 12/13` with one — 12 and 24 at the defaults, which are the two
-numbers that used to be written in the renderer. Stretched to a taller
-neighbour in a `row`, a card **centres** its content in the room left over.
+title_size × 1.19` with one — 12 and 25.08 at the defaults. Stretched to a
+taller neighbour in a `row`, a card keeps its content **under its title** and
+the spare room goes to the foot (until 3.4.0 the content was centred, which
+opened a hole under the title).
 
 
 **`row`** `{items:[blocks]}` — side by side, **equal widths**, gap 12; cards
@@ -272,7 +277,8 @@ stretched to the tallest. At least one item.
 **`checklist`** `{title, numbered, start, items:[{cols:[…]}]}` — numbered rows
 with a **drawn** box, columns sized on this sheet's content. `numbered` true,
 `start` 1. A one-column item wraps; a multi-column row that is wider than the
-page is a refusal. Fixed: box 10.2, row 22.7, text `R` 11, title `B` 12.
+page is a refusal, and so is a title wider than the width. Fixed: box 10.2,
+row 22.7, text `R` 11, title `B` 12.
 
 ### Table geometry, which is where the refusals come from
 
@@ -302,6 +308,10 @@ others `{text, sub, tone, bold}` or `{tag, style}` / `{tag, bg, fg}`.
   A cell carrying a `sub` spends both on the same line, plus 4 between them.
   Landscape A4 gives 785.9pt to spend instead, so the same fraction buys ~45%
   more.
+- **The table title must fit the width, and a section title the first column**
+  (it shares the line with the column labels): past that, a refusal. The
+  section subtitle, after the title on the same line, is cut with an ellipsis
+  at the first column's edge.
 - Fixed: section title `BI` 10.5 `navy`, its subtitle `R` 8 `muted`, column
   labels `B` 6.8 `muted` upper-cased, the name `B` 8.6, its description `R` 8
   `desc`, a bold cell `B` 8.6, a plain one `R` 8.4, a `sub` `R` 6.8 `muted`,
@@ -321,8 +331,8 @@ Every block may sit inside a `card` or a `row`, including another `card` or
 ### Sizes at a glance, because they are the hierarchy
 
 `title.text` `B` 19 · `title.value` `B` 21 `navy` · subtitle `R` 8.5 `muted` ·
-badge `B` 8.5 `red` · **`heading` = card title = table title, all `B` 13
-`navy`** (only the card's is settable, with `title_size`) · checklist title `B` 12 · donut centre `B` 10.5 · table section
+badge `B` 8.5 `red` · **`heading` = table title, `B` 13 `navy`** · checklist
+title `B` 12 · **card title `B` 11 `navy`** (settable, with `title_size`) · donut centre `B` 10.5 · table section
 title `BI` 10.5 · grid value `B` 11.5 · checklist text `R` 11 · `paragraph`
 9.5 · stats value `B` 9.5 · table cell `B` 8.6 bold, `R` 8.4 plain, `sub` 6.8
 · footer `R` 8 · stats label 7.8 · table column label 6.8 · gauge label 6.6 ·

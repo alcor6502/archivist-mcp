@@ -16,6 +16,7 @@ compatible signature. It is the gap the runtime tests cannot cover.
 from __future__ import annotations
 import ast
 import inspect
+import json
 import os
 import re
 import shutil
@@ -1969,14 +1970,14 @@ def main() -> int:
         # [g2] measure() follows the content instead of standing still: each
         # part of the drawing accounts for its own height.
         _base = _declared(_GAUGE)
-        ok(_base == _rm.Gauge.TOP_GAP + 12 + 18 + _rm.Gauge.TICK_DROP + _rm.Gauge.TICK_SIZE * _rm.Gauge.DESCENT,
+        _tail = _rm.Gauge.TICK_GAP + _rm.Gauge.TICK_SIZE * (_rm.ASCENT + _rm.Gauge.DESCENT)
+        ok(abs(_base - (_rm.Gauge.TOP_GAP + 12 + _rm.Gauge.THICKNESS + _tail)) < 1e-9,
            "the declared height is the sum of what is drawn: gap, label, bar, tick tail", _base)
-        ok(_declared(dict(_GAUGE, thickness=30)) == _base + 12,
+        ok(abs(_declared(dict(_GAUGE, thickness=30)) - (_base + 30 - _rm.Gauge.THICKNESS)) < 1e-9,
            "a thicker bar makes the block taller by exactly the thickness it added")
         ok(_declared({k: v for k, v in _GAUGE.items() if k != "label"}) == _base - 12,
            "a gauge with no label does not reserve the label's line")
-        ok(_declared({k: v for k, v in _GAUGE.items() if k != "ticks"})
-           == _base - _rm.Gauge.TICK_DROP - _rm.Gauge.TICK_SIZE * _rm.Gauge.DESCENT,
+        ok(abs(_declared({k: v for k, v in _GAUGE.items() if k != "ticks"}) - (_base - _tail)) < 1e-9,
            "a gauge with no ticks does not reserve their tail")
         ok(_declared(dict(_GAUGE, ticks=[{"at": 50, "text": "x", "size": 12}])) > _base,
            "the tail is measured on the BIGGEST tick, not on the default size")
@@ -1991,7 +1992,8 @@ def main() -> int:
            "the label still draws upper-case, R 6.6 muted", _lab)
         ok(len(_tk) == 2 and all(t[4:7] == ("R", 6.2, "muted") and t[7] == "center" for t in _tk),
            "the ticks still draw R 6.2 muted, centred", _tk)
-        ok(len(_bar) == 2 and all(b[4] == 18 for b in _bar), "the bar is still 18pt thick", _bar)
+        ok(len(_bar) == 2 and all(b[4] == 14 for b in _bar),
+           "the bar is 14pt thick by default (18 until 3.4.0, judged too heavy on a printed page)", _bar)
 
         # [g4] and every one of them is now reachable from the call.
         _o = _ops([dict(_GAUGE, label_upper=False, label_face="B", label_size=11, label_tone="navy",
@@ -2069,14 +2071,14 @@ def main() -> int:
         # fields, not a value copied from a run.
         _o = _ops([dict(_CARD, padding=20, pad_top=30, pad_bottom=9, title_size=26)])
         _bx, _by, _bw, _bh, _btop = _card_box(_o)
-        _head = 30 + 26 * 12 / 13                      # pad_top + what the title adds
+        _head = 30 + 26 * (_rm.ASCENT + 6 / 13)        # pad_top + the title's ink + the room under it
         _para = 1 * 10 * 1.35 + 4                      # one line at size 10
         ok(abs(_bh - (_head + _para + 9)) < 0.01,
            "the box is exactly pad_top + title band + content + pad_bottom", (_bh, _head + _para + 9))
         _ttl = [o for o in _o if o[0] == "text" and o[3] == "T"][0]
         _txt = [o for o in _o if o[0] == "text" and o[3] == "x"][0]
-        ok(abs(_ttl[1] - (_bx + 20)) < 0.01 and abs(_ttl[2] - (_btop - 30 - 26 * 6 / 13)) < 0.01,
-           "the title sits at the padding, its baseline under pad_top and scaled to title_size", _ttl)
+        ok(abs(_ttl[1] - (_bx + 20)) < 0.01 and abs(_ttl[2] - (_btop - 30 - 26 * _rm.ASCENT)) < 0.01,
+           "the title sits at the padding, its INK starting exactly pad_top under the border", _ttl)
         ok(abs(_txt[1] - (_bx + 20)) < 0.01 and abs(_txt[2] - (_btop - _head - 10)) < 0.01,
            "the content starts at the padding, under the whole head", _txt)
         ok(abs(_ttl[5] - 26) < 0.01, "the title is drawn at title_size", _ttl[5])
@@ -2087,11 +2089,12 @@ def main() -> int:
         _bx, _by, _bw, _bh, _btop = _card_box(_o)
         _ttl = [o for o in _o if o[0] == "text" and o[3] == "T"][0]
         _txt = [o for o in _o if o[0] == "text" and o[3] == "x"][0]
-        ok(abs(_ttl[2] - (_btop - 18)) < 0.01 and _ttl[5] == 13 and abs(_ttl[1] - (_bx + 12)) < 0.01,
-           "a card naming nothing still draws its title B 13 at 12 in and 18 down", _ttl)
-        ok(abs(_txt[2] - (_btop - 24 - 10)) < 0.01,
-           "and its content still starts 24 below the top: the old TITLE_H, now derived", _txt)
-        ok(abs(_bh - (24 + _para + 12)) < 0.01, "and the box is still 24 + content + 12", _bh)
+        _dhead = 12 + 11 * (_rm.ASCENT + 6 / 13)       # 3.4.0: title 11, placed by its ink
+        ok(abs(_ttl[2] - (_btop - 12 - 11 * _rm.ASCENT)) < 0.01 and _ttl[5] == 11 and abs(_ttl[1] - (_bx + 12)) < 0.01,
+           "a card naming nothing draws its title B 11 at 12 in, its ink 12 under the border", _ttl)
+        ok(abs(_txt[2] - (_btop - _dhead - 10)) < 0.01,
+           "and its content starts under the whole head", _txt)
+        ok(abs(_bh - (_dhead + _para + 12)) < 0.01, "and the box is head + content + 12", _bh)
         _o = _ops([{k: v for k, v in _CARD.items() if k != "title"}])
         _bx, _by, _bw, _bh, _btop = _card_box(_o)
         ok(abs(_bh - (12 + _para + 12)) < 0.01,
@@ -2103,6 +2106,199 @@ def main() -> int:
                   lambda: ds.render_pdf("", {"blocks": [dict(_CARD, pad_bottom=-1)]}, "new"))
         must_fail("a card title_size of 0 is refused by name",
                   lambda: ds.render_pdf("", {"blocks": [dict(_CARD, title_size=0)]}, "new"))
+
+        print("\n[5b-quater] ink — every string drawn stays inside the box of the block that drew it")
+        # 3.4.0. The checks above prove each block DECLARES the height it draws;
+        # none of them asked whether the TEXT stays inside the block. A printed
+        # test page showed four ways it did not — a card title through the top
+        # border and past the right inset, a 14pt tick into the bar, a grid label
+        # under the next box and out of the card — and a sweep found the same in
+        # every block that draws a line it never measured: heading, note, donut
+        # legend, table and checklist titles, section title and subtitle, ticks
+        # at the ends. So the check is general, not one per block: every string
+        # goes through _Page.text, every block through draw(), and the ink of the
+        # one must sit in the box of the other.
+        _ink_bad = []
+        _ink_stack = []
+        _ink_text = _rm._Page.text
+        _ink_draws = {}
+
+        def _ink_rec(self, x, y, s, face="R", size=9, tone="black", align="left"):
+            if _ink_stack:
+                w = self.width(str(s), face, size)
+                x0 = x - w if align == "right" else x - w / 2 if align == "center" else x
+                what, bx, btop, bw, bh = _ink_stack[-1]
+                over = max(bx - x0, x0 + w - bx - bw, y + _rm.ASCENT * size - btop,
+                           btop - bh - (y - 0.212 * size))
+                if over > 0.01:
+                    _ink_bad.append(f"{what}: {str(s)[:30]!r} out by {over:.1f}pt")
+            return _ink_text(self, x, y, s, face, size, tone, align)
+
+        def _ink_arm():
+            _rm._Page.text = _ink_rec
+            for _cls in _rm._TYPES.values():
+                if "draw" not in _cls.__dict__:
+                    continue
+                _ink_draws[_cls] = _cls.__dict__["draw"]
+
+                def _wrapped(self, p, x, top, width, *a, _orig=_cls.__dict__["draw"], **k):
+                    h = k.get("height") or self.measure(p, width)
+                    _ink_stack.append((self.what, x, top, width, h))
+                    try:
+                        return _orig(self, p, x, top, width, *a, **k)
+                    finally:
+                        _ink_stack.pop()
+                _cls.draw = _wrapped
+            # A table at the top level flows: the page loop draws its sections
+            # one by one through draw_section(), never through draw(). Missed
+            # here, every top-level table drew unwatched — found when the
+            # injection that stops cutting a section subtitle came back GREEN.
+            _ink_draws["section"] = _rm.Table.draw_section
+
+            def _sec(self, p, x, top, width, s, _orig=_rm.Table.draw_section):
+                _ink_stack.append((f"{self.what} section {_str_(s.get('title'))!r}", x, top, width,
+                                   self.section_height(s)))
+                try:
+                    return _orig(self, p, x, top, width, s)
+                finally:
+                    _ink_stack.pop()
+            _rm.Table.draw_section = _sec
+
+        def _str_(v):
+            return "" if v is None else str(v)
+
+        def _ink_disarm():
+            _rm._Page.text = _ink_text
+            for _cls, _d in _ink_draws.items():
+                if _cls == "section":
+                    _rm.Table.draw_section = _d
+                else:
+                    _cls.draw = _d
+            _ink_draws.clear()
+
+        def _ink(doc):
+            _ink_bad.clear()
+            _ink_arm()
+            try:
+                ds.render_pdf("", doc, "new")
+            finally:
+                _ink_disarm()
+            return sorted(set(_ink_bad))
+
+        _LONG = "Una stringa molto lunga che nessuna colonna stretta potrebbe mai contenere per intero"
+        _STRESS = {"title": {"text": "stress"}, "blocks": [
+            {"type": "row", "items": [
+                {"type": "note", "text": _LONG, "align": "right"},
+                {"type": "donut", "slices": [{"label": _LONG, "value": 1}, {"label": "b", "value": 2}], "center": "100%"},
+                {"type": "card", "title": "Beta LDL — soglia 20 un/dL", "blocks": [
+                    {"type": "grid", "items": [{"label": _LONG, "value": "1"}, {"label": "x", "value": "2"}]}]}]},
+            {"type": "table", "title": "t", "columns": [{"label": ""}, {"label": "V", "width": 0.3}],
+             "sections": [{"title": "Sezione", "subtitle": _LONG + _LONG, "rows": [{"cells": [{"text": "a"}, {"text": "1"}]}]}]},
+            {"type": "row", "items": [
+                {"type": "card", "title": "Card con margini propri", "title_size": 20, "padding": 30, "pad_top": 4,
+                 "blocks": [dict(_GAUGE, thickness=30, ticks=[{"at": 0, "text": "centrato a zero"},
+                                                              {"at": 70, "text": "70", "size": 14},
+                                                              {"at": 100, "text": "centrato a cento"}])]},
+                {"type": "spacer"}]}]}
+
+        # [i1] THE check, on the two documents shaped like the live dashboards
+        # and on a page built to push every block that adapts instead of refusing.
+        for _fx in ("dashboard", "quadro"):
+            _fdoc = json.loads((HERE / "scripts" / "fixtures" / f"{_fx}.json").read_text(encoding="utf-8"))
+            _bad = _ink(_fdoc)
+            ok(not _bad, f"fixture {_fx}: every string drawn stays inside its block", _bad[:3])
+        _bad = _ink(_STRESS)
+        ok(not _bad, "the stress page: long labels, notes, subtitles and edge ticks all stay inside", _bad[:3])
+        # and the harness must see a defect when there is one, or the greens
+        # above are green for absence of work: a paragraph drawn 50pt left of
+        # its box has to come out named.
+        _par_draw = _rm.Paragraph.__dict__["draw"]
+        _rm.Paragraph.draw = lambda self, p, x, top, width: _par_draw(self, p, x - 50, top, width)
+        try:
+            _probe = _ink({"blocks": [{"type": "paragraph", "text": "fuori"}]})
+        finally:
+            _rm.Paragraph.draw = _par_draw
+        ok(any("blocks[0]" in b and "fuori" in b for b in _probe),
+           "the harness names a string drawn outside its block", _probe)
+
+        # [i1b] the section subtitle shares its line with the column labels: it
+        # must end before the first of them, not merely inside the table.
+        _o = _ops([_STRESS["blocks"][1]])
+        _sub = [o for o in _o if o[0] == "text" and o[3].startswith("— ")][0]
+        _vlab = [o for o in _o if o[0] == "text" and o[3] == "V"][0]
+        from reportlab.pdfbase.pdfmetrics import stringWidth as _sw
+        _sub_end = _sub[1] + _sw(_sub[3], _rm._fonts()["R"], 8)
+        _col0 = _rm.Table(_STRESS["blocks"][1], "t")._xs(28, 595.2756 - 56)[0]
+        ok(_sub_end <= _col0 - 6 + 0.01,
+           "a section subtitle ends before the first column label, not on top of it",
+           (round(_sub_end, 1), round(_col0, 1)))
+
+        # [i2] a tick of any size keeps TICK_GAP of clear space under the bar.
+        _o = _ops([dict(_GAUGE, ticks=[{"at": 50, "text": "70", "size": 14}])])
+        _bar_foot = min(o[2] for o in _o if o[0] == "rect" and o[5] in ("#2e7d32", "#c62828"))
+        _t = [o for o in _o if o[0] == "text" and o[3] == "70"][0]
+        ok(abs(_bar_foot - (_t[2] + _rm.ASCENT * 14) - _rm.Gauge.TICK_GAP) < 0.01,
+           "a 14pt tick's ink starts exactly TICK_GAP under the bar (until 3.4.0 it rose into it)",
+           _bar_foot - (_t[2] + _rm.ASCENT * 14))
+
+        # [i3] a card title too wide for its insets shrinks to fit; past
+        # TITLE_FIT_MIN it is refused, naming the title.
+        _narrow = lambda t: {"type": "row", "items": [{"type": "card", "title": t, "blocks": [
+            {"type": "paragraph", "text": "x"}]}] + [{"type": "spacer"}] * 3}
+        _o = _ops([_narrow("Un titolo un po' lungo")])
+        _ttl = [o for o in _o if o[0] == "text" and o[3] == "Un titolo un po' lungo"][0]
+        ok(_ttl[5] < 11 and _ttl[5] >= 11 * _rm.Card.TITLE_FIT_MIN,
+           "a card title wider than its insets is drawn smaller, within TITLE_FIT_MIN", _ttl[5])
+        try:
+            ds.render_pdf("", {"blocks": [_narrow(_LONG)]}, "new")
+            ok(False, "a card title that cannot fit even shrunk is refused")
+        except VaultError as _e:
+            ok("card title" in str(_e) and "Una stringa" in str(_e),
+               f"a card title that cannot fit even shrunk is refused by name: {str(_e)[:90]}")
+
+        # [i4] stretched to a taller neighbour, a card keeps its content under
+        # the title: until 3.4.0 it was centred, and opened a hole.
+        _o = _ops([{"type": "row", "items": [
+            {"type": "card", "title": "A", "blocks": [{"type": "paragraph", "text": "corto", "size": 10}]},
+            {"type": "card", "title": "B", "blocks": [{"type": "paragraph", "text": "riga " * 60, "size": 10}]}]}])
+        _ca = [o for o in _o if o[0] == "rect" and o[5] == "#ffffff"][0]
+        _short = [o for o in _o if o[0] == "text" and o[3] == "corto"][0]
+        ok(abs(_short[2] - (_ca[2] + _ca[4] - (12 + 11 * (_rm.ASCENT + 6 / 13)) - 10)) < 0.01,
+           "a stretched card's content starts right under its title", _short[2])
+
+        # [i5] the lines that are titles are refused when they do not fit,
+        # each naming what it is and the overrun.
+        for _kind, _doc in (
+                ("heading", {"blocks": [{"type": "heading", "text": _LONG * 2}]}),
+                ("table title", {"blocks": [{"type": "table", "title": _LONG * 2, "columns": [{"label": ""}, {"label": "V", "width": 0.2}],
+                                             "sections": [{"title": "s", "rows": [{"cells": [{"text": "a"}, {"text": "1"}]}]}]}]}),
+                ("section title", {"blocks": [{"type": "table", "columns": [{"label": ""}, {"label": "V", "width": 0.8}],
+                                               "sections": [{"title": _LONG, "rows": [{"cells": [{"text": "a"}, {"text": "1"}]}]}]}]}),
+                ("checklist title", {"blocks": [{"type": "checklist", "title": _LONG * 2, "items": [{"cols": ["a"]}]}]}),
+                ("gauge label", {"blocks": [{"type": "row", "items": [dict(_GAUGE, label=_LONG)] + [{"type": "spacer"}] * 2}]}),
+                ("grid value", {"blocks": [{"type": "grid", "cols": 6, "items": [{"label": "a", "value": "1234567890123"}]}]})):
+            try:
+                ds.render_pdf("", _doc, "new")
+                ok(False, f"a {_kind} that does not fit is refused")
+            except VaultError as _e:
+                ok(_kind in str(_e) and "wider than" in str(_e),
+                   f"a {_kind} that does not fit is refused by name: {str(_e)[:80]}")
+
+        # [i6] a long note wraps instead of running off the page, and a short
+        # one is the same single line it always was.
+        _o = _ops([{"type": "note", "text": _LONG * 3}])
+        _nl = [o for o in _o if o[0] == "text" and o[3] != "g" and o[5] == 6.5]
+        ok(len(_nl) >= 2, "a long note wraps onto several lines", len(_nl))
+        _o = _ops([{"type": "note", "text": "breve"}])
+        ok(len([o for o in _o if o[0] == "text" and o[3] == "breve"]) == 1,
+           "a short note is still one line")
+
+        # [i7] ASCENT is written once in render.py because measure() runs with
+        # no canvas: the copy has to agree with the four font files.
+        from reportlab.pdfbase import pdfmetrics as _pm
+        _asc = {f: _pm.getFont(n).face.ascent / 1000 for f, n in _rm._fonts().items()}
+        ok(all(abs(a - _rm.ASCENT) < 1e-9 for a in _asc.values()),
+           "ASCENT is the ascent the four font files declare", _asc)
 
         print("\n[5c] render_report — schede already in the vault, bound into one PDF")
         # Every check here goes through the SAME door the tool uses, and the

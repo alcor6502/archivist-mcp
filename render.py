@@ -55,6 +55,15 @@ TAG_STYLES = {"t-ord": ("#f3e6df", "#9a4a1f"), "t-qual": ("#e0efe6", "#1a7f52"),
 LINE, BG, SEP = "#e3e8ee", "#f6f8fa", "#cdd8e2"
 GAP = 12    # the one unit of breathing room: between cards, around the stats band, under the title rule
 
+# How far the ink of a line rises above its baseline, in ems: the ascent of
+# Liberation Sans, the same in all four faces. Until 3.4.0 text was placed by
+# its BASELINE with offsets tuned for one size, so a bigger title rose through
+# the top of its card and a bigger tick rose into the bar above it: the room
+# a field promised was eaten by the type. Placing text by its ink needs this
+# number in measure(), which runs without a canvas — so it is written here,
+# and the suite reads it back out of the four font files.
+ASCENT = 0.72802734375
+
 
 class RenderError(Exception):
     """The document is wrong: unknown block, missing field, a section taller
@@ -127,6 +136,16 @@ class _Page:
     def width(self, s: str, face: str, size: float) -> float:
         return self.c.stringWidth(s, self.f[face], size)
 
+    def clip(self, s: str, face: str, size: float, width: float) -> str:
+        """`s` as it fits in `width`: whole, or cut with an ellipsis. For the
+        small muted labels only, where a cut word still says what the box is;
+        never for a value, which is refused instead."""
+        if self.width(s, face, size) <= width:
+            return s
+        while s and self.width(s + "…", face, size) > width:
+            s = s[:-1]
+        return s.rstrip() + "…"
+
     def text(self, x, y, s, face="R", size=9, tone="black", align="left"):
         s = str(s)
         self.drawn.append(s)
@@ -185,6 +204,16 @@ def _str(v) -> str:
     return "" if v is None else str(v)
 
 
+def _fits(p, what: str, kind: str, s: str, face: str, size: float, room: float) -> None:
+    """A title-like line that does not fit its room is the caller's to fix:
+    refused by name with the overrun, never drawn into its neighbour. Until
+    3.4.0 none of these was measured, and they all ran out of their box."""
+    w = p.width(s, face, size)
+    if w > room:
+        raise RenderError(f"{what}: {kind} {s!r} is {w - room:.0f}pt wider than its room "
+                          f"({room:.0f}pt): shorten it")
+
+
 class _Block:
     keeps_together = True     # a block never splits across pages unless it says so
 
@@ -214,7 +243,9 @@ class Heading(_Block):
         return self.H
 
     def draw(self, p, x, top, width):
-        p.text(x, top - 14, _req(self.spec, "text", self.what), "B", self.SIZE, "navy")
+        text = _str(_req(self.spec, "text", self.what))
+        _fits(p, self.what, "heading", text, "B", self.SIZE, width)
+        p.text(x, top - 14, text, "B", self.SIZE, "navy")
 
 
 class Paragraph(_Block):
@@ -235,16 +266,28 @@ class Paragraph(_Block):
 
 
 class Note(_Block):
+    """A footnote. Until 3.4.0 it was one line whatever its length, and a long
+    one ran off the page; it now wraps like a paragraph, and a note that fits
+    on one line draws exactly as before."""
+    LEAD = 1.35
+
+    def _lines(self, p, width):
+        size = float(self.spec.get("size", 6.5))
+        face = "I" if self.spec.get("italic", True) else "R"
+        return p.wrap(_req(self.spec, "text", self.what), face, size, width), face, size
+
     def measure(self, p, width):
-        return float(self.spec.get("size", 6.5)) + 8
+        lines, _, size = self._lines(p, width)
+        return size + 8 + (len(lines) - 1) * size * self.LEAD
 
     def draw(self, p, x, top, width):
-        size = float(self.spec.get("size", 6.5))
+        lines, face, size = self._lines(p, width)
         align = self.spec.get("align", "left")
         xx = {"right": x + width, "center": x + width / 2}.get(align, x)
-        p.text(xx, top - size - 2, _req(self.spec, "text", self.what),
-               "I" if self.spec.get("italic", True) else "R", size,
-               self.spec.get("tone", "red"), align)
+        y = top - size - 2
+        for ln in lines:
+            p.text(xx, y, ln, face, size, self.spec.get("tone", "red"), align)
+            y -= size * self.LEAD
 
 
 class Rule(_Block):
@@ -304,8 +347,15 @@ class Stats(_Block):
 
 
 class Grid(_Block):
-    """Small stat boxes in columns: label above, value below."""
+    """Small stat boxes in columns: label above, value below.
+
+    Until 3.4.0 neither was measured against its box: a long label ran under
+    the next box, or out of the card when it was the last one. Now the label
+    is cut with an ellipsis — it names the box, a cut word still does — and a
+    value wider than its box is a refusal, because a number cut short is a
+    different number."""
     BOX_H, GAP_X, GAP_Y = 28, 8, 6
+    INSET = 8          # text from the box's left edge, and room kept on its right
 
     def _rows(self):
         items = _req(self.spec, "items", self.what)
@@ -326,9 +376,16 @@ class Grid(_Block):
             y -= self.BOX_H
             for i, it in enumerate(row):
                 xx = x + i * (bw + self.GAP_X)
+                room = bw - 2 * self.INSET
+                value = _str(it.get("value"))
+                if p.width(value, "B", 11.5) > room:
+                    raise RenderError(
+                        f"{self.what}: grid value {value!r} is {p.width(value, 'B', 11.5) - room:.0f}pt "
+                        f"wider than its box ({room:.0f}pt): fewer columns, or a shorter value")
                 p.rect(xx, y, bw, self.BOX_H, fill=BG, radius=5)
-                p.text(xx + 8, y + 18, _str(it.get("label")).upper(), "R", 6.6, "muted")
-                p.text(xx + 8, y + 5, _str(it.get("value")), "B", 11.5, it.get("tone", "navy"))
+                p.text(xx + self.INSET, y + 18, p.clip(_str(it.get("label")).upper(), "R", 6.6, room),
+                       "R", 6.6, "muted")
+                p.text(xx + self.INSET, y + 5, value, "B", 11.5, it.get("tone", "navy"))
             y -= self.GAP_Y
 
 
@@ -342,14 +399,20 @@ class Gauge(_Block):
     The two label offsets are held in EMS of the label's own size, so a bigger
     label keeps its proportions instead of sitting in a box measured for 6.6pt.
     At the default size they are exactly the 5 and 12 that used to be written
-    here as bare numbers — that is the arithmetic below, not a coincidence."""
+    here as bare numbers — that is the arithmetic below, not a coincidence.
+
+    3.4.0, judged on a printed page: the bar was 18 and the ticks hung at a
+    fixed baseline 9 under it, which left 4.5pt between bar and digits at the
+    default size and NONE at 14pt, where the digits rose into the bar. The bar
+    is now 14, and TICK_GAP is the clear space between the bar's foot and the
+    top of the tick's INK, whatever its size: 7, so the digits stand apart."""
     TOP_GAP = 8
     LABEL_SIZE, LABEL_FACE, LABEL_TONE = 6.6, "R", "muted"
     LABEL_DROP = 5.0 / LABEL_SIZE      # the label baseline under the top gap
     LABEL_LEAD = 12.0 / LABEL_SIZE     # the line the label takes up
-    THICKNESS = 18
+    THICKNESS = 14
     TICK_SIZE, TICK_FACE, TICK_TONE = 6.2, "R", "muted"
-    TICK_DROP = 9                      # the tick baseline under the bar
+    TICK_GAP = 7                       # clear space from the bar's foot to the tick's ink
     DESCENT = 0.25                     # room under a baseline for the descenders
 
     def _shape(self):
@@ -367,7 +430,7 @@ class Gauge(_Block):
         ticks = spec.get("ticks") or []
         # The tail is measured on the BIGGEST tick, not on the default: one
         # tick asking for 12pt would otherwise hang out of the measured box.
-        tail = (self.TICK_DROP + max(float(t.get("size", self.TICK_SIZE)) for t in ticks) * self.DESCENT
+        tail = (self.TICK_GAP + max(float(t.get("size", self.TICK_SIZE)) for t in ticks) * (ASCENT + self.DESCENT)
                 if ticks else 0.0)
         head = label_size * self.LABEL_LEAD if label else 0.0
         return label, label_size, thickness, ticks, head, tail
@@ -384,9 +447,13 @@ class Gauge(_Block):
         label, label_size, thickness, ticks, head, _ = self._shape()
         y = top - self.TOP_GAP
         if label:
-            p.text(x, y - label_size * self.LABEL_DROP,
-                   label.upper() if spec.get("label_upper", True) else label,
-                   self._face(spec.get("label_face", self.LABEL_FACE)), label_size,
+            text = label.upper() if spec.get("label_upper", True) else label
+            face = self._face(spec.get("label_face", self.LABEL_FACE))
+            if p.width(text, face, label_size) > width:
+                raise RenderError(
+                    f"{self.what}: gauge label {text!r} is {p.width(text, face, label_size) - width:.0f}pt "
+                    f"wider than the gauge ({width:.0f}pt): shorten it")
+            p.text(x, y - label_size * self.LABEL_DROP, text, face, label_size,
                    spec.get("label_tone", self.LABEL_TONE))
             y -= head
         bar_y = y - thickness
@@ -399,9 +466,15 @@ class Gauge(_Block):
         p.rect(x + width * pos - 1.5, bar_y - 2, 3, thickness + 4, fill=spec.get("marker", "accent"))
         for t in ticks:
             at = float(t.get("at", 0)) / 100
-            p.text(x + width * at, bar_y - self.TICK_DROP, _str(t.get("text")),
-                   self._face(t.get("face", self.TICK_FACE)), float(t.get("size", self.TICK_SIZE)),
-                   t.get("tone", self.TICK_TONE), t.get("align", "center"))
+            size, text = float(t.get("size", self.TICK_SIZE)), _str(t.get("text"))
+            face, align = self._face(t.get("face", self.TICK_FACE)), t.get("align", "center")
+            # A tick near an end slides inward instead of hanging past the bar:
+            # its ink is kept between x and x + width, whatever its alignment.
+            w = p.width(text, face, size)
+            lead = {"right": w, "center": w / 2}.get(align, 0.0)
+            tx = min(max(x + width * at, x + lead), x + width - (w - lead))
+            p.text(tx, bar_y - self.TICK_GAP - ASCENT * size, text, face, size,
+                   t.get("tone", self.TICK_TONE), align)
 
 
 class Donut(_Block):
@@ -443,9 +516,13 @@ class Donut(_Block):
                 p.text(cx, cy - 9, _str(self.spec["center_label"]), "R", 6.2, "muted", "center")
         lx, ly = cx + self.R + 16, top - 12
         for s in slices:
+            pct = "%.1f%%" % (float(s.get("value", 0)) / total * 100)
+            # The label ran under its own percentage until 3.4.0: it gets the
+            # room the percentage leaves, and an ellipsis past that.
+            room = x + width - (lx + 14) - p.width(pct, "B", 9.5) - 6
             p.rect(lx, ly, 8, 8, fill=s.get("color", "accent"), radius=2)
-            p.text(lx + 14, ly + 1, _str(s.get("label")), "R", 8, "desc")
-            p.text(x + width, ly + 1, "%.1f%%" % (float(s.get("value", 0)) / total * 100), "B", 9.5, "navy", "right")
+            p.text(lx + 14, ly + 1, p.clip(_str(s.get("label")), "R", 8, room), "R", 8, "desc")
+            p.text(x + width, ly + 1, pct, "B", 9.5, "navy", "right")
             p.line(lx, ly - 4, x + width, ly - 4, LINE, 0.5, dash=(1, 2)); ly -= self.ROW
 
 
@@ -459,12 +536,20 @@ class Card(_Block):
     bottom padding, while above sits a title band of 24. Each gap is now its
     own field, and the title band is derived from the title's size.
 
-    The two title offsets are the points they are AT the default size, scaled
-    from it — written as a multiplication before the division, so at 13 they
-    come back as exactly 24 and 18 and not as 24.000000000000004."""
-    PAD, TITLE_SIZE = 12, 13
-    TITLE_LEAD = 12.0     # what a title adds under the top gap, at TITLE_SIZE
-    TITLE_DROP = 6.0      # its baseline under the top gap, at TITLE_SIZE
+    3.4.0, judged on a printed page. `pad_top` promised the room above the
+    title, but the title was placed by its baseline (`pad_top` + 6/13 em), so
+    its capitals rose 0.73 em above that and ate the gap: at pad_top 4 and
+    size 20 they crossed the border. The title is now placed by its INK, so
+    `pad_top` is exactly the clear room above it. Its width was measured by
+    nobody either: in three cards side by side a 13pt title ran past the
+    border at its default size. The default is now 11, a title wider than the
+    inset shrinks to fit down to TITLE_FIT_MIN of its size, and narrower than
+    that it is a refusal. Stretched to a taller neighbour, the content stays
+    under the title and the spare room goes to the foot: centred, it opened a
+    hole between the two."""
+    PAD, TITLE_SIZE = 12, 11
+    TITLE_BELOW = 6.0 / 13   # room under the title's baseline, in ems of its size
+    TITLE_FIT_MIN = 0.75     # how far a title may shrink to fit before it is refused
 
     def __init__(self, spec, what):
         super().__init__(spec, what)
@@ -484,10 +569,26 @@ class Card(_Block):
         size = float(spec.get("title_size", self.TITLE_SIZE))
         if size <= 0:
             raise RenderError(f"{self.what}: card title_size must be above 0, got {size}")
-        # With a title the top gap is still pad_top: the title sits IN it and
-        # the band is what the type adds under it.
-        head = top + (size * self.TITLE_LEAD / self.TITLE_SIZE if spec.get("title") else 0.0)
+        # pad_top is the clear room above the title's ink; the band the title
+        # adds is its ink plus the room under its baseline. Measured on the
+        # declared size: a title shrunk to fit only leaves a little more air.
+        head = top + (size * (ASCENT + self.TITLE_BELOW) if spec.get("title") else 0.0)
         return pad, top, bottom, size, head
+
+    def _title_size(self, p, width, pad, size):
+        """The size the title is DRAWN at: the declared one, or smaller so it
+        fits between the two insets — and not below TITLE_FIT_MIN of it."""
+        t = _str(self.spec["title"])
+        room = width - 2 * pad
+        w = p.width(t, "B", size)
+        if w <= room:
+            return size
+        if room / w < self.TITLE_FIT_MIN:
+            raise RenderError(
+                f"{self.what}: card title {t!r} needs {w:.0f}pt at size {size:g} and the card "
+                f"has {room:.0f}pt between its insets — even at {self.TITLE_FIT_MIN:.0%} of its "
+                f"size it does not fit: shorten it, or give the card more width")
+        return size * room / w
 
     def measure(self, p, width):
         pad, _, bottom, _, head = self._pads()
@@ -501,11 +602,10 @@ class Card(_Block):
         p.rect(x, top - h, width, h, fill="#ffffff", stroke=LINE, radius=7)
         y = top - head
         if self.spec.get("title"):
-            p.text(x + pad, top - pad_top - size * self.TITLE_DROP / self.TITLE_SIZE,
-                   _str(self.spec["title"]), "B", size, "navy")
-        # Stretched to a neighbour's height: the content sits in the MIDDLE of
-        # the room left under the title, not at its top.
-        y -= (h - natural) / 2
+            p.text(x + pad, top - pad_top - ASCENT * size, _str(self.spec["title"]), "B",
+                   self._title_size(p, width, pad, size), "navy")
+        # Stretched to a neighbour's height, the content stays under the title
+        # and the spare room goes to the foot (until 3.4.0 it was centred).
         inner = width - 2 * pad
         for b in self.children:
             b.draw(p, x + pad, y, inner); y -= b.measure(p, inner)
@@ -582,13 +682,14 @@ class Table(_Block):
         The page-breaking version lives in _Doc.render, and only there: inside
         a card there is no next page to break to, so a table taller than its
         page is refused as the card it sits in."""
-        y = top - self.draw_title(p, x, top)
+        y = top - self.draw_title(p, x, top, width)
         for s in self.sections:
             self.draw_section(p, x, y, width, s)
             y -= self.section_height(s)
 
-    def draw_title(self, p, x, top):
+    def draw_title(self, p, x, top, width):
         if self.spec.get("title"):
+            _fits(p, self.what, "table title", _str(self.spec["title"]), "B", 13, width)
             p.text(x, top - 16, _str(self.spec["title"]), "B", 13, "navy")
             return self.TITLE_H
         return 0
@@ -597,9 +698,16 @@ class Table(_Block):
         edges = self._xs(x, width)
         y = top - 11
         gtop = y + 11
-        p.text(x, y, _str(s.get("title")), "BI", 10.5, "navy")
+        # The section title shares its line with the column labels: its room
+        # is the first column. The title is refused past it, the subtitle — a
+        # description, like the first column's `sub` — is cut with an ellipsis.
+        room = edges[0] - x - 6
+        title = _str(s.get("title"))
+        _fits(p, self.what, "section title", title, "BI", 10.5, room)
+        p.text(x, y, title, "BI", 10.5, "navy")
         if s.get("subtitle"):
-            p.text(x + p.width(_str(s.get("title")), "BI", 10.5) + 7, y, "— " + _str(s["subtitle"]), "R", 8, "muted")
+            sx = x + p.width(title, "BI", 10.5) + 7
+            p.text(sx, y, p.clip("— " + _str(s["subtitle"]), "R", 8, x + room - sx), "R", 8, "muted")
         for col, e0 in zip(self.columns[1:], edges):
             w = (edges[edges.index(e0) + 1] if edges.index(e0) + 1 < len(edges) else x + width) - e0
             align = col.get("align", "right")
@@ -702,6 +810,7 @@ class Checklist(_Block):
         items, numbered, x0, widths, lines = self._layout(p, width)
         y = top
         if self.spec.get("title"):
+            _fits(p, self.what, "checklist title", _str(self.spec["title"]), "B", 12, width)
             p.text(x, y - 16, _str(self.spec["title"]), "B", 12, "black"); y -= self.TITLE_H
         else:
             y -= 4
@@ -826,9 +935,9 @@ class _Doc:
         for b in self.blocks:
             try:
                 if isinstance(b, Table):
-                    th = b.draw_title(p, M, y)
+                    th = b.draw_title(p, M, y, AV)
                     if th and y - th - b.section_height(b.sections[0]) < bottom:
-                        y = new_page(); th = b.draw_title(p, M, y)
+                        y = new_page(); th = b.draw_title(p, M, y, AV)
                     y -= th
                     for s in b.sections:
                         need = b.section_height(s)
