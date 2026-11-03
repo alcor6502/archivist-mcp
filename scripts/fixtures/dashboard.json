@@ -1,0 +1,44 @@
+{"page": {"size": "a4"},
+ "title": {"text": "Portfolio Dashboard", "subtitle": "conto di PAPERINO PAOLINO — dati inventati, fixture di collaudo", "badge": "", "value": "$111,111"},
+ "footer": ["Fixture di collaudo del renderer: ogni importo qui dentro e' inventato e non descrive nessun conto",
+            "archivist-mcp · scripts/geolog.py"],
+ "forbid": ["\\b\\d{9,}\\b"],
+ "text_check": ["AAA", "BBB", "CCC"],
+ "blocks": [
+  {"type": "stats", "items": [
+   {"label": "Capital Gain latente", "value": "$11,111", "tone": "green"},
+   {"label": "Posizioni", "value": "4", "tone": "navy"},
+   {"label": "Capital Loss residua", "value": "$22,222", "tone": "accent"},
+   {"label": "Reddito stimato", "value": "$33,333", "tone": "navy"}]},
+  {"type": "row", "items": [
+   {"type": "card", "title": "Allocazione", "blocks": [
+    {"type": "donut", "center": "70/30", "center_label": "TARGET",
+     "slices": [{"label": "Classe prima", "value": 60.0, "color": "#2E6E8E"},
+                {"label": "Classe seconda", "value": 25.0, "color": "#c98a3a"},
+                {"label": "Classe terza", "value": 10.0, "color": "#1a7f52"},
+                {"label": "Classe quarta", "value": 5.0, "color": "#6b7280"},
+                {"label": "Classe a zero", "value": 0, "color": "#9a4a1f"}]}]},
+   {"type": "card", "title": "Reddito & fisco (stima anno)", "blocks": [
+    {"type": "grid", "cols": 2, "items": [
+     {"label": "Prima voce", "value": "$11,111"},
+     {"label": "Seconda voce", "value": "$22,222"},
+     {"label": "Terza voce", "value": "$3,333"},
+     {"label": "Aliquota media", "value": "11.1%"}]},
+    {"type": "gauge", "label": "Scaglione marginale — dove atterri — agg. Mese Zero", "position": 58,
+     "bands": [{"to": 40, "color": "#dfeee6"}, {"to": 72, "color": "#fbeecb"}, {"to": 100, "color": "#f6ded9"}],
+     "ticks": [{"at": 0, "text": "11%", "align": "left"}, {"at": 56, "text": "22-24%"}, {"at": 100, "text": "33%+", "align": "right"}]}]}]},
+  {"type": "spacer", "height": 6},
+  {"type": "table", "title": "Prodotti",
+   "columns": [{"label": ""}, {"label": "Valore", "width": 0.114}, {"label": "Capital gain", "width": 0.165},
+               {"label": "Guadagni YTD", "width": 0.126}, {"label": "Carattere", "align": "center", "width": 0.086}],
+   "sections": [
+    {"title": "Prima classe", "rows": [
+     {"cells": [{"text": "AAA", "sub": "Fondo inventato ad ampia capitalizzazione"}, {"text": "$111,111", "bold": true},
+                {"text": "+$111,111", "sub": "+11.1%", "tone": "green"}, {"text": "$1,111"}, {"tag": "QUAL", "style": "t-qual"}]},
+     {"cells": [{"text": "BBBBBB", "sub": "Societa' inventata — posizione idiosincratica di prova"}, {"text": "$22,222", "bold": true},
+                {"text": "-$2,222", "sub": "-2.2%", "tone": "red"}, {"text": "$0"}, {"tag": "ORD", "style": "t-ord"}]}]},
+    {"title": "Seconda classe", "rows": [
+     {"cells": [{"text": "CCC", "sub": "Fondo inventato a reddito esente"}, {"text": "$33,333", "bold": true},
+                {"text": "+$3,333", "sub": "+3.3%", "tone": "green"}, {"text": "$2,222"}, {"tag": "MUNI", "style": "t-muni"}]},
+     {"cells": [{"text": "DDD", "sub": "Fondo inventato su titoli di stato a media scadenza"}, {"text": "$44,444", "bold": true},
+                {"text": "n/d", "tone": "muted"}, {"text": "$1,111"}, {"tag": "ORD", "style": "t-ord"}]}]}]}]}

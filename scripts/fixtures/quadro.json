@@ -1,0 +1,24 @@
+{"page": {"size": "a4", "margin": 28, "landscape": false},
+ "title": {"text": "Quadro Clinico", "subtitle": "paziente PAPERINO PAOLINO — dati inventati, fixture di collaudo", "value": "0000-Xxx-00"},
+ "footer": ["Fixture di collaudo del renderer: ogni numero qui dentro e' inventato e non descrive nessuno",
+            "archivist-mcp · scripts/geolog.py"],
+ "blocks": [
+  {"type": "stats", "items": [{"label": "In soglia", "value": "1", "tone": "green"}, {"label": "Entro 15%", "value": "2", "tone": "accent"}, {"label": "Oltre", "value": "3", "tone": "red"}, {"label": "Da seguire", "value": "4", "tone": "navy"}, {"label": "Programmati", "value": "5", "tone": "muted"}]},
+  {"type": "spacer"},
+  {"type": "grid", "cols": 5, "items": [{"label": "Alfa", "value": "111", "tone": "green"}, {"label": "Beta tot.", "value": "222", "tone": "accent"}, {"label": "Beta LDL", "value": "23", "tone": "red"}, {"label": "Beta HDL", "value": "33", "tone": "green"}, {"label": "Gamma", "value": "44", "tone": "accent"}, {"label": "Delta", "value": "555", "tone": "red"}, {"label": "Epsilon", "value": "11.1", "tone": "accent"}, {"label": "Zeta", "value": "66", "tone": "green"}, {"label": "Eta", "value": "1.11", "tone": "green"}, {"label": "Theta", "value": "2.22", "tone": "green"}, {"label": "Iota kg", "value": "11.1", "tone": "accent"}, {"label": "Kappa", "value": "22.2", "tone": "accent"}, {"label": "Lambda", "value": "liv. 1", "tone": "accent"}, {"label": "Mu", "value": "11.1", "tone": "green"}, {"label": "Nu h", "value": "1.1", "tone": "accent"}]},
+  {"type": "spacer"},
+  {"type": "row", "items": [
+   {"type": "card", "title": "Iota — soglia 10.0 kg", "blocks": [{"type": "gauge", "label": "11.1 kg", "position": 76, "bands": [{"to": 50, "color": "#2e7d32"}, {"to": 66, "color": "#ef8f00"}, {"to": 100, "color": "#c62828"}], "ticks": [{"at": 50, "text": "10.0", "align": "center"}, {"at": 66, "text": "+15%", "align": "center"}]}]},
+   {"type": "card", "title": "Beta LDL — soglia 20 un/dL", "blocks": [{"type": "gauge", "label": "23 un/dL", "position": 72, "bands": [{"to": 50, "color": "#2e7d32"}, {"to": 66, "color": "#ef8f00"}, {"to": 100, "color": "#c62828"}], "ticks": [{"at": 50, "text": "20", "align": "center"}, {"at": 66, "text": "+15%", "align": "center"}]}]},
+   {"type": "card", "title": "Delta — soglia 500 un/mL", "blocks": [{"type": "gauge", "label": "555 un/mL", "position": 80, "bands": [{"to": 50, "color": "#2e7d32"}, {"to": 66, "color": "#ef8f00"}, {"to": 100, "color": "#c62828"}], "ticks": [{"at": 50, "text": "500", "align": "center"}, {"at": 66, "text": "+15%", "align": "center"}]}]}]},
+  {"type": "spacer"},
+  {"type": "table", "title": "Da seguire / Risolto",
+   "columns": [{"label": "Voce", "align": "left", "width": 0.22}, {"label": "Stato", "align": "left", "width": 0.13}, {"label": "Lettura", "align": "left", "width": 0.65}],
+   "sections": [
+    {"title": "Cose da seguire", "rows": [{"cells": [{"text": "Assetto Beta", "sub": "LDL 23, mar-00"}, {"tag": "SEGUIRE", "style": "t-ord"}, {"text": "sopra 20, in calo da 29; HDL 33, prova da sforzo negativa; leva = Iota"}]}]},
+    {"title": "Risolto / rassicurante", "rows": [{"cells": [{"text": "Funzione Gamma", "sub": "indice 0.11"}, {"tag": "OK", "style": "t-muni"}, {"text": "fermo da trent'anni; il Gamma e' sottostimato da eta' e massa, non e' un segnale"}]}]}]},
+  {"type": "spacer"},
+  {"type": "table", "title": "Programmati",
+   "columns": [{"label": "Quando", "align": "left", "width": 0.16}, {"label": "Controllo", "align": "left", "width": 0.54}, {"label": "Chi", "align": "left", "width": 0.30}],
+   "sections": [{"title": "Prossimi", "rows": [{"cells": [{"text": "0000-Xxx-00"}, {"text": "pannello Alfa completo + Delta"}, {"text": "medico inventato"}]}]}]}],
+ "text_check": ["Quadro Clinico", "Delta"]}
