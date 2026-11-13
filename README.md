@@ -159,8 +159,11 @@ The server sends its rules to the client at connection time. In short:
   nothing. After a write lost in transport, compare the sha in `list_files`
   before retrying.
 - **Nothing is deleted**: disposal is `move_path` into `Trash/`.
-- **Fewer calls is faster**: several files in one `read_files`, several changes
-  in one `edit_file` with `edits`, `search` before reading.
+- **Fewer calls, and less in each, is faster**: `list_files` with `depth=1`
+  to look around, `search` with `context=2` to find, `read_file` with
+  `from_line` and `lines` for part of a long file, several files in one
+  `read_files`, several changes in one `edit_file` with `edits`, `manifest` to
+  know whether anything changed.
 - **Files changed from outside** (SMB, by hand) are committed separately before
   the next write, which may return `external_commit_first`. Not an error.
 - **No empty folders**: git does not keep them.

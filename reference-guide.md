@@ -5,20 +5,30 @@ tell you. `reference_guide("append")` is one command's card. Ask for the card.
 
 ## IN SHORT
 
+Every call costs seconds of travel, and what it returns fills your context:
+make few calls, and ask each one for only what you need.
+
+- **Look around** → `list_files` with `depth=1`: this level, with the folders
+  below summed up; then the folder you want. `hashes=False` when names and
+  sizes are enough.
+- **Find** → `search` (the argument is `pattern`) with `context=2`: the lines
+  around each hit come with it, often with no read needed after.
+- **Read** → a few lines of a long file: `read_file` with `from_line` and
+  `lines`, at the line number `search` gave. Several files: ONE `read_files`.
+- **Change** → `edit_file` (`old_text`/`new_text`; several changes in ONE call
+  with `edits`). Add at the end → `append`. `write_file` is for a new file or
+  a full rewrite, never to change a line.
+- **Did anything change?** → `manifest`: one number, no content.
+- Every read and every write returns the file's `sha256`, a partial read
+  too: pass it to the next write of that file, with no re-read. `CONFLICT` →
+  re-read, reconcile, retry. A write lost in transport → `list_files` on that
+  file, compare the sha, then retry.
 - Every call names its `dataset`; `path` is relative to it. A locked dataset
   needs `key` on every call: pass it BY NAME — it is always the last
   parameter. The key is in the instructions of the project it belongs to.
-- No need for `vault_status()` before working: call it to learn the datasets'
-  names. Before the first call of a tool you have not used, read its card,
-  `reference_guide("<tool>")` — not the whole manual.
-- Fewest round trips: several files → ONE `read_files`, not a `read_file`
-  each. Looking for something → `search` (the argument is `pattern`; add
-  `context=2`), then read only those lines, with `from_line`. Changing text → `edit_file` (`old_text`/`new_text`; several
-  changes in ONE call with `edits`) or `append`. Never rewrite a file to
-  change a line.
-- Every write returns the new `sha256`: use it for the next write to the same
-  file, with no re-read. `CONFLICT` → re-read, reconcile, retry. A write lost
-  in transport → `list_files`, compare the sha, then retry.
+- No `vault_status()` before working: it is for learning the datasets' names.
+  Before the first use of a tool, read its card, `reference_guide("<tool>")` —
+  not the whole manual.
 - `archive` is a base64 tar.gz: for clients that run code, not for a chat.
 
 ## THE MODEL
@@ -40,15 +50,14 @@ edited or moved: they are changed on the server, by the owner.
 
 ## FOUR THINGS THAT ARE NOT LIKE ELSEWHERE
 
-1. **The sha256 is the unit of truth.** Every read gives it, every write demands
-   it and hands back the new one. `"new"` for a file that does not exist yet.
-   Never retry a `CONFLICT` unchanged.
+1. **The sha256 is the unit of truth.** A write demands the one you hold;
+   `"new"` for a file that does not exist yet. Never retry a `CONFLICT`
+   unchanged.
 2. **Nothing is deleted.** There is no delete tool. Disposal is `move_path` into
    `Trash/`.
 3. **Nothing makes a directory**, because git does not keep empty ones. They
    appear as a side effect of writing a file inside them, and **an empty folder
-   appears nowhere** — not in `list_files`, `manifest` or `archive`. A folder
-   that must stay visible needs a file in it.
+   appears nowhere** — not in `list_files`, `manifest` or `archive`.
 4. **Every write is atomic, verified and committed.** A failed tool leaves the
    vault exactly as it was; there is no partial write. Do not retry because a
    call felt slow — that is how a duplicate is made.
@@ -57,10 +66,9 @@ edited or moved: they are changed on the server, by the owner.
 
 Our limits are on the cards and fail loudly. The one you meet first is not ours:
 **the cap your client puts on a tool result.** Above it a client does not
-truncate — it writes the result to a file and hands you a path. That is
-excellent if the file lands where your code runs, and useless otherwise.
-Not there → keep results small: fewer files per `read_files`, and a
-`max_chars` on `archive` so it refuses with the size instead of losing it.
+truncate — it writes the result to a file and hands you a path, useless unless
+that file lands where your code runs. So keep results small: a range of lines,
+fewer files per `read_files`, a `max_chars` on `archive`.
 
 ## WRONG TURNS
 
@@ -69,8 +77,7 @@ transport, use SMB or scp. Do not push a big binary through `write_binary`:
 the base64 is typed by the model, a token every two or three characters —
 drop it over SMB and the next write to the dataset adopts it, sha included.
 A PDF made of data is not typed at all: `render_pdf` draws it here, and a PDF
-of documents this vault already holds is `render_report`. To know whether a
-tree changed, `manifest`: one number, no content.
+of documents this vault already holds is `render_report`.
 
 # COMMANDS
 
@@ -111,11 +118,13 @@ from a chat alone.
 ## dataset_status(dataset, key='')
 
 One dataset in detail: file count, Trash, git status, commits, repository size,
-last commit.
+last commit. Numbers only: to see the files, `list_files` with `depth=1`.
 
 ## list_files(dataset, path='', depth=0, pattern='', hashes=True, key='')
 
 Files under `path` with size and sha256, recursive. Same sha, same file.
+**On a dataset you do not know, start with `depth=1`**: the whole tree of a
+large one is thousands of lines you will not use.
 Empty path means the whole dataset. An empty folder does not appear — it is not
 hidden, it is not there. Binaries live here: `search` will not find them, this
 will.
@@ -136,6 +145,8 @@ call `list_files` on that one file and the sha is computed, whatever the size.
 
 A UTF-8 text file: content plus sha256. That sha is what `write_file` and
 `edit_file` want back.
+**Do not read a long file whole for a few lines of it**: `search` with
+`context` first, then a range here.
 **Part of a file:** `from_line` (1-based) and `lines` (how many; 0 means to the
 end). `lines=40` alone is the first forty; `from_line=812, lines=30` is what
 you read after `search` said `:812:` — the two number lines the same way. The
@@ -155,6 +166,9 @@ not a file) comes back as `{path, error}` and the others still arrive; `errors`
 counts them. A path no read could accept (`..`, absolute, the dataset repeated)
 refuses the whole call. At most 50 paths, and 2 MB in all — the ceiling of one
 read: ask for fewer at a time, not around it.
+Whole files only. The paths come from one `list_files` or one `search`: two
+calls for a folder's worth of reading. For a part of a long file, `read_file`
+with `from_line`.
 
 ## append(dataset, path, text, expected_sha256='', key='')
 
@@ -170,7 +184,9 @@ instead of writing the block twice. Without it, verify the tail with
 
 ## write_file(dataset, path, content, expected_sha256, key='')
 
-Writes the WHOLE file. UTF-8, max 2 MB.
+Writes the WHOLE file. UTF-8, max 2 MB. For a new file or a full rewrite: the
+whole content travels, typed by you. To change part of a file, `edit_file`
+sends only the fragments; to add at the end, `append`.
 CAS: `expected_sha256` must match the file's current sha, or `"new"` for a file
 that does not exist yet. `"new"` on an existing file is refused, and so is a
 real sha on a missing one.
@@ -447,7 +463,8 @@ naming which (`edit 2 of 3: ...`). One commit, one new sha. Up to 50. Use either
 
 ## move_path(dataset, src, dst, key='')
 
-Move, rename or trash, inside one dataset. Never overwrites.
+Move, rename or trash, inside one dataset. Never overwrites. A folder moves
+with everything in it, in one call: do not move its files one by one.
 This is the disposal route: there is no delete tool, and moving into `Trash/` is
 how things are thrown away. Returns no sha, and needs none — the content did not
 change, so the one you hold still holds.
@@ -472,7 +489,9 @@ A truncated result proves presence, never absence.
 ## manifest(dataset, path='', key='')
 
 A whole tree's fingerprint in one number. Two equal manifests, identical trees.
-The cheapest way to ask "did anything move": manifest before, manifest after.
+The cheapest way to ask "did anything move": manifest before, manifest after —
+a few bytes, where `list_files` would return every path to compare by eye.
+`path` narrows it to a folder or one file.
 Required by `dataset_drop` and `dataset_restore`.
 
 ## archive(dataset, path='', pattern='*.md', max_chars=0, key='')
@@ -506,18 +525,21 @@ Useless without a sandbox to decode it in.
 
 A binary file from base64. Same CAS as `write_file`. Max 2 MB decoded. Fine up
 to a few tens of KB; above that the base64 you have to type is the cost, not
-the server — see FOUR WRONG TURNS.
+the server — see WRONG TURNS on the model page.
 Compare the returned sha with the one computed at the source.
 
 ## read_at(dataset, path, rev, key='')
 
 A text file as it was at a past revision — a hash from `history`, or `HEAD~3`.
 Read-only. The revision is local to this dataset's own git.
-To recover: `history` → `read_at` → `write_file`.
+To recover: `history` → `read_at` → `write_file`. To see what changed without
+reading two whole versions, `diff`.
 
 ## history(dataset, path='', n=10, key='')
 
 The last `n` commits of the dataset, or of one file: hash, ISO date, message.
+Give `path` whenever the question is about one file: the answer is its commits
+only, not the dataset's.
 **Stops at 10 by default** — the eleventh commit back is not missing, it was not
 asked for. The short hash goes verbatim into `read_at` and `diff`.
 

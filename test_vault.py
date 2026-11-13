@@ -1442,7 +1442,8 @@ def instructions_check() -> None:
     # The rules the release is about must be in them, by the words a model
     # will match: the tools that save round trips, and the two parameter names
     # the container log shows models getting wrong.
-    for must in ("read_files", "edits", "`pattern`", "`old_text`", "BY NAME", "sha256"):
+    for must in ("read_files", "edits", "`pattern`", "`old_text`", "BY NAME", "sha256",
+                 "depth=1", "context=2", "`from_line`", "`manifest`", "never to change a line"):
         ok(must in text, f"the instructions say {must!r}")
     # Every tool named in them exists: a backticked name that looks like a
     # tool and is not one is a door that is not there.
@@ -1560,8 +1561,13 @@ def guide_signature_check() -> None:
     # kept to what a signature cannot say. This is not a style rule: the whole
     # point of the split is that the general page stays small, and a page that
     # grows back to holding every signature has quietly undone it.
-    ok(len(model) < 4000,
-       "the model page is still the short one, not the manual again", len(model))
+    # Two budgets since 4.1.0, one per part: the instructions at the head of
+    # the page have their own (instructions_check), because they are the part
+    # every chat reads and they are allowed to say how to work; everything
+    # after them is the part that must not grow back.
+    rest = len(model) - len(_v.server_instructions(guide))
+    ok(rest < 2800,
+       "the model page after the instructions is still the short one, not the manual again", rest)
 
     # The manual states that `key` is always last, and a caller passing it
     # positionally depends on that being true. It is a promise, so it is checked.
