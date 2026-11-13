@@ -1269,6 +1269,7 @@ between projects, not a defence against an attacker. That is what OAuth is for.
 | `report.py` | the one behind `render_report`: Markdown of the dataset laid out with WeasyPrint, an index with real page numbers, and a fetcher that serves nothing |
 | `test_vault.py` | the engine checks, no network needed |
 | `scripts/test.sh` · `scripts/ship.sh` | the suite on a fresh bench, and a delivery from the clone alone |
+| `scripts/smoke.sh` · `scripts/smoke_inside.py` | the image, STARTED, before it is published: the workflow builds it, runs it through its real entrypoint on an empty vault, and inside it checks that a caller with no token gets 401 and that both renderers draw a PDF with the fonts the image carries. A manual run of the workflow does all of this and publishes nothing |
 | `scripts/geolog.py` | what the renderer DREW, as text: every string, rectangle, line and measured height. Two PDFs of one document are never byte-identical — reportlab stamps a creation date — so a change to `render.py` is proved to have moved nothing by diffing this log before and after, not by comparing files |
 | `scripts/inject.py` | puts a defect back into `render.py`, runs the suite, and records which checks went red. A guard never seen failing is not a guard. It refuses to start on a dirty `render.py` and restores the file when it is done |
 | `scripts/fixtures/` | documents for the two above, shaped like the real dashboards — the same blocks, the same column widths, strings of the same length — with **every number and name invented** |

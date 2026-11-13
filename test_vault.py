@@ -1342,6 +1342,49 @@ def ship_scripts_check() -> None:
        "ship.sh never pushes a tag: it prints the release link instead")
 
 
+def smoke_check() -> None:
+    """The image is STARTED before it is published, and a manual run publishes
+    nothing.
+
+    The workflow is a file no test executes, so its order is read here: the
+    smoke test sits between the build and the push, the push happens on a tag
+    only, and the step that removes a package on purpose can run only where
+    the push cannot. Each of the three, lost in an edit, is a green workflow
+    that publishes an image nobody started — or an image with a package
+    removed."""
+    wf = (HERE / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
+    smoke = HERE / "scripts" / "smoke.sh"
+    inside = HERE / "scripts" / "smoke_inside.py"
+    ok(smoke.is_file() and os.access(smoke, os.X_OK) and inside.is_file(),
+       "scripts/smoke.sh is executable and scripts/smoke_inside.py is beside it")
+    s = smoke.read_text(encoding="utf-8") if smoke.is_file() else ""
+    i_load, i_smoke, i_push = wf.find("load: true"), wf.find("scripts/smoke.sh"), wf.find("push: ${{")
+    ok(0 <= i_load < i_smoke < i_push,
+       "the workflow builds, runs the smoke test, and only then reaches the push",
+       (i_load, i_smoke, i_push))
+    pushes = re.findall(r"^\s*push: (.+)$", wf, re.MULTILINE)
+    ok(sorted(pushes) == sorted(["false", "${{ startsWith(github.ref, 'refs/tags/v') }}"]),
+       "the image is pushed on a tag and never otherwise: a manual run is a dry run", pushes)
+    m = re.search(r"- name: inject a defect[^\n]*\n\s*if: (.+)", wf)
+    ok(m is not None and "github.event_name == 'workflow_dispatch'" in m.group(1),
+       "the injected defect is reachable from a manual run only, which never pushes",
+       m.group(1) if m else None)
+    literal = re.findall(r"\b\d+\.\d+\.\d+\b", re.sub(r"127\.0\.0\.1", "", s))
+    ok(not literal and "server.py" in s,
+       "smoke.sh reads the version it waits for out of server.py and carries none", literal)
+    # Every package the dry run can remove is one the Dockerfile installs: an
+    # option naming a package that is not there would 'pass' by removing nothing.
+    dk = (HERE / "Dockerfile").read_text(encoding="utf-8")
+    opts = re.search(r"options: \[([^\]]+)\]", wf)
+    names = [o.strip() for o in opts.group(1).split(",")] if opts else []
+    ok(len(names) >= 3 and names[0] == "none"
+       and all(re.search(rf"apt-get install[^\n]* {re.escape(n)}\b", dk) for n in names[1:]),
+       "every package the dry run can remove is one the Dockerfile installs", names)
+    ins = inside.read_text(encoding="utf-8") if inside.is_file() else ""
+    ok(all(w in ins for w in ("401", "render_pdf", "render_report", "fixtures/quadro.json")),
+       "the checks inside the image cover the door and both renderers")
+
+
 def instructions_check() -> None:
     """The MCP `instructions` are the cheapest speed in the release: the client
     reads them at connection time, so a chat stops spending its first round
@@ -3432,6 +3475,7 @@ def main() -> int:
 
         print("\n[14bis2] the delivery scripts read the pin they install")
         ship_scripts_check()
+        smoke_check()
 
         print("\n[14c] the manual says what the code actually offers")
         guide_signature_check()
