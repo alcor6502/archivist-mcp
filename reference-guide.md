@@ -12,8 +12,8 @@ tell you. `reference_guide("append")` is one command's card. Ask for the card.
   names. Before the first call of a tool you have not used, read its card,
   `reference_guide("<tool>")` — not the whole manual.
 - Fewest round trips: several files → ONE `read_files`, not a `read_file`
-  each. Looking for something → `search` (the argument is `pattern`), then
-  read the match. Changing text → `edit_file` (`old_text`/`new_text`; several
+  each. Looking for something → `search` (the argument is `pattern`; add
+  `context=2`), then read only those lines, with `from_line`. Changing text → `edit_file` (`old_text`/`new_text`; several
   changes in ONE call with `edits`) or `append`. Never rewrite a file to
   change a line.
 - Every write returns the new `sha256`: use it for the next write to the same
@@ -113,17 +113,36 @@ from a chat alone.
 One dataset in detail: file count, Trash, git status, commits, repository size,
 last commit.
 
-## list_files(dataset, path='', key='')
+## list_files(dataset, path='', depth=0, pattern='', hashes=True, key='')
 
 Files under `path` with size and sha256, recursive. Same sha, same file.
-Empty path means the whole dataset. Stops at 3,000 files: go one level deeper
-with `path`. An empty folder does not appear — it is not hidden, it is not there.
-Binaries live here: `search` will not find them, this will.
+Empty path means the whole dataset. An empty folder does not appear — it is not
+hidden, it is not there. Binaries live here: `search` will not find them, this
+will.
+Three ways to ask for less, and they combine:
+- `depth=1` lists the files directly in `path`; everything deeper is summed up
+  in `folders`, one line per folder: `path`, `files`, `bytes`. That is how a big
+  tree is walked: one level, then the folder you want. `depth=2` goes two
+  levels down, and so on; 0 is the whole tree.
+- `pattern="*.pdf"` keeps the files whose path matches, at any depth
+  (`"Invoices/*.pdf"` asks for the folder too). The same glob as `archive`.
+- `hashes=False` gives `path` and `size` only: nothing is read, so it is the
+  cheap way to look at a folder of photos.
+Stops at 3,000 files listed: narrow it with one of the three, or with `path`.
+A file above 2 MB is listed with its size and `unhashed` in place of the sha;
+call `list_files` on that one file and the sha is computed, whatever the size.
 
-## read_file(dataset, path, key='')
+## read_file(dataset, path, from_line=0, lines=0, key='')
 
 A UTF-8 text file: content plus sha256. That sha is what `write_file` and
 `edit_file` want back.
+**Part of a file:** `from_line` (1-based) and `lines` (how many; 0 means to the
+end). `lines=40` alone is the first forty; `from_line=812, lines=30` is what
+you read after `search` said `:812:` — the two number lines the same way. The
+answer adds `total_lines`, `from_line` and `lines` (how many came back), and
+`content` is exactly those lines. `sha256` and `size` are still the WHOLE
+file's, so a partial read is enough to `edit_file` or `append` — never
+`write_file`: that would replace the file with the part you read.
 A long document is exactly where you meet your client's result cap — see the
 model page. More than one file → `read_files`.
 
@@ -172,7 +191,8 @@ The document: `{"page", "title", "footer", "forbid", "text_check", "blocks"}`.
   a big figure on the right; repeated on every page after the first
 - `footer`: list of lines, on every page; the last one gets `· pagina N di M`
 - `forbid`: regexes that must match NO string drawn (an account number, a
-  name) — a match is a refusal and nothing is written
+  name) — a match is a refusal and nothing is written; so is a list that takes
+  more than 5 seconds to run
 - `text_check`: strings that must appear; the missing ones come back in
   `missing`, they do not stop the render
 
@@ -434,12 +454,17 @@ change, so the one you hold still holds.
 There is no second dataset to move to: to copy across, `read_file` in one and
 `write_file` in the other.
 
-## search(dataset, pattern, path='', regex=False, key='')
+## search(dataset, pattern, path='', regex=False, context=0, ignore_case=False, key='')
 
-Greps the dataset server-side: `file:line:text`, nothing downloaded. The text
+Greps the dataset server-side: `file:line: text`, nothing downloaded. The text
 to find goes in `pattern` — there is no `query`.
 **Literal unless `regex=True`** — a pattern full of `.` and `*` is looked for as
-those characters. Stops at 200 lines: narrow `path`, or make the pattern precise.
+those characters. `ignore_case=True` works with both.
+`context=N` (0 to 5) prints N lines before and after each match, as grep does:
+`file:12: text` is a match, `file-11- text` a line around it, `--` separates
+two groups. With it a hit usually needs no `read_file` afterwards.
+Stops at 200 matches: narrow `path`, or make the pattern precise. A regex gets
+5 seconds for the whole call and is then refused, with nothing returned.
 Text only. A PDF that does not come up is not missing — find binaries by name
 with `list_files`.
 A truncated result proves presence, never absence.
@@ -541,7 +566,9 @@ modified: a document from 2024 thrown away yesterday survives
 | `cannot move ... into itself` | the destination is inside the source: move it elsewhere |
 | `invalid revision` | a hash from `history`, or `HEAD~3`: never something starting with `-` |
 | `destination already exists` | `move_path` never overwrites: choose another name |
-| `more than 3000 files` | go one level deeper with `path` |
+| `more than 3000 files` | go one level deeper with `path`, or `depth=1`, a `pattern`, `hashes=False` |
+| `from_line N is past the end` | the message says how many lines the file has |
+| `the regex ran for more than 5 s` / `forbid: the patterns took more than 5 s` | a pattern with nested repetitions: simplify it, or narrow `path` |
 | `is locked and cannot be dropped` / `is closed and cannot be dropped` | only an open dataset can be dropped: its line must become `name \|` first |
 | `CONFLICT: expected manifest ...` | re-read the manifest, then retry |
 | `block too large` | `append` is not for rewrites: `write_file` |

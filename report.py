@@ -43,6 +43,8 @@ import os
 import re
 from typing import Any
 
+import rxlimit
+
 MAX_SOURCE_BYTES = 5_000_000    # the Markdown that goes in, summed
 MAX_PAGES = 200                 # the PDF that comes out; high, because no base64
 # One section per file, always on a fresh page: more files than pages cannot
@@ -416,8 +418,8 @@ def check_layout(layout: Any) -> dict:
         raise ReportError("layout.footer is one line: it prints on every page")
     for pat in out["forbid"]:
         try:
-            re.compile(pat)
-        except re.error as e:
+            rxlimit.compile(pat)
+        except rxlimit.error as e:
             raise ReportError(f"forbid: {pat!r} is not a valid regex: {e}")
     return out
 
@@ -429,10 +431,14 @@ def build(groups: list[dict], layout: dict) -> tuple[bytes, dict]:
     — `select` produced the first three, the vault filled in the fourth. The
     order of the pages IS the order of the list.
     """
+    # OSError too: WeasyPrint dlopens Pango through cffi when it is imported,
+    # and an image without libpango raises `OSError: cannot load library
+    # 'libpango-1.0-0'`, not ImportError. Seen in the smoke test with the
+    # package taken out: a bare traceback where a named fault belongs.
     try:
         from weasyprint import HTML
-    except ImportError as e:  # pragma: no cover — the suite installs it
-        raise ReportFault(f"weasyprint is not installed: {e}")
+    except (ImportError, OSError) as e:
+        raise ReportFault(f"weasyprint cannot be loaded: {e}")
     _fonts()
     total = sum(len(t.encode("utf-8")) for g in groups for t in g["text"].values())
     if total > MAX_SOURCE_BYTES:
@@ -501,14 +507,18 @@ def build(groups: list[dict], layout: dict) -> tuple[bytes, dict]:
         joined, frags = _page_text(page)
         drawn.append(joined)
         seen.extend(frags)
+    # The patterns are the caller's, so they run on a clock: one budget for the
+    # whole list, and a guard that could not finish has not passed.
+    budget = rxlimit.Budget()
     for pat in layout["forbid"]:
-        rx = re.compile(pat)
-        for text in drawn:
-            if rx.search(text):
-                raise ReportError(f"forbidden pattern {pat!r} appears in the report: nothing written")
-        for frag in seen:
-            if rx.search(frag):
-                raise ReportError(f"forbidden pattern {pat!r} appears in the report: nothing written")
+        rx = rxlimit.compile(pat)
+        try:
+            hit = any(budget.search(rx, t) for t in drawn) or any(budget.search(rx, f) for f in seen)
+        except rxlimit.RegexTimeout:
+            raise ReportError(f"forbid: the patterns took more than {budget.seconds:g} s to run "
+                              f"(stopped in {pat!r}): simplify it — nothing written") from None
+        if hit:
+            raise ReportError(f"forbidden pattern {pat!r} appears in the report: nothing written")
     whole = "\n".join(drawn)
     missing = [s for s in layout["text_check"] if s not in whole]
 

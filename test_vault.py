@@ -1449,7 +1449,7 @@ def instructions_check() -> None:
     named = set(re.findall(r"`([a-z_]+)(?:\(|`)", text))
     toolish = {n for n in named if "_" in n or n in cards}
     ghosts = sorted(n for n in toolish if n not in cards
-                    and n not in ("old_text", "new_text", "expected_sha256"))
+                    and n not in ("old_text", "new_text", "expected_sha256", "from_line"))
     ok(not ghosts, "every tool the instructions name is a real tool", ghosts)
     ok({"read_files", "search", "edit_file", "append", "archive", "vault_status",
         "reference_guide", "list_files"} <= toolish,
@@ -1543,6 +1543,19 @@ def guide_signature_check() -> None:
     ok(len(cards) == len(real),
        "there are exactly as many cards as tools", f"{len(cards)} cards, {len(real)} tools")
 
+    # A parameter the signature offers and the body never reads does what the
+    # default does, whatever the caller passed: the card is right, the schema
+    # is right, and the call is silently wider or narrower than asked. Found by
+    # injection in 4.1.0 — a read_file that took from_line and read the whole
+    # file passed every other check.
+    unused = []
+    for n in tree.body:
+        if isinstance(n, ast.FunctionDef) and is_tool(n):
+            read = {x.id for x in ast.walk(n) if isinstance(x, ast.Name)
+                    and isinstance(x.ctx, ast.Load)}
+            unused += [f"{n.name}.{a.arg}" for a in n.args.args if a.arg not in read]
+    ok(not unused, "every parameter of every tool is read by the tool's body", unused)
+
     # The model page is what every caller pays for on the first read, so it is
     # kept to what a signature cannot say. This is not a style rule: the whole
     # point of the split is that the general page stays small, and a page that
@@ -1587,13 +1600,17 @@ def guide_signature_check() -> None:
     ok(_v.MAX_READ_BYTES == _v.MAX_WRITE_BYTES,
        "reads and writes share one ceiling, as one card claims for both")
     import render as _r      # the renderer's own ceiling, read from the constant
+    import rxlimit as _rx    # the clock on a caller's regex: one number, three cards
     import report as _rp     # and the other renderer's, which is a different number
     limits = [("write_file", mb(_v.MAX_WRITE_BYTES)),
               ("read_binary", mb(_v.MAX_BINARY_BYTES)),
               ("write_binary", mb(_v.MAX_BINARY_BYTES)),
               ("append", kb(_v.MAX_APPEND_BYTES)),
               ("list_files", f"{_v.MAX_LIST_FILES:,} files"),
-              ("search", f"{_v.MAX_SEARCH_HITS} lines"),
+              ("search", f"{_v.MAX_SEARCH_HITS} matches"),
+              ("search", f"(0 to {_v.MAX_SEARCH_CONTEXT})"),
+              ("search", f"{_rx.REGEX_SECONDS:g} seconds"),
+              ("render_pdf", f"{_rx.REGEX_SECONDS:g} seconds"),
               ("diff", kb(_v.MAX_DIFF_BYTES)),
               ("archive", mb(_v.MAX_ARCHIVE_OUT_BYTES)),
               ("dataset_create", f"{_v.MAX_DATASETS} datasets"),
@@ -1605,7 +1622,255 @@ def guide_signature_check() -> None:
            f"the card for {name} still states the limit the code enforces", shown)
 
 
+def regex_clock_static_check() -> bool:
+    """Run before anything executes a search: a caller's pattern handed to `re`
+    cannot be stopped, so the checks that time a runaway regex would hang the
+    suite instead of failing it. True when the source is clean."""
+    print("\n[6e-0] no caller's pattern reaches `re`, which cannot be stopped")
+    # Read off the source FIRST: a pattern that is not a literal must never
+    # reach `re` — and if one does, nothing below is run. Every such call
+    # is named.
+    loose = []
+    for fname, alias in (("vault.py", "_re"), ("render.py", "re"), ("report.py", "re")):
+        for node in ast.walk(ast.parse((HERE / fname).read_text(encoding="utf-8"))):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name) and node.func.value.id == alias
+                    and node.func.attr in ("compile", "search", "match", "fullmatch",
+                                           "finditer", "findall", "sub", "split")
+                    and not (node.args and isinstance(node.args[0], ast.Constant))):
+                loose.append(f"{fname}:{node.lineno}")
+    ok(not loose, "no pattern that is not a literal is handed to `re` in vault, render or report",
+       loose)
+    return not loose
+
+
+def ask_for_less_check() -> None:
+    """4.1.0: the three reads learn to hand over less — a run of lines, the
+    lines around a hit, one level of a tree — and a caller's regex gets a
+    clock. Its own tree in its own temp folder: none of this needs git, and a
+    fixture shared with the checks below would move their counts."""
+    import hashlib
+    import unittest.mock as _mock
+    import vault as _v
+    import render as _r
+    import report as _rp
+    import rxlimit as _rx
+
+    tmp = tempfile.mkdtemp(prefix="archivist-less-")
+    try:
+        root = Path(tmp) / "Less"
+        (root / "sub" / "deep").mkdir(parents=True)
+        ds = Dataset(root, "Less")
+        ten = "".join(f"l{i}\n" for i in range(1, 11))
+        (root / "ten.md").write_text(ten)
+        (root / "crlf.md").write_bytes(b"one\r\ntwo\r\nthree\r\n")
+        (root / "sub" / "b.md").write_text("alpha\nBeta\ngamma\n")
+        (root / "sub" / "deep" / "c.pdf").write_bytes(b"%PDF-1.4 fake\n")
+        big = os.urandom(_v.MAX_READ_BYTES + 1)
+        (root / "big.bin").write_bytes(big)
+
+        sections = []
+        def _s0():
+            print("\n[3d] read_file — a run of lines, and the sha is still the whole file's")
+            whole = ds.read_file("ten.md")
+            ok("total_lines" not in whole and whole["content"] == ten,
+               "with no range the answer is what it always was", sorted(whole))
+            r = ds.read_file("ten.md", 3, 2)
+            ok(r["content"] == "l3\nl4\n", "from_line=3, lines=2 are lines 3 and 4", r["content"])
+            ok((r["total_lines"], r["from_line"], r["lines"]) == (10, 3, 2),
+               "and the answer says where they sit in the file",
+               (r["total_lines"], r["from_line"], r["lines"]))
+            ok(r["sha256"] == whole["sha256"] == hashlib.sha256(ten.encode()).hexdigest()
+               and r["size"] == len(ten),
+               "sha256 and size are the WHOLE file's — what edit_file wants back", r["sha256"][:12])
+            ok(ds.read_file("ten.md", 0, 3)["content"] == "l1\nl2\nl3\n", "lines alone is the head")
+            ok(ds.read_file("ten.md", 9)["content"] == "l9\nl10\n", "from_line alone runs to the end")
+            tail = ds.read_file("ten.md", 9, 50)
+            ok(tail["lines"] == 2, "a range past the end returns what is there and counts it", tail["lines"])
+            ok(ds.read_file("ten.md", 1, 5)["content"] + ds.read_file("ten.md", 6)["content"] == ten,
+               "two ranges end to end are the file: no line lost, none twice")
+            ok(ds.read_file("crlf.md", 2, 1)["content"] == "two\r\n",
+               "the run is the file's own bytes, line endings included")
+            msg = refusal(lambda: ds.read_file("ten.md", 11))
+            ok(msg is not None and "10 lines" in msg,
+               "from_line past the end is refused, and says how long the file is", msg)
+            must_fail("a negative from_line", lambda: ds.read_file("ten.md", -1))
+            must_fail("a negative lines", lambda: ds.read_file("ten.md", 1, -1))
+        sections.append(('[3d]', _s0))
+
+        def _s1():
+            print("\n[6d] search — lines of context, case, and line numbers read_file agrees with")
+            s = ds.search("l7", "ten.md", context=1)
+            ok(s["lines"] == ["ten.md-6- l6", "ten.md:7: l7", "ten.md-8- l8"],
+               "context=1 prints the line before and the line after, marked as grep marks them",
+               s["lines"])
+            ok(s["matches"] == 1, "and `matches` counts matches, not printed lines", s["matches"])
+            n = int(s["lines"][1].split(":")[1])
+            ok(ds.read_file("ten.md", n, 1)["content"].strip() == "l7",
+               "the line number of a hit is the from_line that reads it", n)
+            s = ds.search("^l[29]$", "ten.md", regex=True, context=1)
+            ok(s["lines"] == ["ten.md-1- l1", "ten.md:2: l2", "ten.md-3- l3", "--",
+                              "ten.md-8- l8", "ten.md:9: l9", "ten.md-10- l10"],
+               "two matches far apart are two groups, with -- between", s["lines"])
+            s = ds.search("^l[34]$", "ten.md", regex=True, context=2)
+            ok(s["lines"] == ["ten.md-1- l1", "ten.md-2- l2", "ten.md:3: l3", "ten.md:4: l4",
+                              "ten.md-5- l5", "ten.md-6- l6"],
+               "two matches that touch are one group: no line twice, no separator", s["lines"])
+            ok(ds.search("l7", "ten.md")["lines"] == ["ten.md:7: l7"],
+               "with no context the answer is what it always was")
+            must_fail(f"context above {_v.MAX_SEARCH_CONTEXT}",
+                      lambda: ds.search("l7", "ten.md", context=_v.MAX_SEARCH_CONTEXT + 1))
+            must_fail("a negative context", lambda: ds.search("l7", "ten.md", context=-1))
+            ok(ds.search("beta", "sub")["matches"] == 0, "a literal is case-sensitive by default")
+            ok(ds.search("beta", "sub", ignore_case=True)["lines"] == ["sub/b.md:2: Beta"],
+               "ignore_case finds it, literal")
+            ok(ds.search("^BETA$", "sub", regex=True, ignore_case=True)["matches"] == 1
+               and ds.search("^BETA$", "sub", regex=True)["matches"] == 0,
+               "and as a regex")
+            ok(ds.search("two$", "crlf.md", regex=True)["matches"] == 1,
+               "`$` is the end of the text, also in a file with CRLF endings")
+        sections.append(('[6d]', _s1))
+
+        def _s2():
+            print("\n[6e] a caller's regex runs on a clock — in search and in both forbid")
+            evil, bait = r"(a|aa)+$", "a" * 60 + "b"
+            (root / "bait.md").write_text(bait + "\n")
+            _was = _rx.REGEX_SECONDS
+            _rx.REGEX_SECONDS = 0.3
+            try:
+                t0 = time.monotonic()
+                msg = refusal(lambda: ds.search(evil, "bait.md", regex=True))
+                took = time.monotonic() - t0
+                ok(msg is not None and "was stopped" in msg and "0.3 s" in msg,
+                   "search refuses a regex that does not finish, and says how long it had", msg)
+                ok(took < 3, "and it comes back when the budget ends, not later", f"{took:.2f}s")
+                try:
+                    _r.build({"title": {"text": bait}, "forbid": [evil]})
+                    ok(False, "render_pdf refuses a forbid that does not finish")
+                except _r.RenderError as e:
+                    ok("took more than 0.3 s" in str(e) and evil in str(e),
+                       "render_pdf refuses a forbid that does not finish, naming the pattern", e)
+                try:
+                    _rp.build([{"title": "T", "landscape": False, "files": ["a.md"],
+                                "text": {"a.md": bait + "\n"}}],
+                              _rp.check_layout({"title": "T", "forbid": [evil]}))
+                    ok(False, "render_report refuses a forbid that does not finish")
+                except _rp.ReportError as e:
+                    ok("took more than 0.3 s" in str(e) and evil in str(e),
+                       "render_report refuses a forbid that does not finish, naming the pattern", e)
+            finally:
+                _rx.REGEX_SECONDS = _was
+            # The budget is the CALL's: a pattern that is merely slow on each line
+            # must run out too. A budget already spent refuses the next match.
+            b = _rx.Budget()
+            ok(b.seconds == _rx.REGEX_SECONDS and b.search(_rx.compile("l7"), "l7"),
+               "a budget is born with the module's number, and an ordinary match passes")
+            b._deadline = time.monotonic() - 1
+            try:
+                b.search(_rx.compile("l7"), "l7"); ok(False, "a spent budget refuses the next match")
+            except _rx.RegexTimeout:
+                ok(True, "a spent budget refuses the next match, however cheap")
+            (root / "bait.md").unlink()
+
+            dk = (HERE / "Dockerfile").read_text(encoding="utf-8")
+            req = (HERE / "requirements.txt").read_text(encoding="utf-8")
+            ok(re.search(r"^COPY [^\n]*\brxlimit\.py\b", dk, re.MULTILINE) is not None,
+               "the image carries rxlimit.py")
+            ok(re.search(r"^regex==\d", req, re.MULTILINE) is not None,
+               "requirements.txt pins regex to one version")
+        sections.append(('[6e]', _s2))
+
+        def _s3():
+            print("\n[3e] list_files — one level, a glob, names only, and large files listed")
+            full = ds.list_files("")
+            by = {f["path"]: f for f in full["files"]}
+            ok(sorted(by) == ["big.bin", "crlf.md", "sub/b.md", "sub/deep/c.pdf", "ten.md"]
+               and "folders" not in full,
+               "with no knob the listing is the whole tree, as it always was", sorted(by))
+            ok(by["big.bin"].get("size") == len(big) and "unhashed" in by["big.bin"]
+               and "sha256" not in by["big.bin"] and "error" not in by["big.bin"],
+               "a file above the read ceiling is listed with its size, not as an error", by["big.bin"])
+            ok(all("sha256" in f for p, f in by.items() if p != "big.bin"),
+               "and every other file still has its sha")
+            one = ds.list_files("big.bin")
+            ok(one["sha256"] == hashlib.sha256(big).hexdigest() and one["size"] == len(big),
+               "listing that one file computes its sha, streamed", one["sha256"][:12])
+            with _mock.patch.object(Dataset, "_read_bytes", side_effect=AssertionError("a file was read")), \
+                 _mock.patch.object(Dataset, "_stream_sha", side_effect=AssertionError("a file was hashed")):
+                bare = ds.list_files("", hashes=False)
+            ok(all(set(f) == {"path", "size"} for f in bare["files"]) and bare["count"] == 5
+               and {f["path"]: f["size"] for f in bare["files"]}["ten.md"] == len(ten),
+               "hashes=False gives path and size and reads no file", bare["files"][:2])
+            d1 = ds.list_files("", depth=1)
+            ok([f["path"] for f in d1["files"]] == ["big.bin", "crlf.md", "ten.md"],
+               "depth=1 lists the files of this level", [f["path"] for f in d1["files"]])
+            ok(d1["folders"] == [{"path": "sub", "files": 2,
+                                  "bytes": len("alpha\nBeta\ngamma\n") + len(b"%PDF-1.4 fake\n")}],
+               "and sums up what is deeper, one line per folder", d1["folders"])
+            d2 = ds.list_files("", depth=2)
+            ok("sub/b.md" in [f["path"] for f in d2["files"]]
+               and d2["folders"] == [{"path": "sub/deep", "files": 1, "bytes": len(b"%PDF-1.4 fake\n")}],
+               "depth=2 goes one level further", d2["folders"])
+            ds1 = ds.list_files("sub", depth=1)
+            ok([f["path"] for f in ds1["files"]] == ["sub/b.md"]
+               and [f["path"] for f in ds1["folders"]] == ["sub/deep"],
+               "from a subfolder the paths stay relative to the dataset", ds1["folders"])
+            ok(d1["count"] + sum(f["files"] for f in d1["folders"]) == full["count"],
+               "files listed plus files summed up are all the files: nothing falls between")
+            ok([f["path"] for f in ds.list_files("", pattern="*.pdf")["files"]] == ["sub/deep/c.pdf"],
+               "pattern keeps the files that match, at any depth")
+            ok([f["path"] for f in ds.list_files("", pattern="sub/*.md")["files"]] == ["sub/b.md"],
+               "and a pattern can name the folder too")
+            ok(ds.list_files("", depth=1, pattern="*.md", hashes=False)["folders"]
+               == [{"path": "sub", "files": 1, "bytes": len("alpha\nBeta\ngamma\n")}],
+               "the three combine: the folder line counts only what the pattern kept")
+            must_fail("a negative depth", lambda: ds.list_files("", depth=-1))
+            with _mock.patch.object(_v, "MAX_LIST_FILES", 3):
+                must_fail("more files than the ceiling", lambda: ds.list_files(""))
+                ok(ds.list_files("", depth=1)["count"] == 3,
+                   "the ceiling counts the files LISTED: depth=1 gets under it")
+        sections.append(('[3e]', _s3))
+
+        def _s4():
+            print("\n[5c-0] an image without Pango is a named fault, not a bare OSError")
+            _real = __import__
+
+            def _no_pango(name, *a, **k):
+                if name == "weasyprint":
+                    raise OSError("cannot load library 'libpango-1.0-0'")
+                return _real(name, *a, **k)
+            with _mock.patch("builtins.__import__", side_effect=_no_pango):
+                try:
+                    _rp.build([], {})
+                    ok(False, "report.build turns the OSError into a ReportFault")
+                except _rp.ReportFault as e:
+                    ok("libpango" in str(e), "report.build turns the OSError into a ReportFault that names the library", e)
+                except OSError as e:
+                    ok(False, "report.build turns the OSError into a ReportFault", f"bare OSError: {e}")
+        sections.append(('[5c-0]', _s4))
+
+        # Each section runs guarded: a defect that makes a call RAISE where a
+        # check expected an answer must still be a FAIL that names the section
+        # and the exception — a suite that dies in a traceback is red without
+        # saying of what, and the sections after it are never seen.
+        for title, run in sections:
+            try:
+                run()
+            except Exception as e:  # noqa: BLE001 — any way of dying is a failure here
+                ok(False, f"{title} ran to the end", f"died on {type(e).__name__}: {str(e)[:120]}")
+            # What a section that died left behind must not turn the sections
+            # after it red as well: one defect, one name.
+            (root / "bait.md").unlink(missing_ok=True)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> int:
+    # Before anything runs a search or draws a page. With a caller's pattern
+    # back on `re` the suite below would not go red, it would not come back.
+    if not regex_clock_static_check():
+        print(f"\n{'=' * 46}\n  {OK} passed, {FAIL} failed — stopped before the rest\n{'=' * 46}")
+        return 1
     root = tempfile.mkdtemp(prefix="archivist-test-")
     try:
         os.makedirs(Path(root) / "Example Project" / "01 Notes")
@@ -3492,6 +3757,7 @@ def main() -> int:
         print("\n[14bis2] the delivery scripts read the pin they install")
         ship_scripts_check()
         smoke_check()
+        ask_for_less_check()
 
         print("\n[14c] the manual says what the code actually offers")
         guide_signature_check()

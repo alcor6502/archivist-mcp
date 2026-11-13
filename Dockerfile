@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends git util-linux 
 WORKDIR /app
 COPY requirements.txt requirements-server.txt ./
 RUN pip install --no-cache-dir -r requirements.txt -r requirements-server.txt
-COPY vault.py render.py report.py server.py preflight.py entrypoint.sh reference-guide.md ./
+COPY vault.py render.py report.py rxlimit.py server.py preflight.py entrypoint.sh reference-guide.md ./
 # The engine — gate, refusals, config, preflight harness, log discipline — is a
 # folder of this repository, not a pip package: it is imported from /app.
 COPY mcp_common_engine ./mcp_common_engine

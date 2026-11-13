@@ -42,7 +42,9 @@ import tarfile
 import tempfile
 import unicodedata
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+
+import rxlimit
 
 MAX_READ_BYTES = 2_000_000
 MAX_WRITE_BYTES = 2_000_000
@@ -52,6 +54,7 @@ MAX_BINARY_BYTES = 2_000_000       # read/write binary: above this, use SMB/scp
 MAX_ARCHIVE_BYTES = 30_000_000     # sum of files packed by archive() (input)
 MAX_ARCHIVE_OUT_BYTES = 5_000_000  # cap on the PRODUCED tgz: that is what crosses the context
 MAX_SEARCH_HITS = 200
+MAX_SEARCH_CONTEXT = 5             # lines shown on each side of a match
 MAX_READ_FILES = 50                # paths in one read_files(); their total obeys MAX_READ_BYTES
 MAX_EDITS = 50                     # replacements in one edit_file(edits=...)
 MAX_APPEND_BYTES = 64_000          # largest block for append()
@@ -774,6 +777,21 @@ class Dataset:
             raise VaultFault(f"read {len(data)} bytes, {size} declared: incomplete read, stopping")
         return data
 
+    def _stream_sha(self, p: Path) -> tuple[int, str]:
+        """Size and sha256 of a file of ANY size, a megabyte at a time: the
+        hash of a file too big to hand over is still worth having — it is how
+        a copy made over SMB is told apart from the original. Same rule as
+        _read_bytes on a short read: a fault, never a sha of half a file."""
+        size = p.stat().st_size
+        h, n = hashlib.sha256(), 0
+        with open(p, "rb") as fh:
+            while chunk := fh.read(1 << 20):
+                h.update(chunk)
+                n += len(chunk)
+        if n != size:
+            raise VaultFault(f"read {n} bytes, {size} declared: incomplete read, stopping")
+        return size, h.hexdigest()
+
     def _lock(self):
         """The dataset lock. A fresh open() every time on purpose: flock is tied
         to the open file description, so two threads sharing one handle would
@@ -935,26 +953,76 @@ class Dataset:
 
     # ---------- reading ----------
 
-    def list_files(self, rel: str = "") -> dict:
+    def list_files(self, rel: str = "", depth: int = 0, pattern: str = "",
+                   hashes: bool = True) -> dict:
+        """What is under `rel`. Three knobs, all of them about asking for LESS:
+
+        `depth` — 0 is the whole tree; N lists the files at most N levels
+        below `rel` and answers for everything deeper with one line per
+        folder (`folders`: path, files, bytes), so a tree can be walked from
+        the top without being downloaded. `pattern` — a glob on the path
+        relative to `rel`, matched as `archive` matches its own; it filters
+        files before anything is counted. `hashes=False` — path and size
+        only, from a stat: no file is read.
+
+        A file above the read ceiling used to be an error entry with no size.
+        It is a file like the others, so it is listed with its size and a
+        note where the sha would be: hashing every large file of a folder on
+        every listing is a cost nobody asked for. Listing THAT file by its
+        own path does hash it, streamed."""
+        if depth < 0:
+            raise VaultError("depth cannot be negative: 0 is the whole tree")
         base = self._resolve(rel, must_exist=True)
         if base.is_file():
-            data = self._read_bytes(base)
-            return {"dataset": self.name, "file": self._rel(base),
-                    "size": len(data), "sha256": _sha(data)}
-        out, n = [], 0
+            size, sha = self._stream_sha(base)
+            return {"dataset": self.name, "file": self._rel(base), "size": size, "sha256": sha}
+        out, deeper = [], {}
         for p in self._walk(base):
-            n += 1
-            if n > MAX_LIST_FILES:
-                raise VaultError(f"more than {MAX_LIST_FILES} files: narrow the path")
-            try:
-                data = self._read_bytes(p)
-                out.append({"path": self._rel(p), "size": len(data), "sha256": _sha(data)})
-            except VaultError as e:
-                out.append({"path": self._rel(p), "error": str(e)})
-        return {"dataset": self.name, "base": self._rel(base),
-                "count": len(out), "files": out}
+            below = p.relative_to(base)
+            if pattern and not below.match(pattern):
+                continue
+            if depth and len(below.parts) > depth:
+                key = str(PurePosixPath(*below.parts[:depth]))
+                d = deeper.setdefault(key, [0, 0])
+                d[0] += 1
+                d[1] += p.stat().st_size
+                continue
+            if len(out) >= MAX_LIST_FILES:
+                raise VaultError(
+                    f"more than {MAX_LIST_FILES} files: narrow the path, or ask for less "
+                    "with depth=1 or a pattern")
+            size = p.stat().st_size
+            entry = {"path": self._rel(p), "size": size}
+            if hashes:
+                if size > MAX_READ_BYTES:
+                    entry["unhashed"] = (f"over {MAX_READ_BYTES:,} bytes: list this file "
+                                         "by its own path for its sha256")
+                else:
+                    entry["sha256"] = _sha(self._read_bytes(p))
+            out.append(entry)
+        res = {"dataset": self.name, "base": self._rel(base), "count": len(out), "files": out}
+        if depth:
+            res["folders"] = [
+                {"path": self._rel(base / k), "files": n, "bytes": size}
+                for k, (n, size) in sorted(deeper.items())]
+        return res
 
-    def read_file(self, rel: str) -> dict:
+    def read_file(self, rel: str, from_line: int = 0, lines: int = 0) -> dict:
+        """The whole file, or a run of its lines.
+
+        A range exists for the long document: reading 40 lines of a 3,000-line
+        log used to cost the whole log, on the way out and in the caller's
+        context. `from_line` is 1-based; `lines` is how many (0: to the end);
+        either one alone is enough to ask for a range.
+
+        Two things are the same with or without a range, on purpose. The
+        `sha256` and `size` are the WHOLE file's — that sha is what edit_file
+        and append want back, so a partial read is enough to make an edit.
+        And the lines are numbered exactly as `search` numbers them, because
+        both go through `_lines`: a hit at line 812 is read with
+        from_line=812."""
+        if from_line < 0 or lines < 0:
+            raise VaultError("from_line and lines cannot be negative: 0 means 'not given'")
         p = self._resolve(rel, must_exist=True)
         if not p.is_file():
             raise VaultError(f"not a file: {self._rel(rel)!r}")
@@ -963,8 +1031,25 @@ class Dataset:
             text = data.decode("utf-8")
         except UnicodeDecodeError:
             raise VaultError("not UTF-8 (binary?): read_file is for text only — use read_binary")
-        return {"dataset": self.name, "path": self._rel(p), "size": len(data),
-                "sha256": _sha(data), "content": text}
+        out = {"dataset": self.name, "path": self._rel(p), "size": len(data),
+               "sha256": _sha(data)}
+        if not from_line and not lines:
+            return {**out, "content": text}
+        every = self._lines(text)
+        first = from_line or 1
+        if first > max(len(every), 1):
+            raise VaultError(f"from_line {first} is past the end: the file has {len(every)} lines")
+        chosen = every[first - 1: first - 1 + lines] if lines else every[first - 1:]
+        return {**out, "total_lines": len(every), "from_line": first,
+                "lines": len(chosen), "content": "".join(chosen)}
+
+    @staticmethod
+    def _lines(text: str, keepends: bool = True) -> list[str]:
+        """The one definition of a line. read_file's ranges (endings kept, so
+        the run it returns is the file's own bytes) and search's line numbers
+        (endings off, so `$` means the end of the text) both come from here,
+        and so cannot disagree on where line 812 is."""
+        return text.splitlines(keepends=keepends)
 
     def read_files(self, rels: list[str]) -> dict:
         """Several text files in ONE call, each with its sha256.
@@ -1377,17 +1462,32 @@ class Dataset:
 
     # ---------- querying ----------
 
-    def search(self, pattern: str, rel: str = "", regex: bool = False) -> dict:
+    def search(self, pattern: str, rel: str = "", regex: bool = False,
+               context: int = 0, ignore_case: bool = False) -> dict:
+        """Grep. `context` lines on each side of a match save the read_file
+        that used to follow every hit; they are printed as grep prints them —
+        `path:12: text` for a match, `path-11- text` for a line of context,
+        `--` between two groups that do not touch — and the ceiling stays a
+        count of MATCHES.
+
+        A regex is the caller's code running here, so it runs on a clock
+        (rxlimit): one budget for the whole call, and using it up is a
+        refusal, not a partial answer — a truncated result proves presence,
+        a timed-out one would prove nothing and look the same."""
         if not pattern or len(pattern) > 500:
             raise VaultError("pattern empty or too long")
+        if not 0 <= context <= MAX_SEARCH_CONTEXT:
+            raise VaultError(f"context must be between 0 and {MAX_SEARCH_CONTEXT} lines")
         base = self._resolve(rel, must_exist=True)
-        rx = None
+        rx, budget = None, None
         if regex:
             try:
-                rx = _re.compile(pattern)
-            except _re.error as e:
+                rx = rxlimit.compile(pattern, ignore_case)
+            except rxlimit.error as e:
                 raise VaultError(f"invalid regex: {e}")
-        hits, scanned, truncated = [], 0, False
+            budget = rxlimit.Budget()
+        needle = pattern.casefold() if ignore_case else pattern
+        out, matches, scanned, truncated = [], 0, 0, False
         targets = [base] if base.is_file() else self._walk(base)
         for p in targets:
             try:
@@ -1395,18 +1495,43 @@ class Dataset:
             except (VaultError, UnicodeDecodeError):
                 continue  # binaries and oversized files: findable by name only
             scanned += 1
-            for i, line in enumerate(text.splitlines(), 1):
-                ok = bool(rx.search(line)) if rx else (pattern in line)
-                if ok:
-                    if len(hits) >= MAX_SEARCH_HITS:
+            rows = self._lines(text, keepends=False)
+            found = []
+            for i, line in enumerate(rows):
+                if rx:
+                    try:
+                        hit = budget.search(rx, line)
+                    except rxlimit.RegexTimeout:
+                        raise VaultError(
+                            f"the regex ran for more than {budget.seconds:g} s and was stopped: "
+                            "simplify it (nested repetitions are the usual cause) or narrow "
+                            "the path") from None
+                else:
+                    hit = needle in (line.casefold() if ignore_case else line)
+                if hit:
+                    if matches >= MAX_SEARCH_HITS:
                         truncated = True
                         break
-                    hits.append(f"{self._rel(p)}:{i}: {line.strip()[:200]}")
+                    matches += 1
+                    found.append(i)
+            name, last, hits = self._rel(p), None, set(found)
+            for i in found:
+                lo, hi = max(0, i - context), min(len(rows) - 1, i + context)
+                if last is not None and lo > last + 1 and context:
+                    out.append("--")
+                for j in range(lo if last is None else max(lo, last + 1), hi + 1):
+                    a, b = (":", ": ") if j in hits else ("-", "- ")
+                    out.append(f"{name}{a}{j + 1}{b}{rows[j].strip()[:200]}")
+                last = hi if last is None else max(last, hi)
             if truncated:
                 break
+            if found and context:
+                out.append("--")
+        if out and out[-1] == "--":
+            out.pop()
         return {"dataset": self.name, "base": self._rel(base), "pattern": pattern,
-                "files_scanned": scanned, "matches": len(hits),
-                "truncated": truncated, "lines": hits}
+                "files_scanned": scanned, "matches": matches,
+                "truncated": truncated, "lines": out}
 
     def manifest(self, rel: str = "") -> dict:
         # The lines that go into the fingerprint carry dataset-relative paths, so

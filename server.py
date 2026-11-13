@@ -84,7 +84,7 @@ from mcp_common_engine.refusals import make_tool
 from preflight import HTTP_MODES, http_mode_from_env
 from vault import VaultRoot, VaultError, VaultFault, guide_for, server_instructions
 
-VERSION = "4.0.2"
+VERSION = "4.1.0"
 
 # The shape of a line of ours. It is a NAME because it is used twice: here, and
 # again below where fastmcp's own handlers are given the same shape. Written out
@@ -348,17 +348,23 @@ def dataset_status(dataset: str, key: str = "") -> dict:
 
 
 @tool
-def list_files(dataset: str, path: str = "", key: str = "") -> dict:
-    """Files under `path` with size and sha256, recursive."""
+def list_files(dataset: str, path: str = "", depth: int = 0, pattern: str = "",
+               hashes: bool = True, key: str = "") -> dict:
+    """Files under `path` with size and sha256, recursive. To ask for less:
+    depth=1 (this level, deeper folders summed up), pattern="*.pdf",
+    hashes=False (names and sizes only, nothing read)."""
     ds, rel = vault.open(dataset, path, key)
-    return ds.list_files(rel)
+    return ds.list_files(rel, depth, pattern, hashes)
 
 
 @tool
-def read_file(dataset: str, path: str, key: str = "") -> dict:
-    """Read ONE text file: content plus sha256. For several, read_files."""
+def read_file(dataset: str, path: str, from_line: int = 0, lines: int = 0,
+              key: str = "") -> dict:
+    """Read ONE text file: content plus sha256. For several, read_files.
+    Part of a long file: from_line (1-based) and lines (how many); the
+    sha256 is still the whole file's, so it is good for edit_file."""
     ds, rel = vault.open(dataset, path, key)
-    return ds.read_file(rel)
+    return ds.read_file(rel, from_line, lines)
 
 
 @tool
@@ -428,12 +434,13 @@ def move_path(dataset: str, src: str, dst: str, key: str = "") -> dict:
 
 
 @tool
-def search(dataset: str, pattern: str, path: str = "",
-           regex: bool = False, key: str = "") -> dict:
+def search(dataset: str, pattern: str, path: str = "", regex: bool = False,
+           context: int = 0, ignore_case: bool = False, key: str = "") -> dict:
     """Grep the dataset server-side: the text goes in `pattern` (not
-    `query`). Literal unless regex=True. Answers path:line: text."""
+    `query`). Literal unless regex=True. Answers path:line: text; context=N
+    adds N lines around each match, so the hit needs no read_file after."""
     ds, rel = vault.open(dataset, path, key)
-    return ds.search(pattern, rel, regex)
+    return ds.search(pattern, rel, regex, context, ignore_case)
 
 
 @tool

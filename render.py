@@ -38,6 +38,8 @@ import os
 import re
 from typing import Any
 
+import rxlimit
+
 MAX_DOCUMENT_BYTES = 200_000    # the JSON, serialised — a page is a few KB
 MAX_PAGES = 20
 MAX_BLOCKS = 400
@@ -873,8 +875,8 @@ class _Doc:
             raise RenderError("an empty document: give it a title or blocks")
         for rx in self.forbid:
             try:
-                re.compile(rx)
-            except re.error as e:
+                rxlimit.compile(rx)
+            except rxlimit.error as e:
                 raise RenderError(f"forbid: invalid regex {rx!r}: {e}")
 
     def render(self, out: io.BytesIO, total_pages: int | None, drawn: list[str]) -> int:
@@ -976,8 +978,17 @@ def build(document: dict) -> tuple[bytes, dict]:
     drawn.clear()
     out = io.BytesIO()
     doc.render(out, n, drawn)                         # second pass: "pagina N di M"
+    # The patterns are the caller's, so they run on a clock: one budget for the
+    # whole list, and a pattern that uses it up refuses the document — a guard
+    # that could not finish has not passed.
+    budget = rxlimit.Budget()
     for rx in doc.forbid:
-        hit = next((s for s in drawn if re.search(rx, s)), None)
+        crx = rxlimit.compile(rx)
+        try:
+            hit = next((s for s in drawn if budget.search(crx, s)), None)
+        except rxlimit.RegexTimeout:
+            raise RenderError(f"forbid: the patterns took more than {budget.seconds:g} s to run "
+                              f"(stopped in {rx!r}): simplify it — nothing written") from None
         if hit is not None:
             raise RenderError(f"forbidden pattern {rx!r} matches a string on the page: {hit[:60]!r}")
     missing = [t for t in doc.text_check if not any(t in s for s in drawn)]

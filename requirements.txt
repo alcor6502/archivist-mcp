@@ -9,6 +9,9 @@
 # and every install here is --no-deps, so Pillow is pinned beside it: without
 # this line the suite (and the CI job) die on `import render`.
 reportlab==5.0.1
+# The clock on a caller's regular expression (rxlimit.py): `re` cannot be
+# stopped, `regex` takes a timeout. No dependencies of its own.
+regex==2026.9.29
 pillow==12.3.0
 # render_report lays Markdown out with WeasyPrint, which draws text through
 # Pango and fontconfig: those come from the image (libpangoft2, libharfbuzz,

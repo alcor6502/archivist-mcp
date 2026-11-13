@@ -184,12 +184,12 @@ limits and examples are on each tool's card in
 | **`dataset_create(name)`** | a new, empty dataset, born closed |
 | **`dataset_drop(dataset, expected_manifest)`** | delete an **open** dataset |
 | **`dataset_status(dataset)`** | file counts, git state, commits, size |
-| **`list_files(dataset, path="")`** | recursive listing, size and sha per file |
-| **`read_file(dataset, path)`** | one text file, with its sha |
+| **`list_files(dataset, path="", depth=0, pattern="", hashes=True)`** | listing with size and sha per file; one level, a glob, or names only |
+| **`read_file(dataset, path, from_line=0, lines=0)`** | one text file with its sha, or a run of its lines |
 | **`read_files(dataset, paths)`** | several text files in one call |
 | **`read_binary(dataset, path)`** | any file as base64 |
 | **`read_at(dataset, path, rev)`** | a file at a past revision |
-| **`search(dataset, pattern, path="", regex=False)`** | server-side grep |
+| **`search(dataset, pattern, path="", regex=False, context=0, ignore_case=False)`** | server-side grep, with lines of context |
 | **`manifest(dataset, path="")`** | one fingerprint for a tree |
 | **`archive(dataset, path="", pattern="*.md", max_chars=0)`** | files as one base64 tar.gz, for clients that run code |
 | **`append(dataset, path, text, expected_sha256="")`** | a block at the end of a file |
@@ -326,7 +326,7 @@ check its changelog first.
 | text read and write, binaries | 2 MB |
 | `read_files` · `edit_file` `edits` | 50 paths, 2 MB in all · 50 changes |
 | `append` block | 64 KB |
-| listable files · `search` lines | 3,000 · 200 |
+| listable files · `search` matches · a regex | 3,000 · 200 · 5 seconds per call |
 | `diff` | 60 KB, truncated |
 | `archive` | 30 MB in, 5 MB tgz out |
 | `render_pdf` · `render_report` | 20 pages, 200 KB JSON · 200 pages, 5 MB Markdown |
@@ -370,6 +370,7 @@ maintainer's commit-and-push helper.
 |---|---|
 | `server.py` · `vault.py` · `preflight.py` | tools and startup · datasets, keys, git · startup checks |
 | `render.py` · `report.py` | `render_pdf` (reportlab) · `render_report` (WeasyPrint) |
+| `rxlimit.py` | the clock on a caller's regular expression: `search` and both `forbid` get 5 seconds per call |
 | `reference-guide.md` | the manual served to the model |
 | `mcp_common_engine/` | the engine |
 | `test_engine.py` · `test_vault.py` | the suites |
