@@ -69,6 +69,9 @@ NOT_LOOKED_AT = ("NOT looked at yet: these numbers say the PDF was drawn, not wh
                  "it looks like. See it with view on this path (render_pdf: "
                  "preview=True does it in the same call)")
 
+# The one file of the Finder's that every walker passes over (see _skip).
+FINDER_LITTER = ".DS_Store"
+
 KEYS_BASENAME = "keys.txt"
 TRASH = "Trash"
 LOCKFILE = ".archivist.lock"
@@ -765,7 +768,13 @@ class Dataset:
         # walkers did not go through _resolve, and `search` handed back the
         # content of a file outside the dataset through a link planted inside
         # it. One rule, every walker: a link is not a file of this dataset.
-        return p.is_symlink() or (not p.is_file()) or ".git" in p.parts or p.name == LOCKFILE
+        # And the Finder's litter. A Mac leaves a .DS_Store in every folder it
+        # opens over the share; git already ignores it (it is in the
+        # .gitignore every dataset is born with), so it was the one file a
+        # listing counted and history never held — and a chat reported "two
+        # files I cannot read" in a folder of photos: a video, and this.
+        return (p.is_symlink() or (not p.is_file()) or ".git" in p.parts
+                or p.name in (LOCKFILE, FINDER_LITTER))
 
     def _walk(self, base: Path) -> list[Path]:
         """Every file under `base`, in the order `sorted(base.rglob("*"))`
@@ -873,7 +882,7 @@ class Dataset:
                 self._git("config", "user.email", "archivist-mcp@localhost")
                 gi = self.root / ".gitignore"
                 if not gi.exists():
-                    gi.write_text(f".DS_Store\n{LOCKFILE}\n", encoding="utf-8")
+                    gi.write_text(f"{FINDER_LITTER}\n{LOCKFILE}\n", encoding="utf-8")
                 self._git("add", "-A")
                 self._git("commit", "-q", "--allow-empty", "-m", "archivist-mcp: initial commit")
                 return "git repository created, initial commit done"

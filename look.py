@@ -96,8 +96,11 @@ def is_pdf(data: bytes) -> bool:
 
 def parse_pages(spec: str, total: int, ceiling: int) -> tuple[list[int], list[int]]:
     """`spec` as a caller writes it → the pages to give, and the ones asked
-    for and left out because of the ceiling. '' is page 1; '3'; '2-5'; 'all'.
-    Pages are numbered from 1, as a person counts them."""
+    for and left out because of the ceiling. '' is page 1; '3'; '2-5'; 'all';
+    and, since 4.2.1, a list of those: '1-3,11' — the cover, the index and
+    one page far away are ONE call, which is what checking a report takes.
+    Pages are numbered from 1, as a person counts them, and come back in
+    page order, each once."""
     spec = (spec or "").strip().lower()
     if total < 1:
         raise LookError("the PDF has no pages")
@@ -106,15 +109,19 @@ def parse_pages(spec: str, total: int, ceiling: int) -> tuple[list[int], list[in
     elif spec == "all":
         want = list(range(1, total + 1))
     else:
-        first, sep, last = spec.partition("-")
-        if not first.strip().isdigit() or (sep and not last.strip().isdigit()):
-            raise LookError(f"pages={spec!r}: write one page ('3'), a range ('2-5') or 'all'")
-        a = int(first)
-        b = int(last) if sep else a
-        if not 1 <= a <= b <= total:
-            raise LookError(f"pages={spec!r}: the PDF has {total} "
-                            f"page{'s' if total != 1 else ''}, numbered from 1")
-        want = list(range(a, b + 1))
+        chosen = set()
+        for part in spec.split(","):
+            first, sep, last = part.partition("-")
+            if not first.strip().isdigit() or (sep and not last.strip().isdigit()):
+                raise LookError(f"pages={spec!r}: write one page ('3'), a range ('2-5'), "
+                                "a list of those ('1-3,11') or 'all'")
+            a = int(first)
+            b = int(last) if sep else a
+            if not 1 <= a <= b <= total:
+                raise LookError(f"pages={spec!r}: the PDF has {total} "
+                                f"page{'s' if total != 1 else ''}, numbered from 1")
+            chosen.update(range(a, b + 1))
+        want = sorted(chosen)
     return want[:ceiling], want[ceiling:]
 
 
@@ -212,9 +219,9 @@ def pdf_pages(data: bytes, pages: str = "", size: str = "medium") -> tuple[list[
             pdf.close()
     info = {"pages": total, "shown": want}
     if rest:
-        info["more"] = (f"{MAX_VIEW_PAGES} pages per call: pages {rest[0]}-{rest[-1]} "
-                        f"were left out, ask for them with pages='{rest[0]}-"
-                        f"{min(rest[-1], rest[0] + MAX_VIEW_PAGES - 1)}'")
+        info["more"] = (f"{MAX_VIEW_PAGES} pages per call: {len(rest)} were left out, "
+                        f"from page {rest[0]} to {rest[-1]} — ask again starting at "
+                        f"pages='{rest[0]}-{min(rest[-1], rest[0] + MAX_VIEW_PAGES - 1)}'")
     return images, info
 
 
@@ -260,8 +267,8 @@ def pdf_text(data: bytes, pages: str = "") -> dict:
                 out["text"] = [{"page": n, "text": text_of(n)} for n in want]
                 empty = [t["page"] for t in out["text"] if not t["text"]]
                 if rest:
-                    out["more"] = (f"{MAX_TEXT_PAGES} pages per call: pages {rest[0]}-"
-                                   f"{rest[-1]} were left out")
+                    out["more"] = (f"{MAX_TEXT_PAGES} pages per call: {len(rest)} were "
+                                   f"left out, from page {rest[0]} to {rest[-1]}")
         finally:
             pdf.close()
     if empty:

@@ -107,6 +107,11 @@ INJECTIONS = [
     ("a note is one line again, whatever its length",
      ('        return p.wrap(_req(self.spec, "text", self.what), face, size, width), face, size',
       '        return [_str(_req(self.spec, "text", self.what))], face, size')),
+    ("the document's title line is not measured against its value (4.2.1)",
+     ('            title_fits(follows)\n', "")),
+    ("the title line is measured without the value's own width",
+     ('room = W - 2 * M - ((p.width(value, "B", 21) + TITLE_AIR) if value else 0)',
+      'room = W - 2 * M')),
     ("ASCENT drifts from the font files",
      ("ASCENT = 0.72802734375", "ASCENT = 0.70")),
 ]

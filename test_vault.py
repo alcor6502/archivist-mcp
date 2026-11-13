@@ -1631,6 +1631,7 @@ def guide_signature_check() -> None:
               ("render_report", f"{_rp.MAX_PAGES} pages"),
               ("render_report", f"{_rp.MAX_SOURCE_BYTES // 1_000_000} MB of Markdown"),
               ("render_pdf", f"the first {_lk.MAX_VIEW_PAGES}"),
+              ("render_pdf", f"end {_r.TITLE_AIR} points before `value`"),
               ("view", f"Max {_lk.MAX_VIEW_PAGES} pages"),
               ("view", f"{_lk.VIEW_SIZES['medium']:,}\n  pixels"),
               ("view", f"{_lk.VIEW_SIZES['thumb']} pixels"),
@@ -1778,7 +1779,9 @@ def ask_for_less_check() -> None:
                    "search refuses a regex that does not finish, and says how long it had", msg)
                 ok(took < 3, "and it comes back when the budget ends, not later", f"{took:.2f}s")
                 try:
-                    _r.build({"title": {"text": bait}, "forbid": [evil]})
+                    # In a note, not in the title: since 4.2.1 a title line
+                    # this wide is refused before any pattern is tried.
+                    _r.build({"blocks": [{"type": "note", "text": bait}], "forbid": [evil]})
                     ok(False, "render_pdf refuses a forbid that does not finish")
                 except _r.RenderError as e:
                     ok("took more than 0.3 s" in str(e) and evil in str(e),
@@ -2069,6 +2072,9 @@ def see_check() -> None:
         (root / "g-twelve.pdf").write_bytes(many_pages(12))
         (root / "h-disguised.jpg").write_bytes(many_pages(2))
         (root / "notes.md").write_text("# testo\n")
+        # What a Mac leaves in every folder it opens over the share.
+        (root / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1" + bytes(64))
+        (root / "sub" / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1" + bytes(64))
         (root / "sub" / "deep.png").write_bytes(png((50, 50), (1, 2, 3)))
         for i in range(31):
             (root / "many" / f"p{i:02}.png").write_bytes(png((40, 30), (i * 8, 0, 0)))
@@ -2161,10 +2167,22 @@ def see_check() -> None:
             r = ds.view("g-twelve.pdf", "all")
             ok(len(r.images) == _lk.MAX_VIEW_PAGES and r["shown"] == list(range(1, _lk.MAX_VIEW_PAGES + 1)),
                "pages='all' stops at the ceiling", len(r.images))
-            ok("11-12" in r.get("more", "") and "pages='11-12'" in r.get("more", ""),
+            ok("2 were left out, from page 11 to 12" in r.get("more", "")
+               and "pages='11-12'" in r.get("more", ""),
                "and says which pages were left out and how to ask for them", r.get("more"))
             ok("more" not in ds.view("g-twelve.pdf", "1-10"), "exactly the ceiling leaves nothing out")
-            for bad in ("0", "13", "5-2", "x", "1,3", "2-"):
+            r = ds.view("g-twelve.pdf", "1-2,11")
+            ok(r["shown"] == [1, 2, 11] and near(reds(r), [1, 2, 11]),
+               "a list — pages='1-2,11' — is the cover, the index and one page far "
+               "away in ONE call", (r["shown"], reds(r)))
+            r = ds.view("g-twelve.pdf", "7, 2-3,2")
+            ok(r["shown"] == [2, 3, 7] and near(reds(r), [2, 3, 7]),
+               "in page order, each page once, whatever the order and the spaces", r["shown"])
+            r = ds.view("g-twelve.pdf", "1-6,8-12")
+            ok(len(r.images) == _lk.MAX_VIEW_PAGES and r["shown"][-1] == 11
+               and "pages='12-12'" in r.get("more", ""),
+               "and the ceiling counts the pages of the whole list", (r["shown"], r.get("more")))
+            for bad in ("0", "13", "5-2", "x", "1,,3", "1,x", "1,13", ",", "2-"):
                 must_fail(f"pages={bad!r}", lambda bad=bad: ds.view("g-twelve.pdf", bad))
             msg = refusal(lambda: ds.view("g-twelve.pdf", "13")) or ""
             ok("12 pages" in msg, "a page past the end is told how many there are", msg)
@@ -2206,7 +2224,8 @@ def see_check() -> None:
             ok([i["n"] for i in r["items"]] == list(range(1, 9)), "numbered from 1, as drawn")
             ok("deep.png" not in names, "one level: a subfolder's picture is not on it")
             # Two: notes.md and the .gitignore every dataset is born with —
-            # the same files list_files counts there, by the same rule.
+            # the same files list_files counts there, by the same rule. NOT
+            # three: the .DS_Store beside them is nobody's file.
             ok(r.get("not_shown", "").startswith("2 other files"),
                "and what is neither is counted, not listed", r.get("not_shown"))
             broken = next(i for i in r["items"] if i["name"] == "f-broken.jpg")
@@ -2250,6 +2269,9 @@ def see_check() -> None:
             r = ds.pdf_text("g-twelve.pdf", "2")
             ok(r["text"] == [{"page": 2, "text": "pagina inventata numero 2"}],
                "pages='2' is the text of page 2 and of no other", r["text"])
+            r = ds.pdf_text("g-twelve.pdf", "12,2")
+            ok([t["page"] for t in r["text"]] == [2, 12] and "numero 12" in r["text"][1]["text"],
+               "a list of pages, as in view", [t["page"] for t in r["text"]])
             r = ds.pdf_text("g-twelve.pdf", "11-12")
             ok([t["page"] for t in r["text"]] == [11, 12] and "numero 12" in r["text"][1]["text"],
                "a range, in order")
@@ -2257,7 +2279,7 @@ def see_check() -> None:
                "asked for the scan itself, the answer is empty and says why")
             with _mock.patch.object(_lk, "MAX_TEXT_PAGES", 5):
                 r = ds.pdf_text("g-twelve.pdf", "all")
-            ok(len(r["text"]) == 5 and "6-12" in r.get("more", ""),
+            ok(len(r["text"]) == 5 and "7 were left out, from page 6 to 12" in r.get("more", ""),
                "the pages of text in one call have a ceiling, and the rest is named", r.get("more"))
             with _mock.patch.object(_v, "MAX_READ_BYTES", 30):
                 msg = refusal(lambda: ds.pdf_text("g-twelve.pdf", "1-2")) or ""
@@ -2308,6 +2330,63 @@ def see_check() -> None:
             ok(ds.view("out/report.pdf", "all")["pages"] == rep_["pages"],
                "and view shows the report it wrote, page for page")
         sections.append(("[7e]", _r))
+
+        def _m():
+            print("\n[7f] the Finder's .DS_Store is no file of the dataset, for any tool")
+            listed = [f["path"] for f in ds.list_files("", 0, "", False)["files"]]
+            ok(".DS_Store" not in listed and "sub/.DS_Store" not in listed and ".gitignore" in listed,
+               "list_files does not list it, at the root or below — and still lists .gitignore",
+               [x for x in listed if x.startswith(".") or "/." in x])
+            ok((root / ".DS_Store").exists() and (root / "sub" / ".DS_Store").exists(),
+               "though it is there on the disk: hidden, not deleted")
+            one = ds.list_files("sub", 1, "", False)
+            ok([f["path"] for f in one["files"]] == ["sub/deep.png"],
+               "a folder holding one picture and a .DS_Store holds one file", one["files"])
+            ok(ds.status()["total_files"] == len(listed),
+               "dataset_status counts the same files list_files lists",
+               (ds.status()["total_files"], len(listed)))
+            before = ds.manifest("")["manifest_sha256"]
+            (root / "sub" / ".DS_Store").write_bytes(b"changed by the Finder")
+            ok(ds.manifest("")["manifest_sha256"] == before,
+               "and the manifest does not move when the Finder rewrites it")
+            ok(".DS_Store" in (root / ".gitignore").read_text().split(),
+               "git ignores it too: the .gitignore every dataset is born with names it")
+        sections.append(("[7f]", _m))
+
+        def _h():
+            print("\n[7g] render_pdf — the title line is measured against its value")
+            base = json.loads((HERE / "scripts" / "fixtures" / "quadro.json").read_text(encoding="utf-8"))
+
+            def with_title(**kw):
+                d = json.loads(json.dumps(base))
+                d["title"] = {**d["title"], **kw}
+                return d
+
+            ok(ds.render_pdf("", base)["pages"] == 1, "the fixture's own title fits, as it always did")
+            long = base["title"]["subtitle"] + " — e una coda finta che non ci sta"
+            msg = refusal(lambda: ds.render_pdf("", with_title(subtitle=long))) or ""
+            ok("title: text, subtitle and badge take" in msg and "too wide" in msg
+               and "beside the value" in msg and "shorten the subtitle" in msg,
+               "a subtitle that would run under the value is REFUSED, with the overrun", msg)
+            m = re.search(r"take (\d+)pt and the line has (\d+)pt .*: (\d+)pt too wide", msg)
+            ok(m is not None and int(m[1]) - int(m[2]) in (int(m[3]) - 1, int(m[3]), int(m[3]) + 1),
+               "and the three numbers agree: taken, room, overrun", m.groups() if m else msg)
+            ok(ds.render_pdf("", with_title(subtitle=long, value=""))["pages"] == 1,
+               "the same subtitle with NO value has the whole line and fits")
+            msg = refusal(lambda: ds.render_pdf("", with_title(badge="UN BADGE FINTO E LUNGHISSIMO DAVVERO"))) or ""
+            ok("title:" in msg and "too wide" in msg, "the badge counts: it is on the same line", msg)
+            # The number is the constant's: one point less air than asked is a
+            # refusal, exactly the air is not.
+            lo, hi = 1, 400
+            while lo < hi:                      # the longest run of 'x' that still fits
+                mid = (lo + hi + 1) // 2
+                if refusal(lambda: ds.render_pdf("", with_title(subtitle="x" * mid))) is None:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            ok(5 < lo < 400 and refusal(lambda: ds.render_pdf("", with_title(subtitle="x" * (lo + 1)))),
+               "there is a longest subtitle that fits, and one character more does not", lo)
+        sections.append(("[7g]", _h))
 
         for title, fn in sections:
             try:

@@ -143,6 +143,7 @@ Three ways to ask for less, and they combine:
 - `hashes=False` gives `path` and `size` only: nothing is read, so it is the
   cheap way to look at a folder of photos.
 Stops at 3,000 files listed: narrow it with one of the three, or with `path`.
+The Finder's `.DS_Store` is never listed nor counted, by any tool.
 A file above 2 MB is listed with its size and `unhashed` in place of the sha;
 call `list_files` on that one file and the sha is computed, whatever the size.
 
@@ -222,7 +223,9 @@ An **empty `path`** renders and returns `pdf_base64` without writing — the
 The document: `{"page", "title", "footer", "forbid", "text_check", "blocks"}`.
 - `page`: `{"size": "a4"|"letter", "margin": 28, "landscape": false}`
 - `title`: `{"text", "subtitle", "badge", "value"}` — one line, a red badge,
-  a big figure on the right; repeated on every page after the first
+  a big figure on the right; repeated on every page after the first. The line
+  is measured: text, subtitle and badge must end 6 points before `value`.
+  Too long is a refusal that says by how many points: shorten the subtitle
 - `footer`: list of lines, on every page; the last one gets `· pagina N di M`
 - `forbid`: regexes that must match NO string drawn (an account number, a
   name) — a match is a refusal and nothing is written; so is a list that takes
@@ -434,9 +437,10 @@ Returns `size · sha256 · commit · pages · files · empty_groups · missing �
 sections · look`, where `sections` is `[{"file", "page"}]` — the index as
 printed, so the chat can say "Emocromo on page 7" without reopening the PDF.
 
-**Look at it before saying it is done**: `view` on the same path — the cover
-and index with `pages="1-2"`, then one page per kind of content (a wide
-table, a landscape group), taken from `sections`. Not all of them.
+**Look at it before saying it is done**: ONE `view` on the same path with a
+list of pages — the cover, the index and one page per kind of content (a wide
+table, a landscape group) taken from `sections`: `pages="1-2,7,31"`. Not all
+of them.
 
 `sources`: `{"base": "", "groups": [ … ]}`. `base` is the folder to start from
 (empty = the dataset root) and the listing is **not recursive**: a pattern on
@@ -555,7 +559,9 @@ and the original never leaves at full resolution.
 - **A picture** — JPEG, PNG, HEIC, WebP, GIF, TIFF, BMP: reduced to 1,500
   pixels on its long side, upright. Returns `pixels` (the original) and
   `shown`.
-- **A PDF**: `pages=""` is page 1, `"3"`, `"2-5"`, `"all"`. Max 10 pages
+- **A PDF**: `pages=""` is page 1, `"3"`, `"2-5"`, `"all"`, or a list of
+  those — `"1-2,11,40"` is the cover, the index and two pages far apart in
+  one call. They come back in page order. Max 10 pages
   per call; `more` says which were left out and how to ask for them. Returns
   `pages` (how many it has) and `shown`.
 - **A folder** (`path=""` is the dataset root): one numbered sheet of the
@@ -574,7 +580,8 @@ used or the PDF has more pages than a preview shows.
 What a PDF **says**, without the PDF crossing the wire.
 - `pages=""`: the map — `pages`, `outline` (`level · title · page`) and
   `chars_per_page`. Read it first on a long PDF, then ask for the pages.
-- `pages="3"`, `"2-5"`, `"all"`: `text`, one entry per page. Max 50 pages
+- `pages="3"`, `"2-5"`, `"1-2,11"`, `"all"`: `text`, one entry per page.
+  Max 50 pages
   per call and 2 MB of text.
 
 **No OCR.** A page with no text layer is a scan or a picture: it is listed in
@@ -657,5 +664,6 @@ modified: a document from 2024 thrown away yesterday survives
 | `cannot show ...: not a picture this server can open` | `view` shows pictures and PDFs: for text `read_file`, for anything else `read_binary` |
 | `pages=...: the PDF has N pages` | pages count from 1; `pdf_text` with no `pages` says how many |
 | `the PDF cannot be opened` | damaged, or protected by a password: tell the person |
+| `title: text, subtitle and badge take N pt` | the document's title line does not fit beside its `value`: shorten the subtitle by the points it says |
 | `the archive would be N characters of base64, over the ...` | your own `max_chars` stopped it before it was built |
 | `dataset ... is no longer there` | it was dropped while your call was in flight |

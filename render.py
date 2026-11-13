@@ -55,6 +55,7 @@ TAG_STYLES = {"t-ord": ("#f3e6df", "#9a4a1f"), "t-qual": ("#e0efe6", "#1a7f52"),
               "t-muni": ("#e4eef6", "#2E6E8E"), "t-roc": ("#efe9f5", "#6b4b9a"),
               "t-mix": ("#f2eede", "#8a6d1f"), "t-none": ("#eef0f2", "#9aa7b4")}
 LINE, BG, SEP = "#e3e8ee", "#f6f8fa", "#cdd8e2"
+TITLE_AIR = 6   # least clear space between the title line's text and its value
 GAP = 12    # the one unit of breathing room: between cards, around the stats band, under the title rule
 
 # How far the ink of a line rises above its baseline, in ems: the ascent of
@@ -911,19 +912,60 @@ class _Doc:
             for ln in lines:
                 p.text(W / 2, y, ln, "R", 8, "muted", "center"); y -= 10
 
-        def title_line(y, follows=False):
-            t = _str(self.title.get("text"))
-            if not t:
-                return y
-            p.text(M, y, t, "B", 19, "black")
-            x = M + p.width(t, "B", 19) + 10
+        def title_parts(follows):
+            """The title line as it will be drawn: [(text, face, size, gap
+            after)] from the left, and the value that comes in from the right
+            on the first page."""
             s = _str(self.title.get("subtitle")) + ("  ·  (segue)" if follows else "")
+            badge = self.title.get("badge")
+            left = [(_str(self.title.get("text")), "B", 19, 10)]
             if s:
-                p.text(x, y + 1, s, "R", 8.5, "muted"); x += p.width(s, "R", 8.5) + 6
-            if self.title.get("badge"):
-                p.text(x, y + 1, "· " + _str(self.title["badge"]), "B", 8.5, "red")
-            if not follows and self.title.get("value"):
-                p.text(W - M, y - 1, _str(self.title["value"]), "B", 21, "navy", "right")
+                left.append((s, "R", 8.5, 6))
+            if badge:
+                left.append(("· " + _str(badge), "B", 8.5, 0))
+            value = "" if follows else _str(self.title.get("value"))
+            return left, value
+
+        def title_fits(follows):
+            """Until 4.2.1 nothing measured this line: text, subtitle and
+            badge were laid from the left, the value from the right, and a
+            long subtitle ran under the value and off the page with
+            `missing: []` in the answer — seen only by looking at the page.
+            Refused like every other title-like line, with the overrun. The
+            line has two shapes and each is asked where it is drawn: the first
+            page carries the value, a page after it carries "(segue)" instead
+            — so a one-page document is never refused for a second page it
+            has not got."""
+            left, value = title_parts(follows)
+            used = sum(p.width(t, f, sz) + gap for t, f, sz, gap in left)
+            used -= left[-1][3]
+            # TITLE_AIR, not GAP: a fixture of this repository leaves 11pt
+            # there and reads well. The guard is against text UNDER the
+            # value, not a rule of style, so it asks for the least air that
+            # still keeps the two apart.
+            room = W - 2 * M - ((p.width(value, "B", 21) + TITLE_AIR) if value else 0)
+            if used > room:
+                where = "on the pages after the first" if follows else (
+                    "beside the value" if value else "on the page")
+                raise RenderError(
+                    f"title: text, subtitle and badge take {used:.0f}pt and the line has "
+                    f"{room:.0f}pt {where}: {used - room:.0f}pt too wide — shorten the subtitle, or the title")
+
+
+        def title_line(y, follows=False):
+            if not _str(self.title.get("text")):
+                return y
+            title_fits(follows)
+            left, value = title_parts(follows)
+            x = M
+            for i, (t, face, size, gap) in enumerate(left):
+                # The title sits on the baseline; what follows it is small
+                # type, raised a point to read as centred on it.
+                p.text(x, y + (1 if i else 0), t, face, size,
+                       "black" if not i else ("red" if face == "B" else "muted"))
+                x += p.width(t, face, size) + gap
+            if value:
+                p.text(W - M, y - 1, value, "B", 21, "navy", "right")
             p.line(M, y - 11, W - M, y - 11, "navy", 1.6)
             return y - 11 - GAP
 
