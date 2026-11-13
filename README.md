@@ -5,261 +5,35 @@
 **A document vault an LLM can read and write, git-versioned on every write,
 self-hosted on your own server.**
 
-No data leaves your machine except towards the conversation that asked for it.
-Every change is a commit. Nothing is deleted by accident, and what is deleted
-can be recovered.
-
-*An Italian translation was maintained until `v2.1.0` and is still readable at
-that tag. It was dropped rather than left to rot: the sweep that ended it found
-seven divergences, and all seven were on the Italian side — including a command
-that skipped nothing because the names it passed had been translated too. Two
-files of prose cannot be kept honest by a test, and one that is wrong is worse
-than one that is missing, because it gets believed.*
+Archivist is an MCP server (Model Context Protocol: how an LLM client such as
+Claude calls external tools) that gives your conversations a persistent set of
+files. The vault is split into **datasets**, top-level folders with their own
+git repository, and a key registry decides which ones a conversation may reach.
+Every write is a commit, refused if the file changed since it was read, so a
+model's mistake can always be undone. It runs as a Docker container on Unraid,
+is published by Tailscale Funnel, and lets in a single GitHub account.
 
 ---
 
-## Why it exists
+## Quick start
 
-Anyone working with an LLM on something serious hits the same wall: **the
-conversations do not remember.** Every chat starts from nothing, and the
-material that should accumulate — decisions, data, working notes — ends up
-scattered between attachments re-uploaded every time and old chats you can no
-longer find.
+### Prerequisites
 
-The obvious answer is "put the files in a shared folder". But a shared folder
-solves half the problem and creates the other half:
+- **Unraid 7** with the **Tailscale plugin** (it gives the container its own
+  Tailscale identity; keep it even if Tailscale on the host is off). On the
+  host, **Allow Tailscale Funnel = No**: the Funnel belongs to the container.
+- A **Tailscale** tailnet with **MagicDNS** and **HTTPS Certificates** on, and
+  Funnel allowed in the tailnet policy (granting it to `autogroup:member`
+  survives a recreated node).
+- An **SSD** pool for the vault, and a **GitHub** account.
 
-| | Synced folder | Archivist |
-|---|---|---|
-| The model reads the files | you re-upload them by hand | it reads them when it needs them |
-| The model writes the files | no | yes, with a commit |
-| Two conversations writing at once | last one wins, silently | the second is **refused** and told why |
-| "How did this file look on Tuesday?" | depends on the service's bin | `read_at`, always |
-| "What changed" | nothing | full git history |
-| One project must not see another | nothing | datasets with keys |
+Below, `<host>.<tailnet>.ts.net` is the container's Tailscale name and
+`<ssd-pool>` your pool.
 
-The real leap is not the access: it is **git underneath**. Once every write is a
-commit, you stop being afraid to let a model write. If it gets something wrong,
-you go back. If two chats collide, it tells you instead of letting the last one
-win. If a file disappears, it was only moved.
+### Steps
 
-### Datasets
-
-The vault root holds **datasets**: top-level directories, each with its own
-independent git repository. The name is borrowed from ZFS, for the same reason:
-a dataset is a unit that moves, replicates and restores on its own, without
-touching the others.
-
-```
-vault/
-├── keys.txt                  ← key registry
-├── Example Project/          ← a dataset, with its own .git
-│   ├── 01 Notes/
-│   └── Trash/
-└── Scratch/                  ← another dataset, with its own .git
-```
-
-**Every call names its dataset explicitly**, in its own `dataset` argument;
-`path` is relative to that dataset, and an empty path means the whole dataset.
-There is no root-level operation at all — and the entire protection model
-follows from that single rule, with no exception lists to maintain. `keys.txt`
-is not merely refused: it is not expressible, because it is not a dataset.
-
-```
-dataset="Example Project", path="01 Notes/a.md"   →  that one file
-dataset="Example Project", path=""                →  the whole dataset
-```
-
-Paths come back relative too, which is the point of the arrangement: the string
-a result hands you is the same string the documents inside the vault use, so a
-path copied from one to the other still means what it says. Repeating the
-dataset at the head of `path` is **refused**, never silently corrected — on
-reads exactly as on writes, because a read that normalised would teach the wrong
-form and never complain.
-
-### Keys
-
-`keys.txt` decides access, and nothing else does. Three states:
-
-| Line in `keys.txt` | State | A call |
-|---|---|---|
-| `name \| key` | **locked** | must carry the key |
-| `name \|` (the bar, nothing after it) | **open** | needs no key |
-| no line at all | **closed** | is refused |
-
-**Closed is the default since 4.0.0.** Until then a dataset without a line was
-open, and that is how a typo hurt: a dataset renamed, a registry line still
-carrying the old spelling, and a dataset its owner believed protected sat open
-for days with a warning in a log nobody read. Now the same typo closes it — the
-mistake makes a dataset unreachable, never exposed. `vault_status()` lists the
-closed ones and the registry lines that match no dataset, so a typo shows up at
-the first call. No tool writes `keys.txt`: who reaches what is decided on the
-server, by hand.
-
-The key is not there to keep strangers out — OAuth does that, and only one
-account gets in at all. It is there to **separate projects from each other**.
-The concrete case: a chat opened on the fly, outside any project, that starts
-reading a serious project's data because it knows the data exists. The key lives
-in the project's instructions, so only conversations started inside that project
-have it in context.
-
-From this follows a rule that replaces three mechanisms that would otherwise be
-needed: **the presence of a key is the declaration that this data matters.** A
-dataset with a key cannot be dropped by the tools, full stop. One without a key
-can, because it was born to be thrown away.
-
----
-
-## How it is built
-
-Every piece was chosen for a specific reason, and the reasons are worth stating:
-they are the same ones you need if you want to adapt it.
-
-### MCP — Model Context Protocol
-
-The protocol the model uses to talk to external tools. An MCP server exposes
-**tools**: functions with a name, typed parameters and a description. The model
-reads the descriptions and decides on its own when to call them.
-
-That has a consequence which governs the whole design: **every tool's
-description rides at the head of every request**, always, even when none of them
-is used — and it arrives *isolated*, read without the rest of the surface in view.
-Hence the refusal to multiply tools for fun, and hence the division of labour,
-which since 2.7.0 has three levels instead of two:
-
-- **the description** carries the signature and one line of what the tool does,
-  and nothing else — measured, all twenty-one together come to about 310 tokens;
-- **`reference_guide()`** is the model: datasets and paths, the sha, the absence
-  of a delete tool, the ceiling that belongs to the client. Only what a
-  signature cannot say, and it is fetched when it is wanted;
-- **`reference_guide("archive")`** is one command's card — its defaults, its
-  limits, the way it bites. Asking for a card costs between 30 and 300 tokens
-  instead of the whole manual.
-
-The reason for the third level is that the second was all-or-nothing: to learn
-one thing about one tool, a caller paid for the entire manual. `vault_status()`,
-which is the first call anyone makes anyway, says in its `guide` field that
-cards exist — so the pointer is paid for once, not repeated in twenty-one
-descriptions where it would cost more than it saves.
-
-Extended documentation for humans is in this README, which costs nobody
-anything.
-
-### FastMCP
-
-The Python implementation of the protocol. It handles HTTP transport, schema
-serialisation and — the part that really earns its keep — the whole **OAuth 2.1
-dance with Dynamic Client Registration and PKCE** that a remote connector
-requires. Writing that by hand would have been the bulk of the work.
-
-### OAuth 2.1 with GitHub login
-
-The service has no users of its own: it delegates login to GitHub and then
-**refuses anyone who is not the single configured username**. Anyone on GitHub
-can *attempt* to log in; the refusal comes from the server, not from GitHub.
-
-Since **v2.1 the refusal covers every request, the handshake included**: a
-stranger who authenticates with their own GitHub account does not open a session
-at all, and never sees that the tools exist. Until v2.0 the filter ran on tool
-calls only, so a valid but unauthorised token could still list the tools with
-their descriptions — no data, but the shape of the surface. Refusals are logged
-with the method and the reason, because from the client a refused stranger and a
-broken deployment produce the same symptom: the connector will not connect.
-
-Why GitHub rather than a password: a password on an exposed service is a secret
-living in plaintext somewhere with no revocation. An OAuth identity has expiry,
-revocation and no client-side secret.
-
-### Tailscale Funnel
-
-The service listens on `127.0.0.1` and does **not know** how traffic reaches it.
-The Funnel runs in the same container and publishes that port on a public HTTPS
-URL with a valid certificate, without opening a single port on the router and
-without exposing a home IP address.
-
-The decoupling is deliberate: put a reverse proxy there instead tomorrow and not
-a line of code changes.
-
-### Git, server-side
-
-Every write is a commit. This is not a backup: it is **a memory of intent**.
-`history` says what happened, `diff` what changed, `read_at` how it was,
-`dataset_restore` puts it back.
-
-And one detail that makes the difference in daily use: if something writes into
-the vault **outside** the tools — over SMB, by hand, with an editor — the server
-notices and commits those changes **separately**, with an honest message, before
-running its own. Tool commits stay pure and the history never lies by accident.
-
-### Docker
-
-The container starts as root only to fix permissions, then **drops privileges**
-and runs as `nobody:users` with umask 000, so the files stay usable from SMB
-shares too.
-
-Four settings live in the image as `ENV` rather than in the code, because
-FastMCP reads them when it is *imported* — too early for anything in
-`server.py` to have a say. Three of them just quiet the startup down; the
-fourth, `FASTMCP_CHECK_FOR_UPDATES=off`, removes an **outbound call made at
-every boot** to ask what the latest version is. On a service that pins its
-version on purpose, that call buys nothing and contradicts the sentence at the
-top of this page. A static check makes sure all four are still there: losing
-one would not fail, it would just quietly change the behaviour.
-
-### Blocking preflight
-
-The preflight checks run at startup. If **a single one** fails, the service **does not
-start** — and a check that crashes counts as failed, not as passed.
-
-It looks excessive until it happens to you: a wrong mount that makes the vault
-appear empty, a Funnel publishing the wrong port, a node key with expiry still
-enabled that will switch everything off in six months. A service that refuses to
-start and tells you why beats one that starts and misbehaves.
-
----
-
-## Architecture
-
-```
-   The model (hosted)
-        │  HTTPS + OAuth 2.1 (DCR + PKCE)
-        ▼
-   Tailscale Funnel  ──►  https://<host>.<tailnet>.ts.net
-        │  (in the same container)
-        ▼
-   127.0.0.1:3000   server.py  ── the MCP tools
-        │                        ├─ GitHub identity filter
-        │                        └─ source IP filter
-        ▼
-   vault.py  ── VaultRoot (datasets, keys)  ──►  Dataset (files + git)
-        │
-        ▼
-   /vault  ── one git repository per dataset
-```
-
----
-
-## Installation
-
-<details>
-<summary><b>1 · Prerequisites</b></summary>
-
-- A Tailscale tailnet with **MagicDNS** and **HTTPS Certificates** enabled.
-- Unraid 7 with the **Tailscale plugin** installed: it provides the Docker hook
-  that gives the container its own Tailscale identity. Do not uninstall it, even
-  if Tailscale on the host is disabled.
-- On the host: **Allow Tailscale Funnel = No**. The Funnel belongs to the
-  container, not to the host.
-- An **SSD** pool for the vault. Spinning disks pay the spin-up on every touch,
-  and this service touches often.
-- A GitHub account.
-
-</details>
-
-<details>
-<summary><b>2 · GitHub OAuth application</b> — five minutes</summary>
-
-`github.com` → Settings → Developer settings → OAuth Apps → **New OAuth App**
+**1. GitHub OAuth application.** `github.com` → Settings → Developer settings →
+OAuth Apps → **New OAuth App**:
 
 | Field | Value |
 |---|---|
@@ -267,16 +41,10 @@ start and tells you why beats one that starts and misbehaves.
 | Homepage URL | `https://<host>.<tailnet>.ts.net` |
 | Authorization callback URL | `https://<host>.<tailnet>.ts.net/auth/callback` |
 
-*Generate a new client secret*, then store **Client ID** and **Client Secret** in
-your password manager: the secret is shown once, but never expires.
+Generate a client secret; store **Client ID** and **Client Secret** in a
+password manager (the secret is shown once). One application per service.
 
-⚠ **A new application per service.** Do not reuse another container's: there is
-only one callback and the two will fight over it.
-
-</details>
-
-<details>
-<summary><b>3 · The vault on disk</b></summary>
+**2. The vault on disk.**
 
 ```sh
 zfs create <ssd-pool>/Vault
@@ -285,23 +53,10 @@ chown -R 99:100 "/mnt/<ssd-pool>/Vault"
 chmod -R 777 "/mnt/<ssd-pool>/Vault"
 ```
 
-Copy your files in with `rsync` or `scp`. The git repository is created by the
-server — at boot, or at the first call on a directory that appeared while it
-was running: no `git init` by hand, no restart, and the files need not belong
-to anyone in particular — the entrypoint declares `safe.directory` to avoid
-git's *dubious ownership*.
+Each top-level folder is a dataset. Copy files in with `rsync` or `scp`; the
+server creates the git repositories itself.
 
-⚠ **ZFS snapshots on the `Vault` dataset**, not on individual projects. Snapshots
-are the net for a catastrophe and they protect the `.git` directories too;
-day-to-day rollback is git's job, not theirs.
-
-⚠ Mount the **direct pool path** (`/mnt/<pool>/Vault`) in the container, never
-`/mnt/user/...`: no FUSE in the middle.
-
-</details>
-
-<details>
-<summary><b>4 · The key registry</b></summary>
+**3. The key registry.**
 
 ```sh
 printf 'Example Project | k7m2xq4p\nScratch |\n' > "/mnt/<ssd-pool>/Vault/keys.txt"
@@ -309,994 +64,319 @@ chown 99:100 "/mnt/<ssd-pool>/Vault/keys.txt"
 chmod 640    "/mnt/<ssd-pool>/Vault/keys.txt"
 ```
 
-Dataset name, **`|`**, key — or nothing after the bar for an open dataset. A
-dataset with no line is closed. Spaces around the bar are ignored. One line per
-dataset; blank lines and lines starting with `#` are comments. With no file at
-all every dataset is closed: the service starts, and says so.
+`Example Project` is locked with the key `k7m2xq4p`, `Scratch` will be open, any
+other dataset is closed ([Datasets and keys](#datasets-and-keys)).
 
-Why a bar and not a TAB, which it was until 3.0.0: an editor set to expand tabs
-writes a *single* space when the name ends next to a tab stop, a single space is
-also what a name may contain, and the line came out malformed with nothing
-visible to blame — and the service did not start. A bar is typed the same on
-every keyboard, no editor rewrites it, and no dataset name may contain it.
+**4. The container.** Import `archivist-mcp.xml` into Unraid, or create the
+container by hand with the same fields. Fill in:
 
-Eight alphanumeric characters are plenty: OAuth is already in front, and the
-threat is a conversation guessing, not a brute-force attack. Avoid `0/O` and
-`1/l`, since you will retype them by hand.
-
-`640` owned by `99:100`: the service reads it, the world does not. **Not**
-root-only — the service does not run as root and could not open it.
-
-The file is **hot-reloaded**: add or remove a line from a file manager and it
-takes effect immediately, with no restart. A line that does not parse while the
-service runs is ignored, and its dataset stays **closed**.
-
-It lives inside the vault yet is unreachable from the tools, because its name is
-not a dataset name — the same check that stops `..` and `.git` stops it.
-
-</details>
-
-<details>
-<summary><b>5 · The image</b></summary>
-
-Two routes, and the template takes the first.
-
-**Use the published image.** Every `v*` tag runs the suite and then publishes to
-`ghcr.io/alcor6502/archivist-mcp`; a tag that does not pass never becomes an
-image. `archivist-mcp.xml` already points there, so there is nothing to build.
-
-**Or build it yourself**, from a clone on the server:
-
-```sh
-docker build --no-cache -t archivist-mcp /path/to/the/clone
-```
-
-Then change `Repository` in the template to `archivist-mcp`, or Unraid pulls the
-published image over the one you just built and nothing tells you. Do not build
-on an Apple Silicon Mac: the image comes out arm64.
-
-⚠ **`--no-cache` is not pedantry.** Docker's build cache has been known to
-report `CACHED` for a layer whose file had changed. You lose an hour testing the
-old image, convinced you fixed something.
-
-Before installing, test the engine with no Docker:
-
-```sh
-scripts/test.sh           # a venv on python3.12, the pins of requirements.txt, both suites to a log
-```
-
-It prints the last lines of the log and `exit=0` when everything passed; any
-other exit code is a suite that did not get to the end, whatever the lines
-above it say. There are two suites and two counts: `test_engine.py` for the
-`mcp_common_engine/` folder (the identity gate, the refusals, the config
-helpers) and `test_vault.py` for everything else.
-Half of the checks verify things that must **not** happen — traversal, wrong
-keys, dropping protected datasets — and they are the ones that matter most.
-`scripts/ship.sh <message-file> <file>...` runs the same suite, commits the
-named files and pushes to `main`; when `VERSION` moved it prints the link that
-publishes the release — as a markdown link named after the tag, `[v2.11.1](…)`,
-so pasted into a chat it is one click, not two thousand characters of URL.
-
-</details>
-
-<details>
-<summary><b>6 · The container</b></summary>
-
-Import `archivist-mcp.xml` into Unraid, or create the container by
-hand. Every field carries its own description in the UI; here is the summary.
-
-**Paths**
-
-| Name | Host → Container |
+| Field | Value |
 |---|---|
-| Vault | `/mnt/<pool>/Vault/` → `/vault` |
+| Vault | `/mnt/<ssd-pool>/Vault/` → `/vault` (the pool path, never `/mnt/user/...`) |
 | App Data | `/mnt/user/appdata/archivist-mcp/data` → `/data` |
 | Tailscale State | `/mnt/user/appdata/archivist-mcp/ts-state` → `/var/lib/tailscale` |
+| `BASE_URL` | `https://<host>.<tailnet>.ts.net`, **no trailing slash** |
+| `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | from step 1 |
+| `ALLOWED_GITHUB_LOGIN` | your GitHub username, the only account let in |
+| `JWT_SIGNING_KEY` | output of `openssl rand -hex 32` |
+| Tailscale | Hostname `<host>`, Serve `funnel`, Serve Port = `PORT` (`3000`) |
 
-**Variables**
+Leave the rest at the defaults, then **Apply**.
 
-| Variable | Value |
-|---|---|
-| `VAULT_ROOT` | `/vault` |
-| `KEYS_FILE` | `/vault/keys.txt` |
-| `GIT_RETENTION_MONTHS` | `0` (disabled) |
-| `BASE_URL` | `https://<host>.<tailnet>.ts.net` — **no trailing slash** |
-| `GITHUB_CLIENT_ID` | from step 2 |
-| `GITHUB_CLIENT_SECRET` | from step 2 |
-| `ALLOWED_GITHUB_LOGIN` | your GitHub username |
-| `JWT_SIGNING_KEY` | `openssl rand -hex 32` |
-| `PORT` | `3000` |
-| `ALLOWED_CIDRS` | empty: no IP filter, OAuth alone decides (the default since 3.0.0, so that a client whose egress is not published can connect). To add the filter: `160.79.104.0/21 # documented egress of the model provider` |
+**5. Node key expiry.** In the Tailscale admin console, under Machines,
+disable key expiry for the container's node. The startup checks refuse to run
+while the key can expire: if the first start stops on `node_key`, fix it and
+start again.
 
-Updating from an earlier version: there is nothing to do about `ALLOWED_CIDRS`.
-The previous name `ANTHROPIC_CIDR` is deprecated but still honoured, so a
-container that already runs keeps working untouched.
-
-**Under Show more settings**
-
-| Variable | Value |
-|---|---|
-| `LOG_LEVEL` | `INFO`, or `WARNING` for a quiet log. Nothing else: see below |
-| `HTTP_MODE` | `stateless` on a new install; the code's fallback stays `stateful`: see below |
-| `VAULT_UID` / `VAULT_GID` | `99` / `100` — `nobody:users`, the right owner for share files |
-
-`LOG_LEVEL` governs this service's logger and nothing else: the root logger, the
-access log and FastMCP are set elsewhere. `INFO` prints, once, what was found at
-boot — the datasets and their state, the key registry, and the line with
-version, public URL, allowed user and IP filter — which is what you read to
-confirm that an update actually took. It also prints one line per **refused
-call** — a `CONFLICT`, a wrong key, a path that is not allowed — in the form
-`refused edit_file: …`. `WARNING` silences all of that; what it does not
-silence is the gate's refusals, and any **fault**, which keeps its full
-traceback at `ERROR` because a broken machine is not a refusal. The list is
-closed on purpose: below `INFO` there is nothing to switch on, and above
-`WARNING` the gate's refusals go silent too, and that is the one line that
-tells a stranger turned away apart from a broken deployment. `WARN` is
-honoured as `WARNING` — it is Python's own alias, not a typo, and whoever
-writes it wants less noise, so correcting it to `INFO` would hand back more.
-
-`HTTP_MODE` is the shape of the HTTP transport. `stateless` serves each request
-on its own transport: no `initialize` handshake, no session id, and no `GET`
-stream for server-initiated notifications — that route answers `405`, because
-in this mode it has no `GET` at all. **A new installation is shipped
-`stateless`**, because this server never sends anything of its own accord: the
-session buys it nothing and can only break. The **code's fallback stays
-`stateful`**, which is what every version before 2.8.0 did, so a container
-installed earlier and never given this variable keeps behaving exactly as it
-did.
-
-It exists because calls sent by the client in the **same batch** fall over,
-while the retry always passes. Eight at once lost two, four at once lost none,
-and the calls that fell were the ones that touch nothing — they read a file out
-of the image — so it is not the work being done but the number of requests in
-flight, which puts the fault under the tools, in the transport. The message the
-client shows (*"This connector's server hostname doesn't resolve or isn't
-reachable from this network"*) is neither true nor useful: it says only which
-side is reporting. Switching the mode takes effect at startup and needs no new
-image, so it can be switched back the same way. The startup line always prints
-the mode actually running, which is the only place worth believing.
-
-The service listens on loopback inside the container, and that is not a setting.
-Legitimate traffic arrives from the Funnel, which runs in the same container.
-
-**Tailscale**: Enabled `true`, Hostname `<host>`, Serve `funnel`, Serve Port
-**equal to `PORT`**, State Dir `/var/lib/tailscale`.
-
-Then **Apply**, never Restart. Restart reboots the existing container with the
-old configuration; only Apply recreates it from the updated template.
-
-</details>
-
-<details>
-<summary><b>7 · First start and connecting</b></summary>
-
-In the container log you should see, in order: git init per dataset, the
-permission pass, the privilege drop, the **preflight all green**, and then the
-server starting.
-
-If preflight blocks, the message names the check and the reason. It is not a
-warning: the service did not start.
-
-Then, in the client: **Settings → Connectors → Add custom connector**, URL
-`https://<host>.<tailnet>.ts.net/mcp`. The GitHub login opens, you authorise,
-and the tools appear.
-
-Try these first, in order:
+**6. The log.** You should see `== git init (as root) ==`, the permission pass,
+the privilege drop, the preflight with every line `OK`, then:
 
 ```
-vault_status()                                  → must list the datasets
-dataset_status("Example Project", "")           → must be REFUSED
-dataset_status("Example Project", "k7m2xq4p")   → must answer
-dataset_create("Scratch")                       → created closed — unless keys.txt already says `Scratch |`
-list_files("Scratch")                           → works with no key once `Scratch |` is in keys.txt
-dataset_drop("Example Project", "<manifest>")   → must be REFUSED
+PREFLIGHT: 11/11 — starting.
+== server ==
+… archivist-mcp <version> (engine <version>) — starting on 127.0.0.1:3000 (http stateless) — base_url https://<host>.<tailnet>.ts.net — allowed user: <login> — IP filter: OFF (no IP filter) — token store: /data/fastmcp — retention: disabled
 ```
 
-Finally paste the key into the **instructions of the project** the dataset
-belongs to. From then on only conversations started inside that project have it
-in context.
+A `FAIL` line means the service did not start: see
+[The service will not start](#the-service-will-not-start).
 
-</details>
+**7. Connect.** In Claude: Settings → Connectors → **Add custom connector**,
+URL `https://<host>.<tailnet>.ts.net/mcp`. Authorise the GitHub login; the
+tools appear.
 
-<details>
-<summary><b>8 · After any change to the tools</b></summary>
+**8. Check**, in a new conversation:
 
-There are **three cache layers**: the server, the connector and the chat
-session.
+```
+vault_status()                                      → Example Project locked, Scratch open
+dataset_status("Example Project")                   → REFUSED: a key is required
+dataset_status("Example Project", key="k7m2xq4p")   → answers
+list_files("Scratch")                               → answers, no key
+```
 
-After any change to the tool surface — names, parameters, docstrings — you must
-**disconnect and reconnect the connector**, and test **in a new conversation**.
-Skip that and you will see the old tools and conclude the deployment failed.
-
-Changes to internal behaviour (limits, formats, logic) do not alter the surface:
-recreating the container is enough.
-
-</details>
-
-<details>
-<summary><b>9 · Updating</b></summary>
-
-A release is a `v*` tag. The workflow runs the suite first and only then builds
-and publishes, so a tag that does not pass never becomes an image.
-
-The registry does not knock: Unraid finds out when asked. **Check for Updates**
-on the Docker page, then apply the update it offers. Read the startup line in
-the log afterwards — it carries the version, and that is how you know the new
-image is the one running rather than the old one restarting.
-
-If the update changed the tool surface, do step 8 as well.
-
-**Crossing 3.0.0**: the key registry changes shape — `name | key`, where it was
-`name` TAB `key` — and the old shape is not read any more. Rewrite `keys.txt`
-before you Apply: a registry the new preflight cannot read stops the service
-with the line numbers, and stays stopped until the file is fixed. Nothing else
-moves: keys, datasets, tokens and the connector are untouched.
-
-**Crossing 4.0.0**: a dataset with no line in `keys.txt` turns from open to
-**closed**. Before you Apply, give every dataset you want reachable without a
-key a line of its own, `name |`. Datasets that already have a key are
-untouched. The tool surface moves (`read_files` is new, `edit_file` takes
-`edits`, the server sends instructions at connection time): do step 8.
-
-**The way back** costs one field: the previous tag is still on the registry, so
-put it in `Repository` in place of `:latest` and Apply. It is a change of
-surface like any other, so step 8 applies to it too. Nothing else moves: the
-vault, the tokens and the Tailscale identity all live outside the image.
-
-</details>
+**9. Hand over the key.** Paste `k7m2xq4p` into the instructions of the client
+project that works on `Example Project`: only its conversations will have it.
 
 ---
 
-## Maintenance and failures
+## Using it day to day
 
-<details>
-<summary><b>The safe — what cannot be regenerated</b></summary>
+### Datasets and keys
 
-| Item | Where it lives | If you lose it |
+Every call names a dataset in `dataset`; `path` is relative to it, and empty
+means the whole dataset. Nothing at the vault root is reachable: `keys.txt`
+cannot even be named. Dataset names use letters, digits, space, `.`, `_`, `-`,
+and do not start with `.` or `_`.
+
+| Line in `keys.txt` | State | A call |
 |---|---|---|
-| `GITHUB_CLIENT_ID` + `SECRET` | the GitHub OAuth App | make a new one in 5 minutes, then update the template |
-| `JWT_SIGNING_KEY` | only in the template | stored tokens become unreadable: reconnect the connector. **But never change it without reason** — the effect is the same |
-| The keys in `keys.txt` | the vault | they must be rewritten, and re-pasted into the project instructions |
-| **The vault** | the ZFS dataset + snapshots + git | the only real loss |
+| `name \| key` | **locked** | must carry the key |
+| `name \|` (nothing after the bar) | **open** | needs no key |
+| no line | **closed** | is refused |
 
-⚠ The template Unraid saves under `/boot/config/plugins/dockerMan/templates-user/`
-contains the secrets **in plaintext**, masked fields included. That backup is
-sensitive material: the shareable copy is the sanitised template in this repo.
+- **Closed is the default**: a missing line, a typo in a name or a missing file
+  makes datasets unreachable, never exposed. `vault_status()` lists the closed
+  ones and `orphan_registry_lines`, registry names matching no dataset.
+- **Hot-reloaded**: an edit applies at the next call. Spaces around the bar are
+  ignored; `#` starts a comment. A malformed line stops the service at startup;
+  while it runs, the line is ignored and its dataset stays closed.
+- **No tool writes `keys.txt`**: a dataset made by `dataset_create` is closed
+  until you give it a line.
+- Eight alphanumeric characters make a good key (avoid `0/O`, `1/l`). Keep the
+  file `640`, owned by `99:100`.
+- **A key separates projects, it does not keep strangers out**: OAuth does. A
+  chat without the key in its context cannot invent it. A locked dataset can
+  never be dropped by the tools.
 
-</details>
+### Rules a client must know
 
-<details>
-<summary><b>Traps already paid for</b></summary>
+The server sends its rules to the client at connection time. In short:
 
-- **Docker's build cache lies.** Always `--no-cache` after touching sources.
-- **Restart ≠ Apply.** Restart reuses the old configuration.
-- **`mkstemp` creates 0600, ignoring the umask.** The code does an explicit
-  `chmod 666` after every atomic write, or new files would not be writable from
-  SMB.
-- **git and *dubious ownership*.** The entrypoint declares `safe.directory`
-  before touching any repository.
-- **Funnel permission is tied to the node identity.** Recreate the container and
-  lose `ts-state`, and the node comes back as new with the Funnel needing
-  re-authorisation. In the tailnet policy, granting Funnel to `autogroup:member`
-  is more robust than naming specific nodes.
-- **Node key expiry is a scheduled outage.** Disable it in the admin console,
-  under Machines. Preflight checks it precisely because it is silent: everything
-  works for six months, then stops.
-- **Tailscale auto-updates can break the Funnel.** It happened with 1.102.1,
-  where a regression made incoming Funnel connections fail; fixed in **1.102.2**
-  on 4 August 2026. If it happens to you, compare the version against the
-  changelog before hunting for the fault at home.
+- **The sha256 is the unit of truth.** Every read returns it; every write
+  demands it (`"new"` for a new file) and returns the new one. If the file
+  changed meanwhile the write is refused with `CONFLICT`: re-read, reconcile,
+  retry.
+- **Every write is atomic, verified and committed**; a failed tool changes
+  nothing. After a write lost in transport, compare the sha in `list_files`
+  before retrying.
+- **Nothing is deleted**: disposal is `move_path` into `Trash/`.
+- **Fewer calls is faster**: several files in one `read_files`, several changes
+  in one `edit_file` with `edits`, `search` before reading.
+- **Files changed from outside** (SMB, by hand) are committed separately before
+  the next write, which may return `external_commit_first`. Not an error.
+- **No empty folders**: git does not keep them.
+- `.gitignore`, `.gitattributes`, `.gitmodules` are readable, never writable:
+  change them on the server.
+- **Big binaries do not go through the model**: in `write_binary` the model
+  types the base64. Copy large files over SMB instead. For PDFs, `render_pdf`
+  draws one from data and `render_report` binds documents already in the vault.
 
-</details>
+### The tools
 
-<details>
-<summary><b>The service will not start</b></summary>
+Every dataset-level tool also takes `key=""` as its **last** parameter, needed
+only for locked datasets and best passed by name; it is omitted below. Returns,
+limits and examples are on each tool's card in
+[`reference-guide.md`](reference-guide.md), served by `reference_guide("<tool>")`.
 
-Preflight names the failing check. The frequent ones:
-
-| Check | What to look at |
+| Tool | What it does |
 |---|---|
-| `datasets` | the vault mount is wrong, or points at an empty folder |
-| `git` | the repositories do not exist yet: relaunch, boot creates them |
-| `keys` | `keys.txt` is not readable by `99:100`, or a line is not `name \| key` |
-| `oauth` | a variable is still a placeholder, or `BASE_URL` is not https |
-| `token_store` | `FASTMCP_HOME` is not under `/data`: tokens would not survive |
-| `funnel` | the Funnel is off, or publishes a port other than `PORT` |
-| `node_key` | the node key still has an expiry date |
+| **`vault_status()`** | datasets and their state; no key |
+| **`reference_guide(name="")`** | the manual, or one tool's card; no key |
+| **`dataset_create(name)`** | a new, empty dataset, born closed |
+| **`dataset_drop(dataset, expected_manifest)`** | delete an **open** dataset |
+| **`dataset_status(dataset)`** | file counts, git state, commits, size |
+| **`list_files(dataset, path="")`** | recursive listing, size and sha per file |
+| **`read_file(dataset, path)`** | one text file, with its sha |
+| **`read_files(dataset, paths)`** | several text files in one call |
+| **`read_binary(dataset, path)`** | any file as base64 |
+| **`read_at(dataset, path, rev)`** | a file at a past revision |
+| **`search(dataset, pattern, path="", regex=False)`** | server-side grep |
+| **`manifest(dataset, path="")`** | one fingerprint for a tree |
+| **`archive(dataset, path="", pattern="*.md", max_chars=0)`** | files as one base64 tar.gz, for clients that run code |
+| **`append(dataset, path, text, expected_sha256="")`** | a block at the end of a file |
+| **`write_file(dataset, path, content, expected_sha256)`** | the whole file |
+| **`edit_file(dataset, path, expected_sha256, old_text="", new_text="", edits=None)`** | replace unique fragments, one commit |
+| **`write_binary(dataset, path, content_base64, expected_sha256)`** | a binary from base64 |
+| **`render_pdf(dataset, path, document, expected_sha256="new")`** | a PDF drawn from a JSON document of blocks |
+| **`render_report(dataset, path, sources, layout=None, expected_sha256="new")`** | dataset Markdown bound into one PDF |
+| **`move_path(dataset, src, dst)`** | move, rename or trash; never overwrites |
+| **`history(dataset, path="", n=10)`** | the last commits |
+| **`diff(dataset, rev_a, path="", rev_b="HEAD")`** | changes between revisions |
+| **`dataset_restore(dataset, rev, expected_manifest)`** | the dataset back to a revision, as a new commit |
+| **`trash_purge(dataset, before)`** | empty `Trash/` of what was trashed before a date |
+
+---
+
+## Details
+
+### How it is built
+
+```
+client ──HTTPS, OAuth 2.1──► Tailscale Funnel ──► 127.0.0.1:3000 server.py ──► vault.py ──► /vault
+                             (same container)     GitHub gate, IP filter       one git repository per dataset
+```
+
+- **FastMCP** implements the protocol, the HTTP transport and the OAuth 2.1
+  flow, with DCR (Dynamic Client Registration) and PKCE (Proof Key for Code
+  Exchange).
+- **GitHub login**: every request, handshake included, is refused unless it
+  comes from `ALLOWED_GITHUB_LOGIN`. A stranger never sees the tools.
+- **Tailscale Funnel** publishes the port on public HTTPS with no router port
+  opened. The server listens on loopback only.
+- **Docker**: the entrypoint fixes ownership as root, then runs as
+  `nobody:users` (99:100) with umask 000, so files stay usable over SMB.
+- **Preflight**: eleven blocking checks (`preflight.py`). One fails or crashes,
+  the service does not start.
+- **The engine**, [`mcp_common_engine/`](mcp_common_engine/README.md), is the
+  part that knows nothing about vaults: identity gate, designed refusals,
+  configuration readers, preflight harness, log discipline. It is a folder of
+  this repository, built into the image; its README describes each module.
+
+### Configuration
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `VAULT_ROOT` · `KEYS_FILE` | `/vault` · `/vault/keys.txt` | vault and registry inside the container |
+| `BASE_URL` | none | public https URL, no trailing slash, matching the GitHub callback |
+| `GITHUB_CLIENT_ID` · `GITHUB_CLIENT_SECRET` | none | the OAuth application |
+| `ALLOWED_GITHUB_LOGIN` | none | the only account let in |
+| `JWT_SIGNING_KEY` | none | signs issued tokens; 32+ characters, keep it stable |
+| `PORT` | `3000` | listening port, and the one the Funnel publishes |
+| `ALLOWED_CIDRS` | empty | optional source-IP filter: `range # note ; range # note`. Empty: no filter |
+| `GIT_RETENTION_MONTHS` | `0` | squash history older than N months at boot, rewriting later commit hashes; 0 disables (recommended) |
+| `LOG_LEVEL` | `INFO` | `INFO` (boot report, refused calls) or `WARNING` (gate refusals and faults only) |
+| `HTTP_MODE` | `stateless` | `stateless` or `stateful`; a missing variable means `stateful` |
+| `VAULT_UID` · `VAULT_GID` | `99` · `100` | the service user |
+| `PREFLIGHT_SKIP` | empty | checks to skip, comma-separated; testing only |
+
+A placeholder (`CHANGEME`), an `http://` URL, a short JWT key or a malformed
+`ALLOWED_CIDRS` block startup. With `ALLOWED_CIDRS` undefined, the deprecated
+`ANTHROPIC_CIDR` is read, then a built-in range.
+
+### Maintenance and failures
+
+| Cannot be regenerated | If lost |
+|---|---|
+| GitHub client ID and secret | new OAuth application, update the container |
+| `JWT_SIGNING_KEY` | tokens invalid: reconnect the connector |
+| The keys | rewrite them, paste them into the projects again |
+| **The vault** | the real loss: snapshot the whole `Vault` with ZFS |
+| `/data` · `ts-state` | authorise again; the node returns as new and the Funnel needs authorising |
+
+Unraid's saved template (`/boot/config/plugins/dockerMan/templates-user/`)
+holds the secrets **in plaintext**.
+
+**Updating.** Docker page → **Check for Updates**, then apply. **Apply, never
+Restart**: Restart keeps the old configuration. Apply clears the container log,
+so copy out what you need first. The startup line then shows the new version.
+To go back, put the previous version tag in `Repository` instead of `:latest`.
+
+- **Crossing 3.0.0**: registry lines become `name | key` (was a TAB). Rewrite
+  `keys.txt` first.
+- **Crossing 4.0.0**: a dataset with no line becomes **closed**. First give
+  every dataset that must stay reachable without a key the line `name |`.
+
+When an update changes tool names, parameters or descriptions, disconnect and
+reconnect the connector and test in a **new** conversation, or you will see the
+old tools.
+
+#### The service will not start
+
+| Check | Look at |
+|---|---|
+| `datasets` | wrong vault mount, or an empty folder |
+| `readable` · `writable` | the mount reads short or refuses a write or delete |
+| `git` | a repository is missing: start again, boot creates it |
+| `keys` | `keys.txt` unreadable by `99:100`, or a malformed line (numbers printed, keys never) |
+| `oauth` | a placeholder left, `BASE_URL` not https, JWT key short |
+| `token_store` | `FASTMCP_HOME` not under `/data` |
+| `funnel` | the Funnel is off or publishes another port |
+| `node_key` | the node key still expires |
+| `cidrs` | an `ALLOWED_CIDRS` entry does not parse |
 | `public_dns` | the `BASE_URL` hostname does not resolve |
 
-To test while skipping the network checks:
-`PREFLIGHT_SKIP="funnel,node_key,public_dns"`. Never in production.
+#### The connector will not connect
 
-</details>
+Almost always `BASE_URL` does not match the GitHub callback **exactly**. No
+tools: reconnect, new conversation. A refused login shows in
+`docker logs archivist-mcp 2>&1 | grep refused`. A message like *"server
+hostname doesn't resolve or isn't reachable"* only means the client saw a
+failure: retry, and if calls sent together keep failing, try the other
+`HTTP_MODE`.
 
-<details>
-<summary><b>The connector will not connect</b></summary>
-
-Almost always `BASE_URL` does not match the callback registered on GitHub
-**exactly** — scheme included, trailing slash included. It is the number one
-first-run mistake.
-
-If the service answers but no tools appear, it is caching: disconnect and
-reconnect the connector, then open a fresh conversation.
-
-</details>
-
-<details>
-<summary><b>Something got messed up in the vault</b></summary>
-
-In order of severity:
+#### Something went wrong in the vault
 
 ```
-history("Example Project", "file.md", 20)         what happened
-read_at("Example Project", "file.md", "<hash>")  how it was
-write_file(...)                                  put it back
-
-diff("Example Project", "HEAD~5")                what changed across the dataset
-dataset_restore("Example Project", "<hash>", "<manifest>", key)
+history("Example Project", "file.md", 20)          what happened
+read_at("Example Project", "file.md", "<hash>")    how it was, then write_file it back
+dataset_restore("Example Project", "<hash>", "<manifest>", key="…")
 ```
 
-`dataset_restore` rewrites **every** file in the dataset, but as a forward
-commit: history is not lost and this too can be undone.
+A restore is a forward commit and can be undone. Below git, the ZFS snapshot.
 
-Underneath everything sits the ZFS snapshot, which is the net for when git
-itself is gone.
+#### Traps
 
-</details>
+Build with `docker build --no-cache` (the cache has lied), never on an Apple
+Silicon Mac (arm64). A Tailscale update has broken the Funnel before (1.102.1):
+check its changelog first.
 
----
-
-## Usage guide
-
-<details>
-<summary><b>The rules</b></summary>
-
-**1. Every tool returns a verdict, not a dump.** The result is a small object
-holding facts: hashes, counts, bytes, the commit id. Content travels only when
-asked for. To *know*, use `search`, `manifest`, `list_files`; to *read*,
-`read_file`.
-
-**2. The sha256 is the unit of truth.** Every read gives it, every write demands
-it:
-
-```
-read_file(ds, "X") → sha256: a3f9…
-                     ↓
-write_file(ds, "X", new, expected_sha256="a3f9…")
-```
-
-If the file changed in the meantime, the write is **refused without touching
-anything**. That is compare-and-swap. For a new file: `expected_sha256="new"`.
-
-**Every write hands the new sha back**, so a chain needs no re-read in between:
-the `sha256` returned by `write_file` goes straight into the `edit_file` that
-follows it. `append` returns it too. `move_path` does not, and does not need
-to — the content did not change, so the sha you already held still holds.
-
-**3. Nothing is deleted.** There is no `delete` tool. Disposal is `move_path`
-into `Trash/`, and `move_path` never overwrites.
-
-**4. Every write is atomic, verified and committed.** Lock, optional commit of
-external changes, write to a temporary file, `os.replace` (atomic), read back and
-compare hashes, commit. If a tool fails, the vault is exactly as it was.
-
-**5. `external_commit_first` is not an error.** It means the repo was dirty and
-changes from outside were committed separately before yours.
-
-</details>
-
-<details>
-<summary><b>Which tool for which job</b></summary>
-
-| You want to | Use | Sha? |
-|---|---|---|
-| add lines to a register or log | `append` | no |
-| change a phrase or a number | `edit_file` — several changes in one call with `edits` | yes |
-| rewrite the file, or create it | `write_file` | yes (`"new"` if new) |
-| write a PDF or a binary | `write_binary` | yes |
-| draw a PDF from data, server-side | `render_pdf` | yes |
-| bind Markdown that is ALREADY in the dataset into one PDF | `render_report` | yes |
-| move, rename, trash | `move_path` | no |
-| know whether something exists, and where | `search` | — |
-| know which files exist | `list_files` | — |
-| know whether a tree changed at all | `manifest` | — |
-| know how big a dataset is, how dirty, how many commits | `dataset_status` | — |
-| know when something changed, and get its hash | `history` | — |
-| read text | `read_file` | — |
-| read several text files at once | `read_files` — one round trip instead of one per file | — |
-| read a PDF or a binary | `read_binary` (needs a sandbox) | — |
-| read a whole tree at once | `archive` (needs a sandbox, mind `pattern`, mind the client's ceiling) | — |
-| read how it was before | `read_at` | — |
-| see what changed between two moments | `diff` | — |
-| make a new, empty dataset | `dataset_create` | — |
-| roll a whole dataset back to a revision | `dataset_restore` | the manifest |
-| empty `Trash/` before a date | `trash_purge` | — |
-| destroy a dataset | `dataset_drop` | the manifest |
-| which datasets exist, and which are locked | `vault_status` | — |
-| the manual, whole or one card | `reference_guide` | — |
-
-`append` needs no sha because it **never touches existing bytes**: no conflict is
-possible, so there is nothing to protect. It is the right operation for logs and
-registers.
-
-`edit_file` sends only the fragments instead of the whole file: on an 80 KB
-file that is the difference between a light call and a heavy one.
-
-**Fewer calls is the speed that matters.** A call costs about a millisecond on
-the server and seconds on the way to the client and back. So the tools that do
-several things in one call — `read_files`, `edit_file` with `edits`, `search`
-before any read — are the fast path, and the server says so to every client at
-connection time: its MCP `instructions` are the `IN SHORT` section of the
-manual, so a conversation starts knowing the rules without spending its first
-calls on `vault_status()` and `reference_guide()`.
-
-</details>
-
-<details>
-<summary><b>The tools</b></summary>
-
-Every dataset-level tool takes `dataset` first, and `path` relative to it; an
-empty `path` means the whole dataset. `key` is accepted by all of them and is
-only needed for locked datasets; it is omitted in the examples. Returns are
-given as their keys, and every return that carries a path also carries
-`dataset`, so the pair can be put back together. Any write may additionally
-carry `external_commit_first` when changes made outside the tools were committed
-before yours — that is information, not an error.
-
-### Vault level — no key
-
-**`vault_status()`** — is the vault alive, which datasets exist, and their
-state: `locked`, `open` or `closed`. `closed` and `orphan_registry_lines` appear
-only when there is something to say: the second lists names in `keys.txt` that
-match no dataset — never a key.
-**Returns** `vault · version · guide · datasets[{name, state}]` · `closed` ·
-`orphan_registry_lines`
-
-```
-vault_status()
-→ {"vault": "ok", "version": "…",
-   "guide": "reference_guide() for the model; reference_guide(name) for one command's card",
-   "datasets": [{"name": "Example Project", "state": "open"},
-                {"name": "Ledger",          "state": "locked"},
-                {"name": "Ledgr",           "state": "closed"}],
-   "closed": "a closed dataset has no line in the key registry: …",
-   "orphan_registry_lines": ["Ledgre"]}
-```
-
-**`reference_guide(name="")`** — the manual, served from the image, in two
-grains. Empty gives the model and the list of card names; a command name gives
-that command's card; an unknown name is refused *with* the list, so a wrong
-guess is one round trip from the right one.
-**Returns** `version · guide · cards` · or `version · command · guide`
-
-```
-reference_guide()
-→ {"version": "…", "guide": "# Archivist MCP — manual\n\n## THE MODEL\n…",
-   "cards": ["append", "archive", …], "how": "reference_guide(name) for …"}
-
-reference_guide("archive")
-→ {"version": "…", "command": "archive",
-   "guide": "archive(dataset, path='', pattern='*.md', max_chars=0, key='')\n…"}
-```
-
-**`dataset_create(name)`** — a new, empty dataset with its own git. It is born
-**closed** unless `keys.txt` already has its line: give it `name |` to open it,
-`name | key` to lock it. The service never writes `keys.txt`.
-**Returns** `dataset · state · git · note`
-
-```
-dataset_create("Scratch")
-```
-
-**`dataset_drop(dataset, expected_manifest)`** — delete an **open** dataset and
-everything in it. `expected_manifest` is the current `manifest_sha256`: you
-cannot throw away what you have not looked at. A locked or closed dataset
-refuses.
-**Returns** `dropped · files_removed · note`
-
-```
-manifest("Scratch")                       # → manifest_sha256: 7c1e…
-dataset_drop("Scratch", "7c1e…")
-```
-
-A dataset name is the ONLY thing `dataset` accepts. `keys.txt`, the lockfiles
-and anything else sitting in the vault root are not datasets, so they cannot be
-named — the refusal costs no denylist.
-
-### Dataset level — every one also accepts `key=""`
-
-**`dataset_status(dataset)`** — one dataset in detail.
-**Returns** `dataset · total_files · md_files · files_in_trash · git ·
-total_commits · git_size_bytes · last_commit`
-
-```
-dataset_status("Example Project")
-→ {"dataset": "Example Project", "total_files": 18, "md_files": 14,
-   "files_in_trash": 2, "git": "clean", "total_commits": 62,
-   "git_size_bytes": 423676,
-   "last_commit": "2781f59 2026-08-08T18:30:51+02:00 edit: Notes.md"}
-```
-
-**`list_files(dataset, path="")`** — recursive listing with size and sha per
-file. An empty path lists the whole dataset. An **empty folder does not
-appear**: git does not keep empty directories, so nothing here can — keep a file
-in a folder that has to stay visible.
-**Returns** `dataset · base · count · files[{path, size, sha256}]`
-(on a single file: `dataset · file · size · sha256`)
-
-```
-list_files("Example Project", "01 Notes")
-→ {"dataset": "Example Project", "base": "01 Notes", "count": 2,
-   "files": [{"path": "01 Notes/a.md", "size": 412, "sha256": "a3f9…"}, …]}
-```
-
-**`read_file(dataset, path)`** — a UTF-8 text file. The `sha256` it returns is
-the one `write_file` and `edit_file` want back.
-**Returns** `dataset · path · size · sha256 · content`
-
-```
-read_file("Example Project", "01 Notes/a.md")
-→ {"dataset": "Example Project", "path": "01 Notes/a.md", "size": 412,
-   "sha256": "a3f9…", "content": "# Notes\n…"}
-```
-
-**`read_files(dataset, paths)`** — several UTF-8 text files in one call, each
-with its `sha256`, in the order asked. A file that cannot be read comes back as
-`{path, error}` and the others still arrive. At most 50 paths and 2 MB in all,
-the ceiling of a single read.
-**Returns** `dataset · count · errors · files[{path, size, sha256, content} | {path, error}]`
-
-```
-read_files("Example Project", ["01 Notes/a.md", "log.md", "nope.md"])
-→ {"dataset": "Example Project", "count": 3, "errors": 1,
-   "files": [{"path": "01 Notes/a.md", "size": 412, "sha256": "a3f9…", "content": "…"},
-             {"path": "log.md", "size": 80, "sha256": "19c2…", "content": "…"},
-             {"path": "nope.md", "error": "no such file: 'nope.md' in dataset 'Example Project'"}]}
-```
-
-**`read_binary(dataset, path)`** — any file as base64. Max 2 MB. Useless
-without a sandbox to decode it in.
-**Returns** `dataset · path · size · sha256 · content_base64`
-
-```
-read_binary("Example Project", "Scans/invoice.pdf")
-```
-
-**`read_at(dataset, path, rev)`** — the file as it was at a past revision.
-Read-only. `rev` is a short hash from `history`, or `"HEAD~3"`. Revisions are
-those of the dataset, not of the vault.
-**Returns** `dataset · path · rev · size · sha256 · content`
-
-```
-read_at("Example Project", "01 Notes/a.md", "HEAD~3")
-```
-
-**`search(dataset, pattern, path="", regex=False)`** — server-side grep:
-nothing is downloaded. Text files only; find binaries by name with `list_files`.
-**Returns** `dataset · base · pattern · files_scanned · matches · truncated ·
-lines[]`
-
-```
-search("Example Project", "deadline")
-→ {"dataset": "Example Project", "pattern": "deadline", "files_scanned": 14,
-   "matches": 3, "truncated": false,
-   "lines": ["01 Notes/a.md:31: the deadline is …", …]}
-```
-
-**`manifest(dataset, path="")`** — the fingerprint of a tree in one number. Two
-equal manifests mean identical trees. Required by `dataset_drop` and
-`dataset_restore`.
-**Returns** `dataset · base · file_count · total_bytes · manifest_sha256`
-
-```
-manifest("Example Project")
-→ {"dataset": "Example Project", "base": "", "file_count": 8,
-   "total_bytes": 147600, "manifest_sha256": "24280b93…"}
-```
-
-**`archive(dataset, path="", pattern="*.md", max_chars=0)`** — every matching
-file in ONE call, as a base64 tar.gz. Replaces hundreds of `read_file` calls in
-an audit; needs a sandbox to extract it in. Member names inside the tgz are
-dataset-relative, so extracting reproduces the dataset's own tree. A big archive
-may not reach the caller at all — **that ceiling is the client's, not this
-server's**, and `max_chars` is how a caller declares it: 0 means "no ceiling of
-mine", any positive number refuses instead of producing what will not travel,
-and says how large it would have been. See *`archive` and the one ceiling that
-is not this server's*, below.
-**Returns** `dataset · base · file_count · original_bytes · tgz_bytes ·
-tgz_base64`
-
-```
-archive("Example Project", "", "*.md")
-archive("Example Project", "", "*", max_chars=20000)
-→ the archive would be 317768 characters of base64, over the 20000 you asked
-  for (101 files, 246467 bytes in): narrow `path` or `pattern`
-```
-
-**`append(dataset, path, text, expected_sha256="")`** — a block at the end of
-an existing file. It never touches existing bytes, so it needs **no sha**: this
-is the operation for logs and registers. Max 64 KB. The sha is **optional** and
-it buys one thing: a retry after a lost response cannot land the block twice,
-because if the first append arrived the file moved and the retry is refused
-with CONFLICT — the same belt `write_file` and `edit_file` always had.
-**Returns** `dataset · path · size · sha256 · commit`
-
-```
-append("Example Project", "Log.md", "\n- 2026-08-08 · reconciled\n")
-→ {"dataset": "Example Project", "path": "Log.md", "size": 2140,
-   "sha256": "b71c…", "commit": "9da9597"}
-```
-
-**`write_file(dataset, path, content, expected_sha256)`** — the WHOLE file.
-Compare-and-swap: `expected_sha256` must match the file's current sha, or
-`"new"` for a file that does not exist yet. A mismatch is refused without
-touching anything. UTF-8, max 2 MB.
-**Returns** `dataset · path · size · sha256 · commit`
-
-```
-read_file("Example Project", "a.md")       # → sha256: a3f9…
-write_file("Example Project", "a.md", "# Notes\nrewritten\n", "a3f9…")
-write_file("Example Project", "new.md", "# Fresh\n", "new")
-```
-
-**`write_binary(dataset, path, content_base64, expected_sha256)`** — same
-compare-and-swap, from base64. Max 2 MB decoded. Always compare the returned
-sha with the one computed at the source: base64 travels as generated text.
-**And that is the cost to know before using it:** the base64 is *typed by the
-model* as part of the call, about a token every two or three characters, so a
-500 KB PDF is ~700 KB of base64 and a quarter of a million output tokens —
-tens of minutes, for a file the server then writes in a millisecond. The
-server side is not where the time goes. Use it for files up to a few tens of
-KB; anything bigger travels **outside the model** — over SMB from a machine
-that mounts the vault — and is adopted by the next write to that dataset (or
-at boot), with its sha in `list_files` like any other file. And a PDF made of
-data is not typed at all: `render_pdf` draws it on the server, and a PDF of
-documents the vault already holds is `render_report`.
-**Returns** `dataset · path · size · sha256 · commit`
-
-```
-write_binary("Example Project", "Scans/invoice.pdf", "JVBERi0…", "new")
-```
-
-**`render_pdf(dataset, path, document, expected_sha256="new")`** — a PDF
-**drawn by the server** from a JSON document of blocks (title line, stat
-pills, cards, donut, grid, gauge, a table in sections, a checklist, headings,
-paragraphs, footer), written with the same compare-and-swap as `write_binary`.
-The bytes are born on the server: ~5 KB of JSON in, ~50 KB of PDF on disk,
-and nothing base64 crosses the model. Real fonts (Liberation Sans, Helvetica metrics, embedded), full
-Unicode, max 20 pages. `forbid` is a list of regexes that must match no
-string drawn — an account number, a name — and a match is a refusal that
-writes nothing; `text_check` lists strings that must appear and comes back as
-`missing`. An empty `path` returns `pdf_base64` without writing, for a sheet
-the chat consumes. The block reference is in `reference_guide("render_pdf")`:
-a field table per block — name, default, accepted values, and what is fixed in
-the renderer and therefore NOT reachable from a call.
-
-Since **3.2.0** the gauge is configurable, every field defaulting to what it
-already drew: the label line (`label_upper`, `label_face`, `label_size`,
-`label_tone`), each tick's own `face`, `size` and `tone`, and the bar's
-`thickness`. In the same release a `table` nested inside a `card` draws
-instead of crashing, and a face the document names — the four are `R B I BI` —
-is refused by name instead of coming back as a `KeyError` from inside the font
-dict.
-
-**3.3.0** does the same for the `card`, where one number was the left inset,
-the right inset, the top gap and the bottom gap at once: `padding`, `pad_top`,
-`pad_bottom` and `title_size`, with the title band derived from the size
-instead of a constant 24. Same promise, same three documents rendered before
-and after to prove it: a card naming none of them draws exactly as before.
-
-**3.4.0** keeps every string inside the box of the block that draws it — a
-printed test page showed a card title through the top border, a big tick in
-the bar and a grid label under its neighbour, and a sweep found the same in
-every block that drew a line it never measured. Text is now placed by its
-ink, not its baseline, so `pad_top` and the gap under a gauge bar are clear
-space at any size. A title that does not fit is refused by name (a card
-title first shrinks, down to 75%); a descriptive label is cut with an
-ellipsis; a long note wraps. **The defaults move**, judged on paper: card
-title 11 (was 13), gauge bar 14 (was 18), ticks 7pt clear of the bar, and a
-stretched card keeps its content under its title instead of centring it.
-**Returns** `dataset · path · size · sha256 · commit · pages · strings_drawn · missing`
-
-```
-render_pdf("Example Project", "Reports/2026-Set-02.pdf",
-           {"page": {"size": "a4"}, "title": {"text": "Report", "value": "$1,000"},
-            "footer": ["stima"], "forbid": ["\\b\\d{9,}\\b"],
-            "blocks": [{"type": "stats", "items": [{"label": "Posizioni", "value": "10"}]}]})
-→ {"dataset": "Example Project", "path": "Reports/2026-Set-02.pdf", "size": 41210,
-   "sha256": "c1d2…", "commit": "9f3e0a1", "pages": 1, "strings_drawn": 7, "missing": []}
-```
-
-**`render_report(dataset, path, sources, layout=None, expected_sha256="new")`** —
-the twin of `render_pdf`, seen from the other side: Markdown **already in the
-dataset**, bound into one PDF laid out by the server. There the model composes
-a page the vault has not got; here the vault already holds the schede and the
-call only says which ones and in what order — about a kilobyte for a thirty-file
-report. `sources` gives the groups, each with an explicit `files` list or one
-`pattern` (plus `exclude` and its own `landscape`, so one PDF holds both
-orientations); the listing is **not recursive**, so a pattern on the root never
-reaches a subfolder or `Trash/`. `layout` is the cover, the footer, the page
-size and whether to print the index — an index with real page numbers, leader
-dots and internal links. `forbid` and `text_check` work as in `render_pdf`, on
-the strings that are on the page. One section per file, always on a fresh page;
-tables shrink by column count and a table that still does not fit the margin is
-a refusal naming the file, because a column cut off at the edge is worse than a
-report that does not print. Nothing external is ever fetched. Max 200 pages,
-5 MB of Markdown in, and **`path` is required**: a report never comes back as
-base64. **Returns** `dataset · path · size · sha256 · commit · pages · files ·
-empty_groups · missing · sections`, where `sections` is the index as printed —
-`[{"file": …, "page": …}]` — so the chat can say where a scheda landed without
-reopening the PDF.
-
-```
-render_report("Health Tracking", "Quadro Clinico — 2026-Set-09.pdf",
-              {"groups": [
-                  {"title": "Stato attuale", "files": ["00 Stato Attuale.md"]},
-                  {"title": "Laboratorio — Sangue", "pattern": "01 Sangue — *.md",
-                   "landscape": True}]},
-              {"title": "Quadro Clinico", "footer": "non è un parere medico"})
-→ {"dataset": "Health Tracking", "path": "Quadro Clinico — 2026-Set-09.pdf",
-   "size": 258033, "sha256": "7b1e…", "commit": "abc1234", "pages": 49, "files": 30,
-   "empty_groups": [], "missing": [], "sections": [{"file": "00 Stato Attuale.md", "page": 3}, …]}
-```
-
-**`edit_file(dataset, path, expected_sha256, old_text="", new_text="", edits=None)`**
-— replaces `old_text`, which must occur **exactly once**, with `new_text`. Only
-the fragments travel, not the file. Same compare-and-swap as `write_file`.
-Several changes to one file go in **one** call, as `edits`: applied in order,
-each on the text the previous one left, all or nothing, one commit.
-**Returns** `dataset · path · size · sha256 · commit` · `edits` (with a list)
-
-```
-read_file("Example Project", "a.md")       # → sha256: a3f9…
-edit_file("Example Project", "a.md", "a3f9…", old_text="retention: 0", new_text="retention: 6")
-edit_file("Example Project", "a.md", "5d0b…",
-          edits=[{"old_text": "draft", "new_text": "final"},
-                 {"old_text": "v1", "new_text": "v2"}])
-```
-
-**`move_path(dataset, src, dst)`** — move, rename or trash. Both paths are
-relative to the same dataset, so a move across datasets is not expressible at
-all. Never overwrites. There is no delete tool: moving into `Trash/` is the
-disposal route, and it resets the file's mtime so `trash_purge` can date it.
-**Returns** `dataset · from · to · trashed · commit`
-
-```
-move_path("Example Project", "a.md", "Trash/a.md")
-→ {"dataset": "Example Project", "from": "a.md", "to": "Trash/a.md",
-   "trashed": true, "commit": "0583255"}
-```
-
-**`history(dataset, path="", n=10)`** — the last n commits. An empty path gives
-the dataset's history; a file gives its own, following renames. The short hash
-goes verbatim into `read_at` and `diff`.
-**Returns** `dataset · path · entries[]`
-
-```
-history("Example Project", "a.md", 2)
-→ {"dataset": "Example Project", "path": "a.md",
-   "entries": ["2781f59 · 2026-08-08T18:30:51+02:00 · edit: a.md",
-               "0583255 · 2026-08-08T18:22:33+02:00 · edit: a.md"]}
-```
-
-**`diff(dataset, rev_a, path="", rev_b="HEAD")`** — differences between two
-revisions. An empty path gives the per-file summary; a file gives its full diff.
-Truncates at 60 KB rather than failing.
-**Returns** `dataset · path · from · to · diff`
-
-```
-diff("Example Project", "HEAD~1")
-diff("Example Project", "HEAD~5", "a.md")
-```
-
-**`dataset_restore(dataset, rev, expected_manifest)`** — ⚠ rewrites EVERY file
-in the dataset back to `rev`. Not destructive: it is a **forward** commit, so
-history is not lost and the restore can itself be undone. Check the revision
-with `history` first.
-**Returns** `dataset · restored_from · commit · file_count · manifest_sha256`
-
-```
-history("Example Project", "", 5)         # pick the revision
-manifest("Example Project")               # → manifest_sha256: 2428…
-dataset_restore("Example Project", "0583255", "2428…")
-```
-
-**`trash_purge(dataset, before)`** — empty `Trash/` of everything trashed
-**before** an ISO date. The date is when the file was trashed, not when it was
-last modified. Contents remain in git history: this removes clutter, it does
-not destroy information.
-**Returns** `dataset · before · removed · bytes_freed · files · note`
-(plus `commit`, when something was actually removed)
-
-```
-trash_purge("Example Project", "2026-06-01")
-```
-
-</details>
-
-<details>
-<summary><b>Limits</b></summary>
+### Limits
 
 | Limit | Value |
 |---|---|
-| text read and write | 2 MB |
-| binaries | 2 MB |
+| text read and write, binaries | 2 MB |
+| `read_files` · `edit_file` `edits` | 50 paths, 2 MB in all · 50 changes |
 | `append` block | 64 KB |
-| listable files | 3,000 |
-| `search` lines | 200 |
-| `diff` | 60 KB (truncates, does not fail) |
-| `archive` input | 30 MB uncompressed |
-| `archive` output | 5 MB of tgz |
-| datasets in the vault | 200 |
+| listable files · `search` lines | 3,000 · 200 |
+| `diff` | 60 KB, truncated |
+| `archive` | 30 MB in, 5 MB tgz out |
+| `render_pdf` · `render_report` | 20 pages, 200 KB JSON · 200 pages, 5 MB Markdown |
+| datasets | 200 |
 
-The binary limits are calibrated on actual consumption: a file larger than 2 MB
-is not usable inside a conversation anyway. A talking refusal beats a silent
-failure further down. Above that threshold — and in practice above a few tens
-of KB, because every base64 byte is a token the model has to type — files
-travel over SMB or `scp`, and the vault acts as the archivist: it adopts what
-appears on disk at the next call, or at boot.
+The client also caps tool results; a large one may arrive as a file path
+instead of data. `archive` with `max_chars=20000` refuses with the size instead
+(`reference_guide("archive")`).
 
-</details>
+### What it deliberately does not do
 
-<details>
-<summary><b><code>archive</code> and the one ceiling that is not this server's</b></summary>
+No command execution, no file deletion, no writing `keys.txt`, no
+`git gc --prune` on demand, no dumps: tools return small verdicts, because every
+returned byte lands in the conversation's context.
 
-Every limit in the table above is enforced by this server, and every one of them
-fails loudly. There is one more that is not ours, does not appear in the table,
-and is the one a large archive meets first: **the cap the client puts on the
-size of a tool result.**
+### Running the test suites
 
-Above that cap a client does not truncate. It writes the whole result to a file
-and hands the model a path instead of the data. Whether that is excellent or
-useless depends on something this server cannot see:
-
-| | the result lands | what happens |
-|---|---|---|
-| **A** — under the cap | in the message | works, and costs context |
-| **B** — over it, file lands where the caller's code runs | in the sandbox | works, and costs **no** context |
-| **C** — over it, file lands elsewhere | outside reach | the data exists and cannot be got |
-
-Case **B** is the good one, and it is why the 5 MB ceiling here is generous
-rather than mean: the archive never crosses the context at all. Case **C** is
-the trap, and it is not "cloud versus local" — it is only ever about *where the
-spill lands*.
-
-**The test, once, and then it is known.** The first time a result comes back as
-a **path** instead of data — it happens on its own, a `read_file` on a long
-document will do it — run `ls <that path>` where the caller's code runs.
-**There** → case B: archive freely, up to the server's own 5 MB. **Not there** →
-case C: keep archives small.
-
-Until that test has been run, the safe setting is `max_chars=20000`, which works
-everywhere.
-
-**`max_chars` is how a caller declares its ceiling.** 0 by default, meaning "no
-ceiling of mine". Given a number, the archive is **refused** rather than
-produced, and the refusal says how many characters it would have been — so one
-round trip reports the size instead of losing the payload.
-
-**Why this is documented here and not only in a docstring:** the cap belongs to
-the transport, not to `archive`. Any large result meets it — `read_file` on a
-long document, `diff` over a distant revision, `list_files` on a big tree.
-`archive` is only where it can cancel the *purpose* of the tool rather than one
-call.
-
-</details>
-
-<details>
-<summary><b>Recipes</b></summary>
-
-Written with `X` for the dataset.
-
-```
-change a number:      read_file → sha → edit_file(X, path, sha, old_text=old, new_text=new)
-change several:       read_file → sha → edit_file(X, path, sha, edits=[…])   one call
-read a few files:     read_files(X, [path, path, path])                        one call
-add to a log:         append(X, path, line)
-create a document:    write_file(X, path, content, "new")
-archive something:    move_path(X, "doc.md", "Trash/doc.md")
-find something:       search(X, "term") → read_file on the right file only
-recover content:      history → read_at(X, path, hash) → write_file
-did anything move:    manifest before, manifest after — equal means no
-compare two moments:  diff(X, "HEAD~5", path="a.md", rev_b="HEAD")
-full audit:           manifest → list_files → archive(X, pattern="*") → manifest
-                      a WHOLE dataset only in case B; otherwise folder by
-                      folder, or pass max_chars and let it report the size
-find by expression:   search(X, "^## ", regex=True)
-destroy a dataset:    manifest → dataset_drop(X, manifest_sha256)
-copy across datasets: read_file("A", "x.md") → write_file("B", "x.md", …, "new")
+```sh
+scripts/test.sh
 ```
 
-</details>
+It builds a Python 3.12 virtual environment (`PYTHON` picks another,
+`ARCHIVIST_WORK` reuses one), installs `requirements.txt` with `--no-deps` and
+runs `test_engine.py` (the engine) and `test_vault.py` (the rest), each to its
+own log. Trust the `exit=0` lines. No network, Docker or FastMCP. The renderers
+need Pango and the Liberation and DejaVu fonts; outside Debian, point
+`RENDER_FONT_DIR` and `REPORT_FONT_DIR` at them.
 
-<details>
-<summary><b>Errors and what to do</b></summary>
+### Releasing
 
-| Message | Cure |
-|---|---|
-| `dataset ... is protected: a key is required` | the key is in the project's instructions |
-| `no such dataset` | `vault_status` lists them; the dataset goes in `dataset`, not in `path` |
-| `path must be relative to the dataset` | the dataset is repeated at the head of `path`: drop it |
-| `path is relative to the dataset, not absolute` | drop the leading `/` |
-| `CONFLICT: expected sha ...` | re-read, reconcile, retry |
-| `the file already exists` | you used `"new"` on an existing file |
-| `the file does not exist` | the opposite: pass `"new"` |
-| `old_text NOT found` | re-read and copy the exact fragment |
-| `old_text found N times` | widen the context until it is unique |
-| `edit N of M: ...` | that change of the list failed and nothing was written: fix it and resend the list |
-| `dataset ... is closed: it has no line in the key registry` | add `name \|` (open) or `name \| key` (locked) to `keys.txt` on the server |
-| `path not allowed` | a segment is `..`, `.git`, or a lockfile: those names never appear in a path |
-| `is one of git's own control files` | `.gitignore`, `.gitattributes` and `.gitmodules` can be read, never written from the tools: change them on the server |
-| `is a file, not a folder` / `is a folder` / `not a file` | the path names the wrong kind of thing: a file in the middle of it, or a folder where a file is needed |
-| `cannot move ... into itself` | the destination is inside the source |
-| `destination already exists` | `move_path` never overwrites |
-| `more than 3000 files` | go one level deeper |
-| `block too large` | `append` is not for rewrites |
-| `too many datasets` | the vault is full at 200: nothing to widen |
-| `is locked and cannot be dropped` / `is closed …` | only an open dataset can be dropped: make its line `name \|` on the server first |
-| `CONFLICT: expected manifest ...` | someone wrote after you looked: re-read the manifest, then retry |
+The version is `VERSION` in `server.py`; a release is a `v*` tag. The workflow
+runs both suites, checks `VERSION` against the tag, builds the image, **starts**
+it with `scripts/smoke.sh` (a stranger refused, both renderers drawing), and
+only then publishes `ghcr.io/alcor6502/archivist-mcp`. A manual run publishes
+nothing. In a fork, make the package public once. `scripts/ship.sh` is the
+maintainer's commit-and-push helper.
 
-A failing tool never leaves a partial write.
-
-</details>
-
----
-
-## What it deliberately does not do
-
-No "run command" tool. No file deletion. No `git gc --prune` on demand. No
-dumps: every tool returns a verdict, because every byte coming back lands in the
-conversation's context, and context is the scarce resource.
-
-And one thing worth stating plainly: **dataset keys are not authentication.**
-The service recognises a single account, and all of its conversations share one
-identity — the server cannot tell them apart. The keys work because a
-conversation without the key in its context cannot invent it: they are a boundary
-between projects, not a defence against an attacker. That is what OAuth is for.
-
-## Package contents
+### Package contents
 
 | File | |
 |---|---|
-| `vault.py` | the engine: `VaultRoot` and `Dataset` |
-| `server.py` | the MCP tools; parameters in the schema, prose in the guide |
-| `preflight.py` | the blocking startup checks, and the IP-filter parser |
-| `reference-guide.md` | the manual: a short model page, then one card per command, served by `reference_guide()` |
-| `entrypoint.sh` | init, permissions, privilege drop, preflight, start |
-| `Dockerfile` · `requirements.txt` | the image |
-| `archivist-mcp.xml` | Unraid template, every field documented |
-| `archivist-icon.png` | the icon, used in **two** places — see below |
-| `render.py` | the PDF renderer behind `render_pdf`: twelve blocks, two passes, a draw log |
-| `report.py` | the one behind `render_report`: Markdown of the dataset laid out with WeasyPrint, an index with real page numbers, and a fetcher that serves nothing |
-| `test_vault.py` | the vault checks, no network needed |
-| `mcp_common_engine/` · `test_engine.py` | the part that knows nothing about vaults — identity gate, designed refusals, config helpers, preflight harness, log discipline — and its own suite. A repository of its own until 4.0.2; kept as a self-contained folder so it can be lifted out again |
-| `requirements.txt` · `requirements-server.txt` | the pins the suite needs, and FastMCP on top of them for the image only |
-| `scripts/test.sh` · `scripts/ship.sh` | the suite on a fresh bench, and a delivery from the clone alone |
-| `scripts/smoke.sh` · `scripts/smoke_inside.py` | the image, STARTED, before it is published: the workflow builds it, runs it through its real entrypoint on an empty vault, and inside it checks that a caller with no token gets 401 and that both renderers draw a PDF with the fonts the image carries. A manual run of the workflow does all of this and publishes nothing |
-| `scripts/geolog.py` | what the renderer DREW, as text: every string, rectangle, line and measured height. Two PDFs of one document are never byte-identical — reportlab stamps a creation date — so a change to `render.py` is proved to have moved nothing by diffing this log before and after, not by comparing files |
-| `scripts/inject.py` | puts a defect back into `render.py`, runs the suite, and records which checks went red. A guard never seen failing is not a guard. It refuses to start on a dirty `render.py` and restores the file when it is done |
-| `scripts/fixtures/` | documents for the two above, shaped like the real dashboards — the same blocks, the same column widths, strings of the same length — with **every number and name invented** |
-
-### The icon, and where it is actually seen
-
-`archivist-icon.png` is pointed at by its raw GitHub URL from two files: the
-Unraid template, which puts it on the container, and `server.py`, which passes
-it to FastMCP as `icons=[…]`. A check compares the two URLs, because two hand
-copies of one string have an expiry date.
-
-Passing `icons` buys **the OAuth consent page** — the page seen when the
-connector is added or reconnected — where FastMCP renders it in place of its
-own logo.
-
-It does **not** buy the icon in Claude's connector list. That surface ignores
-`serverInfo.icons`, which the MCP spec has carried since revision `2025-11-25`
-(SEP-973); serving `/favicon.ico` and a root page with `<link rel="icon">` are
-ignored as well. The tracking issue is
-[anthropics/claude-ai-mcp#152](https://github.com/anthropics/claude-ai-mcp/issues/152).
-Under a Tailscale Funnel the list shows Tailscale's icon, which is consistent
-with that surface deriving the icon from the DOMAIN — nothing in this
-repository can reach it. The field is sent anyway: the day the client reads it,
-the list follows with no change here.
+| `server.py` · `vault.py` · `preflight.py` | tools and startup · datasets, keys, git · startup checks |
+| `render.py` · `report.py` | `render_pdf` (reportlab) · `render_report` (WeasyPrint) |
+| `reference-guide.md` | the manual served to the model |
+| `mcp_common_engine/` | the engine |
+| `test_engine.py` · `test_vault.py` | the suites |
+| `requirements.txt` · `requirements-server.txt` | the suite's pins · FastMCP, image only |
+| `Dockerfile` · `entrypoint.sh` · `archivist-mcp.xml` | image · startup · Unraid template |
+| `archivist-icon.png` | container and OAuth consent page icon |
+| `scripts/` | `test.sh`, `ship.sh`, `smoke.sh`, and the renderer bench (`geolog.py`, `inject.py`, `fixtures/`) |
 
 ## Licence and credits
 
