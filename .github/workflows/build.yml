@@ -64,8 +64,8 @@ jobs:
       # and on v2.2.0 they diverged: the image was the new one — the manual it
       # served proved it — and vault_status() still answered 2.1.0. Nothing was
       # broken, but the single line a deployment is verified by was a lie, which
-      # is worse than a fault that announces itself. The twin paid for exactly
-      # this in its v1.0.2, and nothing here would have caught it.
+      # is worse than a fault that announces itself, and nothing here would
+      # have caught it.
       #
       # Only on a tag: workflow_dispatch has no version to compare against.
       - name: the version constant matches the tag

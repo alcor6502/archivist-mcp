@@ -4,8 +4,8 @@ and the service does NOT start (a check that crashes counts as FAILED, not passe
 The count is printed from len(CHECKS): there is no number to keep aligned anywhere.
 
 The placeholder, CIDR and log-level helpers, and the harness itself — SKIP,
-RESULTS, the check decorator — come from mcp-common-engine since 2.5.0: the
-twins had written them twice. Only the engine's ROOT is imported, and that is
+RESULTS, the check decorator — live in mcp_common_engine/, the part of this
+repository that knows nothing about vaults. Only the engine's ROOT is imported, and that is
 a load-bearing detail, not a style: the root drags no fastmcp in, by the
 engine's own contract, so this file can still run — and report — on an image
 where fastmcp is missing or broken, which is one of the things it exists to

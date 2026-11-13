@@ -64,8 +64,9 @@ from fastmcp.server.auth.providers.github import GitHubProvider
 # would shadow the package it comes from.
 from mcp.types import Icon
 
-# The engine: gate, refusal conversion, config helpers — the parts the twins
-# had written twice, pinned by tag in requirements.txt. Config comes from the
+# The engine: gate, refusal conversion, config helpers — the part of this
+# repository that knows nothing about vaults (mcp_common_engine/, a repository
+# of its own until 4.0.2). Config comes from the
 # engine's ROOT (same expression the preflight reads, so the two can never
 # disagree); Gate and make_tool from their own modules, which is where the
 # reasoning lives — where the gate hooks and why not one level narrower, why
@@ -505,10 +506,9 @@ def trash_purge(dataset: str, before: str, key: str = "") -> dict:
 
 
 if __name__ == "__main__":
-    # The engine's version rides next to our own, and it is a cure, not a
-    # decoration: two repositories pinning a third can pin different tags, and
-    # "identical to the twin" quietly becomes "identical if both updated".
-    # This line is where somebody already looks after every Apply.
+    # The engine's version rides next to our own: it says which state of
+    # mcp_common_engine/ this image carries, on the line somebody already
+    # looks at after every Apply.
     log.info("archivist-mcp %s (engine %s) — starting on %s:%s (http %s) — "
              "base_url %s — allowed user: %s — IP filter: %s — token store: %s "
              "— retention: %s",
