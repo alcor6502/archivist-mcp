@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import ast
 import io
+import json
 import logging
 import os
 import re
@@ -400,9 +401,11 @@ class Fault(Refusal):
 class FakeMCP:
     def __init__(self):
         self.registered = []
+        self.kwargs = []
 
-    def tool(self, fn):
+    def tool(self, fn, **kwargs):
         self.registered.append(fn)
+        self.kwargs.append(kwargs)
         return fn
 
 
@@ -432,7 +435,86 @@ ok(_REG.__name__ == "sample" and _REG.__doc__ == "the docstring is the schema",
    "schema is built from", (_REG.__name__, _REG.__doc__))
 ok(getattr(_REG, "__wrapped__", None) is not None,
    "and __wrapped__ points home, which is how FastMCP finds the signature")
+fake_log.lines.clear()
 ok(_REG(3) == 5, "a clean call passes through and returns")
+ok(fake_mcp.kwargs[0] == {},
+   "with no table of annotations the framework is handed none: its own "
+   "defaults, exactly as before 1.3.0", fake_mcp.kwargs[0])
+
+# One line per call that returned: which tool, how long, how much. And what
+# is NOT in it — the arguments ARE the stored data, and a path names a
+# document.
+ok(len(fake_log.lines) == 1
+   and re.fullmatch(r"call sample: \d+ ms, 1 bytes", fake_log.lines[0]) is not None,
+   "a call that returns leaves ONE line: the tool, the milliseconds, the bytes "
+   "of what went back (the JSON of 5 is one byte)", fake_log.lines)
+fake_log.lines.clear()
+
+
+@tool
+def carries(secret_path, text="x"):
+    return {"path": secret_path, "content": text}
+
+
+fake_mcp.registered[-1]("Cartella Riservata/nome.md", text="parola-segreta")
+_line = fake_log.lines[0] if fake_log.lines else ""
+ok(len(fake_log.lines) == 1 and "Riservata" not in fake_log.lines[0]
+   and "parola-segreta" not in fake_log.lines[0] and "nome.md" not in fake_log.lines[0],
+   "and the line carries NO argument and NO path, whatever the call carried",
+   fake_log.lines)
+ok(re.fullmatch(r"call carries: \d+ ms, (\d+) bytes", _line) is not None
+   and int(_line.split(", ")[1].split()[0])
+   == len(json.dumps({"path": "Cartella Riservata/nome.md", "content": "parola-segreta"})),
+   "the bytes are the size of the result's JSON", fake_log.lines)
+fake_log.lines.clear()
+
+# The consumer's two hooks. `finish` shapes what travels and says its size —
+# it is where pictures become image blocks, and their bytes are not JSON.
+shaped_mcp, shaped_log = FakeMCP(), FakeLog()
+shaped = make_tool(shaped_mcp, shaped_log, refusal=Refusal, fault=Fault,
+                   annotations={"seen": "READ", "refused_too": "READ"},
+                   finish=lambda r: ({"wrapped": r}, 4242))
+
+
+@shaped
+def seen():
+    return "raw"
+
+
+ok(shaped_mcp.kwargs[0] == {"annotations": "READ"},
+   "a tool in the table is registered WITH its annotations", shaped_mcp.kwargs[0])
+ok(shaped_mcp.registered[0]() == {"wrapped": "raw"},
+   "what travels is what `finish` returned, not the raw result")
+ok(len(shaped_log.lines) == 1 and shaped_log.lines[0].endswith(", 4242 bytes"),
+   "and the size on the line is the one `finish` counted", shaped_log.lines)
+shaped_log.lines.clear()
+
+
+@shaped
+def refused_too():
+    raise Refusal("no")
+
+
+try:
+    shaped_mcp.registered[-1]()
+except ToolError:
+    pass
+ok(shaped_log.lines == ["refused refused_too: no"],
+   "a refusal still leaves its own line and NO `call` line: it did not return",
+   shaped_log.lines)
+
+try:
+    @shaped
+    def forgotten():
+        return 1
+    ok(False, "a tool missing from the table of annotations does not register")
+except LookupError as e:
+    ok("forgotten" in str(e),
+       "a tool missing from the table of annotations does not register, and "
+       "the error names it — a hole in the table would announce that tool as "
+       "a destructive write on the open world", str(e))
+ok(len(shaped_mcp.registered) == 2, "and it really was not registered",
+   len(shaped_mcp.registered))
 
 fake_log.lines.clear()
 

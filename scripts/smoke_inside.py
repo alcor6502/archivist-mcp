@@ -61,6 +61,28 @@ if not open("/vault/Smoke/report.pdf", "rb").read(5) == b"%PDF-":
     fail("render_report did not write a PDF")
 print(f"SMOKE ok: render_report bound 1 file into {out['pages']} pages")
 
+# 3b — look.py: the three libraries that show a file, each through the vault's
+# own door. PDFium renders the page just drawn and reads its text; libheif
+# opens the format a phone camera writes. All three come from wheels, and a
+# wheel missing for this platform is exactly what only the image can show.
+seen = ds.view("smoke.pdf")
+if len(seen.images) != 1 or seen.images[0][:3] != b"\xff\xd8\xff" or seen.get("pages") != 1:
+    fail(f"view of the PDF: {len(seen.images)} pictures, pages={seen.get('pages')}")
+said = ds.pdf_text("smoke.pdf", "1")
+if "PAPERINO" not in said["text"][0]["text"]:
+    fail("pdf_text did not read the text of the page render_pdf drew")
+import shutil  # noqa: E402
+
+shutil.copy("/smoke/fixtures/finta.heic", "/vault/Smoke/finta.heic")
+heic = ds.view("finta.heic", "", "thumb")
+if heic.get("pixels") != [640, 480] or len(heic.images) != 1:
+    fail(f"view of a HEIC: {dict(heic)}")
+pre = ds.render_pdf("smoke2.pdf", doc, "new", preview=True)
+if len(getattr(pre, "images", [])) != 1 or "attached" not in pre.get("look", ""):
+    fail("render_pdf with preview=True returned no picture of the page")
+print(f"SMOKE ok: view showed a PDF page ({len(seen.images[0])} bytes of JPEG) and a HEIC, "
+      "pdf_text read the page, render_pdf previewed it")
+
 # 4 — the manual is in the image, and it is the one the tools serve.
 from vault import guide_for, server_instructions  # noqa: E402
 

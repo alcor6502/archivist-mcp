@@ -15,7 +15,7 @@ repository, `github.com/alcor6502/mcp-common-engine`.
 | Module | What it does |
 |---|---|
 | `gate.Gate` | The identity gate: a FastMCP middleware hooked on `on_request`. A request passes only if the token carries the allowed GitHub login and, when a filter is set, the source IP is inside the allowed ranges. Both refusals are the same generic `McpError` ("not authorised"), so a stranger never learns which door they hit; the log line, which only the operator sees, says which and why. |
-| `refusals.make_tool` | Builds the `@tool` decorator. A *designed refusal* (wrong key, CONFLICT, a ceiling reached) becomes a `ToolError` plus ONE log line of ours; a *fault* (git failing, a short read) is left alone and rises with its traceback. The server passes in the two exception classes. |
+| `refusals.make_tool` | Builds the `@tool` decorator. A *designed refusal* (wrong key, CONFLICT, a ceiling reached) becomes a `ToolError` plus ONE log line of ours; a *fault* (git failing, a short read) is left alone and rises with its traceback. A call that returns leaves one line too — tool, milliseconds, bytes, never a path. The server passes in the two exception classes and, optionally, a table of annotations (every tool must be in it) and a `finish` hook that shapes what travels. |
 | `config` | Reads configuration in one place, so the service and its preflight cannot disagree: placeholder detection, the IP range list (`ALLOWED_CIDRS`), the log level. A malformed value raises instead of being skipped. |
 | `preflight` | The harness of the startup checks: the `check` decorator, the results, the skip list. Every check **blocks**, and a check that crashes counts as failed. The checks themselves live in the server's `preflight.py`. |
 | `logs.arm_argument_redaction` | Keeps a malformed call from printing what it carried. FastMCP validates arguments before the tool runs and logs the whole argument dict on failure — and here the arguments are the stored documents. |
@@ -37,7 +37,8 @@ from mcp_common_engine.logs import arm_argument_redaction, arm_timestamps
 mcp = FastMCP(...)
 arm_argument_redaction()          # after the server object exists
 arm_timestamps(LOG_FORMAT)
-tool = make_tool(mcp, log, refusal=VaultError, fault=VaultFault)
+tool = make_tool(mcp, log, refusal=VaultError, fault=VaultFault,
+                 annotations=ANNOTATIONS, finish=_finish)   # the last two are optional
 mcp.add_middleware(Gate(log=log, allowed_login=ALLOWED_LOGIN,
                         allowed_cidrs=ALLOWED_CIDRS))
 ```

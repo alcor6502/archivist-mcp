@@ -30,7 +30,7 @@ if [ ! -x "$VENV/bin/python" ]; then
   echo "== bench: $VENV ($("$PY" --version 2>&1)) =="
   "$PY" -m venv "$VENV"
 fi
-if ! "$VENV/bin/python" -c 'import reportlab, weasyprint, markdown, regex' 2>/dev/null; then
+if ! "$VENV/bin/python" -c 'import reportlab, weasyprint, markdown, regex, pypdfium2, pillow_heif' 2>/dev/null; then
   echo "== bench: installing the pins of requirements.txt, --no-deps =="
   "$VENV/bin/pip" install -q --no-deps -r "$REQ"
 fi

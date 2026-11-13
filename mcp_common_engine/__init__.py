@@ -25,7 +25,7 @@ from .config import (
 )
 from .preflight import RESULTS, SKIP, check
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 __all__ = [
     "VERSION",

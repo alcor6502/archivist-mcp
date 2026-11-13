@@ -164,6 +164,10 @@ The server sends its rules to the client at connection time. In short:
   `from_line` and `lines` for part of a long file, several files in one
   `read_files`, several changes in one `edit_file` with `edits`, `manifest` to
   know whether anything changed.
+- **A PDF is not done until it has been looked at**: `render_pdf` with
+  `preview=True` returns the pages as pictures in the same answer, and `view`
+  shows any picture, PDF or folder already in the vault. The numbers a render
+  returns say it was drawn, not what it looks like.
 - **Files changed from outside** (SMB, by hand) are committed separately before
   the next write, which may return `external_commit_first`. Not an error.
 - **No empty folders**: git does not keep them.
@@ -190,7 +194,9 @@ limits and examples are on each tool's card in
 | **`list_files(dataset, path="", depth=0, pattern="", hashes=True)`** | listing with size and sha per file; one level, a glob, or names only |
 | **`read_file(dataset, path, from_line=0, lines=0)`** | one text file with its sha, or a run of its lines |
 | **`read_files(dataset, paths)`** | several text files in one call |
-| **`read_binary(dataset, path)`** | any file as base64 |
+| **`read_binary(dataset, path)`** | the original bytes of any file, as base64 |
+| **`view(dataset, path="", pages="", size="medium")`** | a picture (HEIC too), the pages of a PDF or a folder, as reduced JPEGs |
+| **`pdf_text(dataset, path, pages="")`** | a PDF's page count, outline and text; no OCR |
 | **`read_at(dataset, path, rev)`** | a file at a past revision |
 | **`search(dataset, pattern, path="", regex=False, context=0, ignore_case=False)`** | server-side grep, with lines of context |
 | **`manifest(dataset, path="")`** | one fingerprint for a tree |
@@ -199,7 +205,7 @@ limits and examples are on each tool's card in
 | **`write_file(dataset, path, content, expected_sha256)`** | the whole file |
 | **`edit_file(dataset, path, expected_sha256, old_text="", new_text="", edits=None)`** | replace unique fragments, one commit |
 | **`write_binary(dataset, path, content_base64, expected_sha256)`** | a binary from base64 |
-| **`render_pdf(dataset, path, document, expected_sha256="new")`** | a PDF drawn from a JSON document of blocks |
+| **`render_pdf(dataset, path, document, expected_sha256="new", preview=False)`** | a PDF drawn from a JSON document of blocks; `preview` returns its pages as pictures |
 | **`render_report(dataset, path, sources, layout=None, expected_sha256="new")`** | dataset Markdown bound into one PDF |
 | **`move_path(dataset, src, dst)`** | move, rename or trash; never overwrites |
 | **`history(dataset, path="", n=10)`** | the last commits |
@@ -246,7 +252,7 @@ client ──HTTPS, OAuth 2.1──► Tailscale Funnel ──► 127.0.0.1:3000
 | `PORT` | `3000` | listening port, and the one the Funnel publishes |
 | `ALLOWED_CIDRS` | empty | optional source-IP filter: `range # note ; range # note`. Empty: no filter |
 | `GIT_RETENTION_MONTHS` | `0` | squash history older than N months at boot, rewriting later commit hashes; 0 disables (recommended) |
-| `LOG_LEVEL` | `INFO` | `INFO` (boot report, refused calls) or `WARNING` (gate refusals and faults only) |
+| `LOG_LEVEL` | `INFO` | `INFO` (boot report, refused calls, and one line per served call: tool, milliseconds, bytes returned — never a path) or `WARNING` (gate refusals and faults only) |
 | `HTTP_MODE` | `stateless` | `stateless` or `stateful`; a missing variable means `stateful` |
 | `VAULT_UID` · `VAULT_GID` | `99` · `100` | the service user |
 | `PREFLIGHT_SKIP` | empty | checks to skip, comma-separated; testing only |
@@ -333,6 +339,7 @@ check its changelog first.
 | `diff` | 60 KB, truncated |
 | `archive` | 30 MB in, 5 MB tgz out |
 | `render_pdf` · `render_report` | 20 pages, 200 KB JSON · 200 pages, 5 MB Markdown |
+| `view` · `pdf_text` | a source of 100 MB; 10 pages or one sheet of 30 files per call, 1,500 pixels · 50 pages per call |
 | datasets | 200 |
 
 The client also caps tool results; a large one may arrive as a file path
@@ -374,6 +381,7 @@ maintainer's commit-and-push helper.
 | `server.py` · `vault.py` · `preflight.py` | tools and startup · datasets, keys, git · startup checks |
 | `render.py` · `report.py` | `render_pdf` (reportlab) · `render_report` (WeasyPrint) |
 | `rxlimit.py` | the clock on a caller's regular expression: `search` and both `forbid` get 5 seconds per call |
+| `look.py` | `view` and `pdf_text`: pictures reduced (Pillow, pillow-heif), PDF pages and text (pypdfium2) |
 | `reference-guide.md` | the manual served to the model |
 | `mcp_common_engine/` | the engine |
 | `test_engine.py` · `test_vault.py` | the suites |

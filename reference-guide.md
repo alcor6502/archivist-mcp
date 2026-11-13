@@ -19,6 +19,10 @@ make few calls, and ask each one for only what you need.
   with `edits`). Add at the end → `append`. `write_file` is for a new file or
   a full rewrite, never to change a line.
 - **Did anything change?** → `manifest`: one number, no content.
+- **See** → `view`: a photo, a scan, the pages of a PDF, a folder come back as
+  pictures. What a PDF says → `pdf_text`.
+- **Made a PDF?** LOOK at it before saying it is done: `render_pdf` with
+  `preview=True` returns the page as a picture; a report, `view` on it.
 - Every read and every write returns the file's `sha256`, a partial read
   too: pass it to the next write of that file, with no re-read. `CONFLICT` →
   re-read, reconcile, retry. A write lost in transport → `list_files` on that
@@ -27,8 +31,9 @@ make few calls, and ask each one for only what you need.
   needs `key` on every call: pass it BY NAME — it is always the last
   parameter. The key is in the instructions of the project it belongs to.
 - No `vault_status()` before working: it is for learning the datasets' names.
-  Before the first use of a tool, read its card, `reference_guide("<tool>")` —
-  not the whole manual.
+  Read the card before `render_pdf` and `render_report`,
+  `reference_guide("render_pdf")`; for the others, when the description is
+  not enough.
 - `archive` is a base64 tar.gz: for clients that run code, not for a chat.
 
 ## THE MODEL
@@ -191,15 +196,28 @@ CAS: `expected_sha256` must match the file's current sha, or `"new"` for a file
 that does not exist yet. `"new"` on an existing file is refused, and so is a
 real sha on a missing one.
 
-## render_pdf(dataset, path, document, expected_sha256='new', key='')
+## render_pdf(dataset, path, document, expected_sha256='new', preview=False, key='')
 
 A PDF **drawn by the server** from a JSON document of blocks, written with the
 same CAS as `write_binary` (`"new"` by default). The bytes are born on the
-server: a dashboard is ~5 KB of JSON in the call and ~50 KB of PDF on disk,
-and the PDF never crosses the model. Real fonts, full Unicode, max 20 pages.
+server: a dashboard is ~5 KB of JSON in the call and ~50 KB of PDF on disk.
+Real fonts, full Unicode, max 20 pages.
+Returns `size · sha256 · commit · pages · strings_drawn · missing · look`.
+
+**A PDF is not done until it has been looked at.** `pages`, `strings_drawn`
+and `missing` say it was drawn; a clipped cell, a marker in the wrong band and
+an empty box are on the page and in none of those numbers. So:
+1. call it with **`preview=True`**: the pages come back as pictures in the
+   same answer (the first 10; the rest with `view`);
+2. look: one page if one was meant, nothing cut or overlapping, tones and
+   markers where they belong;
+3. wrong → fix the document and render again **to the same path with the
+   `sha256` just returned**, not to a new name;
+4. to hand the file to the person: `read_binary` on the path, in a client
+   that runs code.
+
 An **empty `path`** renders and returns `pdf_base64` without writing — the
 "live" case, for a sheet the chat consumes and the vault never keeps.
-Returns `size · sha256 · commit · pages · strings_drawn · missing`.
 
 The document: `{"page", "title", "footer", "forbid", "text_check", "blocks"}`.
 - `page`: `{"size": "a4"|"letter", "margin": 28, "landscape": false}`
@@ -413,8 +431,12 @@ order — about a kilobyte for a thirty-file report. Max 200 pages and
 5 MB of Markdown in. `path` is **required**: a report never comes back as
 base64.
 Returns `size · sha256 · commit · pages · files · empty_groups · missing ·
-sections`, where `sections` is `[{"file", "page"}]` — the index as printed, so
-the chat can say "Emocromo on page 7" without reopening the PDF.
+sections · look`, where `sections` is `[{"file", "page"}]` — the index as
+printed, so the chat can say "Emocromo on page 7" without reopening the PDF.
+
+**Look at it before saying it is done**: `view` on the same path — the cover
+and index with `pages="1-2"`, then one page per kind of content (a wide
+table, a landscape group), taken from `sections`. Not all of them.
 
 `sources`: `{"base": "", "groups": [ … ]}`. `base` is the folder to start from
 (empty = the dataset root) and the listing is **not recursive**: a pattern on
@@ -518,8 +540,45 @@ Needs a sandbox to extract it in. In a chat without one, `read_files`.
 
 ## read_binary(dataset, path, key='')
 
-Any file — PDF, image, binary — as base64 plus sha256. Max 2 MB.
-Useless without a sandbox to decode it in.
+The **original bytes** of any file — PDF, image, binary — as base64 plus
+sha256. Max 2 MB. It is for handing a file on: to the person, or to code.
+In a client that runs code the answer is too large for the context, so the
+client saves it to a file and gives you its path: decode `content_base64`
+from there and compare the sha256.
+**Not for looking.** To see a picture or a PDF: `view`. What a PDF says:
+`pdf_text`. A sha alone: `list_files` on the file.
+
+## view(dataset, path='', pages='', size='medium', key='')
+
+**See a file.** The answer is JSON plus pictures (JPEG); nothing is written,
+and the original never leaves at full resolution.
+- **A picture** — JPEG, PNG, HEIC, WebP, GIF, TIFF, BMP: reduced to 1,500
+  pixels on its long side, upright. Returns `pixels` (the original) and
+  `shown`.
+- **A PDF**: `pages=""` is page 1, `"3"`, `"2-5"`, `"all"`. Max 10 pages
+  per call; `more` says which were left out and how to ask for them. Returns
+  `pages` (how many it has) and `shown`.
+- **A folder** (`path=""` is the dataset root): one numbered sheet of the
+  pictures and PDFs directly in it, 30 per sheet, `pages="2"` for the second.
+  `items` gives each number its file name. Not recursive.
+- `size="thumb"`: 400 pixels, to tell things apart; `medium`, the default,
+  reads a page of text.
+
+A file is judged by its content, not its name. The source may be up to
+100 MB. `pages` on a picture is a refusal.
+**This is how a PDF you rendered is checked**, when `preview=True` was not
+used or the PDF has more pages than a preview shows.
+
+## pdf_text(dataset, path, pages='', key='')
+
+What a PDF **says**, without the PDF crossing the wire.
+- `pages=""`: the map — `pages`, `outline` (`level · title · page`) and
+  `chars_per_page`. Read it first on a long PDF, then ask for the pages.
+- `pages="3"`, `"2-5"`, `"all"`: `text`, one entry per page. Max 50 pages
+  per call and 2 MB of text.
+
+**No OCR.** A page with no text layer is a scan or a picture: it is listed in
+`no_text`, and it is read by looking at it with `view`.
 
 ## write_binary(dataset, path, content_base64, expected_sha256, key='')
 
@@ -595,5 +654,8 @@ modified: a document from 2024 thrown away yesterday survives
 | `CONFLICT: expected manifest ...` | re-read the manifest, then retry |
 | `block too large` | `append` is not for rewrites: `write_file` |
 | `file too large` | above 2 MB, move it over SMB/scp |
+| `cannot show ...: not a picture this server can open` | `view` shows pictures and PDFs: for text `read_file`, for anything else `read_binary` |
+| `pages=...: the PDF has N pages` | pages count from 1; `pdf_text` with no `pages` says how many |
+| `the PDF cannot be opened` | damaged, or protected by a password: tell the person |
 | `the archive would be N characters of base64, over the ...` | your own `max_chars` stopped it before it was built |
 | `dataset ... is no longer there` | it was dropped while your call was in flight |

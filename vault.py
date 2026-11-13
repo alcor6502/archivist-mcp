@@ -51,6 +51,7 @@ MAX_WRITE_BYTES = 2_000_000
 MAX_LIST_FILES = 3_000
 MAX_DIFF_BYTES = 60_000
 MAX_BINARY_BYTES = 2_000_000       # read/write binary: above this, use SMB/scp
+MAX_VIEW_BYTES = 100_000_000       # the SOURCE of a view: a photo, a scan; what leaves is small
 MAX_ARCHIVE_BYTES = 30_000_000     # sum of files packed by archive() (input)
 MAX_ARCHIVE_OUT_BYTES = 5_000_000  # cap on the PRODUCED tgz: that is what crosses the context
 MAX_SEARCH_HITS = 200
@@ -59,6 +60,14 @@ MAX_READ_FILES = 50                # paths in one read_files(); their total obey
 MAX_EDITS = 50                     # replacements in one edit_file(edits=...)
 MAX_APPEND_BYTES = 64_000          # largest block for append()
 MAX_DATASETS = 200
+
+# What both renderers say when nobody has looked at the page. It is in the
+# RESULT because that is the one text a caller reads at the moment it decides
+# whether it is done; `pages` and `missing` beside it were being taken for a
+# check (2026-Nov-13, a dashboard printed and delivered unseen).
+NOT_LOOKED_AT = ("NOT looked at yet: these numbers say the PDF was drawn, not what "
+                 "it looks like. See it with view on this path (render_pdf: "
+                 "preview=True does it in the same call)")
 
 KEYS_BASENAME = "keys.txt"
 TRASH = "Trash"
@@ -176,6 +185,19 @@ class VaultFault(VaultError):
     diff <bad rev>` fails with the same git machinery, but a bad revision came
     from the caller: that stays a plain VaultError, which is why _git() takes
     `fault`."""
+
+
+class WithImages(dict):
+    """A result that carries pictures beside its JSON: `view`, and a render
+    asked for its preview. It IS the dict every other tool returns — so the
+    suite, which has no server framework, reads it as one — plus `.images`,
+    JPEG bytes in the order the dict describes them. Turning the pair into
+    what travels (a text block and image blocks) is server.py's business:
+    this file imports no framework, and must not start to."""
+
+    def __init__(self, meta: dict, images: list[bytes]) -> None:
+        super().__init__(meta)
+        self.images = list(images)
 
 
 def _sha(data: bytes) -> str:
@@ -1103,6 +1125,113 @@ class Dataset:
         return {"dataset": self.name, "path": self._rel(p), "size": len(data),
                 "sha256": _sha(data), "content_base64": base64.b64encode(data).decode("ascii")}
 
+    def _read_for_view(self, p: Path) -> bytes:
+        """Like _read_bytes with the ceiling of a SOURCE: what `view` and
+        `pdf_text` read never leaves as it is, so it may be far larger than
+        what a read may hand over."""
+        size = p.stat().st_size
+        if size > MAX_VIEW_BYTES:
+            raise VaultError(f"file too large to open here ({size:,} bytes, max "
+                             f"{MAX_VIEW_BYTES:,})")
+        data = p.read_bytes()
+        if len(data) != size:
+            raise VaultFault(f"read {len(data)} bytes, {size} declared: incomplete read, stopping")
+        return data
+
+    def view(self, rel: str = "", pages: str = "", size: str = "medium") -> WithImages:
+        """What a file LOOKS like: a picture reduced, the pages of a PDF, a
+        folder as a numbered contact sheet. Nothing is written and the
+        original is never handed over — for that there is read_binary.
+
+        A file is judged by its content, not its name: a PDF called .jpg is
+        shown as a PDF. `pages` belongs to PDFs and to folders (there it is
+        which sheet), and is refused on a picture rather than ignored: a
+        parameter that is read and then dropped answers a question nobody
+        asked."""
+        import look
+        if size not in look.VIEW_SIZES:
+            raise VaultError(f"size={size!r}: one of {', '.join(look.VIEW_SIZES)}")
+        p = self._resolve(rel, must_exist=True)
+        try:
+            if p.is_dir():
+                return self._view_folder(p, pages)
+            data = self._read_for_view(p)
+            meta = {"dataset": self.name, "path": self._rel(p), "size": len(data),
+                    "sha256": _sha(data)}
+            if look.is_pdf(data):
+                images, info = look.pdf_pages(data, pages, size)
+                return WithImages({**meta, "kind": "pdf", **info}, images)
+            if (pages or "").strip():
+                raise VaultError(f"pages={pages!r} on a picture: `pages` is for a PDF "
+                                 "or a folder")
+            image, info = look.picture(data, size)
+            return WithImages({**meta, "kind": "picture", **info}, [image])
+        except look.LookError as e:
+            raise VaultError(f"cannot show {self._rel(p)!r}: {e}") from None
+        except look.LookFault as e:
+            raise VaultFault(f"view machinery: {e}") from None
+
+    def _view_folder(self, base: Path, pages: str) -> WithImages:
+        """One level, like render_report and for the same reason: a sheet of
+        a folder is that folder, not everything filed under it."""
+        import look
+        names = sorted(q.name for q in base.iterdir() if not self._skip(q)
+                       and q.suffix.lower() in look.IMAGE_SUFFIXES + (".pdf",))
+        other = sum(1 for q in base.iterdir() if not self._skip(q)) - len(names)
+        if not names:
+            raise VaultError(f"no pictures and no PDFs directly in {self._rel(base) or '(the dataset)'!r}"
+                             ": list_files with depth=1 shows what is there")
+        sheets = -(-len(names) // look.MAX_SHEET_ITEMS)
+        spec = (pages or "").strip()
+        if spec and not spec.isdigit():
+            raise VaultError(f"pages={pages!r} on a folder: the number of the sheet, 1 to {sheets}")
+        n = int(spec) if spec else 1
+        if not 1 <= n <= sheets:
+            raise VaultError(f"pages={pages!r} on a folder: the number of the sheet, 1 to {sheets}")
+        chosen = names[(n - 1) * look.MAX_SHEET_ITEMS:n * look.MAX_SHEET_ITEMS]
+        items = []
+        for name in chosen:
+            try:
+                items.append((name, self._read_for_view(base / name)))
+            except VaultError as e:
+                if isinstance(e, VaultFault):
+                    raise
+                items.append((name, str(e)))
+        image, listed = look.sheet(items)
+        meta = {"dataset": self.name, "path": self._rel(base), "kind": "folder",
+                "files": len(names), "sheet": n, "sheets": sheets, "items": listed}
+        if other:
+            meta["not_shown"] = (f"{other} other file{'s' if other != 1 else ''} here: "
+                                 "neither a picture nor a PDF")
+        if sheets > n:
+            meta["more"] = (f"{look.MAX_SHEET_ITEMS} per sheet: the next is pages='{n + 1}'")
+        return WithImages(meta, [image])
+
+    def pdf_text(self, rel: str, pages: str = "") -> dict:
+        """What a PDF SAYS, without a byte of the PDF crossing the wire.
+        Without `pages` it is the map — how many pages, the outline, how much
+        text on each; with `pages`, their text. The same ceiling as any read
+        on what is handed over."""
+        import look
+        p = self._resolve(rel, must_exist=True)
+        if not p.is_file():
+            raise VaultError(f"not a file: {self._rel(rel)!r}")
+        data = self._read_for_view(p)
+        if not look.is_pdf(data):
+            raise VaultError(f"not a PDF: {self._rel(p)!r} — read_file reads text, "
+                             "view shows a picture")
+        try:
+            out = look.pdf_text(data, pages)
+        except look.LookError as e:
+            raise VaultError(f"cannot read {self._rel(p)!r}: {e}") from None
+        except look.LookFault as e:
+            raise VaultFault(f"view machinery: {e}") from None
+        if sum(len(t["text"].encode("utf-8")) for t in out.get("text", [])) > MAX_READ_BYTES:
+            raise VaultError(f"the text of those pages is over {MAX_READ_BYTES:,} bytes "
+                             "(the ceiling of a single read): ask for fewer pages")
+        return {"dataset": self.name, "path": self._rel(p), "size": len(data),
+                "sha256": _sha(data), **out}
+
     def read_at(self, rel: str, rev: str) -> dict:
         self._check_rev(rev)
         p = self._resolve(rel, must_exist=False)
@@ -1197,7 +1326,8 @@ class Dataset:
             raise VaultError(f"content too large ({len(data)} bytes, max {MAX_BINARY_BYTES})")
         return self._write_bytes(rel, data, expected_sha256, "write-binary")
 
-    def render_pdf(self, rel: str, document: dict, expected_sha256: str = "new") -> dict:
+    def render_pdf(self, rel: str, document: dict, expected_sha256: str = "new",
+                   preview: bool = False) -> dict:
         """A PDF drawn HERE from a document of blocks, then written like any
         binary — same CAS, same commit. The point is where the bytes are born:
         on this side of the wire. A dashboard is a few KB of JSON in the call
@@ -1210,7 +1340,14 @@ class Dataset:
 
         The document's `forbid` patterns are checked on the renderer's own log
         of drawn strings before a byte is written: a refused document leaves
-        nothing behind."""
+        nothing behind.
+
+        `preview` hands back the pages as pictures, in the same answer. It
+        exists because the verdict below — pages, strings drawn, nothing
+        missing — says the PDF was DRAWN and not what it looks like, and was
+        taken for a check: a page with a clipped cell and a bar in the wrong
+        band has `missing: []`. The pictures are made BEFORE the write, so a
+        fault in making them leaves no file the caller was not told about."""
         import json
         from render import build, RenderError, RenderFault, MAX_DOCUMENT_BYTES
         if not isinstance(document, dict):
@@ -1226,12 +1363,37 @@ class Dataset:
             raise VaultFault(f"render machinery: {e}") from None
         if len(data) > MAX_BINARY_BYTES:
             raise VaultError(f"the PDF came out at {len(data)} bytes, over {MAX_BINARY_BYTES}: fewer pages")
+        images, seen = self._preview(data) if preview else ([], NOT_LOOKED_AT)
         if not rel:
-            return {"dataset": self.name, "path": "", "size": len(data), "sha256": _sha(data),
-                    "pdf_base64": base64.b64encode(data).decode("ascii"), **verdict,
-                    "note": "not written: an empty path renders for the chat only"}
-        out = self._write_bytes(rel, data, expected_sha256, "render-pdf")
-        return {**out, **verdict}
+            out = {"dataset": self.name, "path": "", "size": len(data), "sha256": _sha(data),
+                   "pdf_base64": base64.b64encode(data).decode("ascii"), **verdict,
+                   "note": "not written: an empty path renders for the chat only"}
+        else:
+            out = {**self._write_bytes(rel, data, expected_sha256, "render-pdf"), **verdict}
+        out["look"] = seen
+        return WithImages(out, images) if preview else out
+
+    @staticmethod
+    def _preview(data: bytes) -> tuple[list[bytes], str]:
+        """The pages of a PDF just drawn, as pictures, and the sentence that
+        says which. Called before the write."""
+        import look
+        try:
+            images, info = look.pdf_pages(data, "all")
+        except look.LookFault as e:
+            raise VaultFault(f"view machinery: {e}") from None
+        except look.LookError as e:
+            # The renderer's own output is not the caller's file: a PDF it
+            # just drew and cannot be opened is a fault here, not a refusal.
+            raise VaultFault(f"the PDF just drawn cannot be opened: {e}") from None
+        shown = info["shown"]
+        seen = (f"pages {shown[0]}-{shown[-1]} of {info['pages']} are attached as "
+                "pictures: LOOK at them before calling it done — clipped text, a "
+                "bar in the wrong band and an empty box are visible there and "
+                "nowhere in these numbers")
+        if "more" in info:
+            seen += f". The rest: view on this path, {look.MAX_VIEW_PAGES} pages a call"
+        return images, seen
 
     def render_report(self, rel: str, sources: dict, layout: dict | None = None,
                       expected_sha256: str = "new") -> dict:
@@ -1302,7 +1464,7 @@ class Dataset:
             raise VaultError(f"the PDF came out at {len(pdf)} bytes, over {MAX_BINARY_BYTES}: "
                              "print fewer groups")
         out = self._write_bytes(rel, pdf, expected_sha256, "render-report")
-        return {**out, **verdict}
+        return {**out, **verdict, "look": NOT_LOOKED_AT}
 
     def _write_bytes(self, rel: str, data: bytes, expected_sha256: str, label: str) -> dict:
         p = self._resolve(rel, must_exist=False)

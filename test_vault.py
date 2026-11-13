@@ -500,10 +500,12 @@ def tool_conversion_check() -> None:
             pos = [ast.unparse(a) for a in val.args]
             kw = {k.arg: ast.unparse(k.value) for k in val.keywords}
             ok(pos == ["mcp", "log"]
-               and kw == {"refusal": "VaultError", "fault": "VaultFault"},
+               and kw == {"refusal": "VaultError", "fault": "VaultFault",
+                          "annotations": "ANNOTATIONS", "finish": "_finish"},
                "with our server, our logger, VaultError as the refusal and "
                "VaultFault as the fault — swapped, every fault takes the "
-               "quiet path", f"{pos} {kw}")
+               "quiet path — plus the table of annotations and the hook that "
+               "turns pictures into image blocks", f"{pos} {kw}")
 
     # `mcp.tool` is never called in server.py at all now: the one legitimate
     # call lives inside the engine's make_tool. Any occurrence here is a tool
@@ -1397,8 +1399,11 @@ def smoke_check() -> None:
        and all(re.search(rf"apt-get install[^\n]* {re.escape(n)}\b", dk) for n in names[1:]),
        "every package the dry run can remove is one the Dockerfile installs", names)
     ins = inside.read_text(encoding="utf-8") if inside.is_file() else ""
-    ok(all(w in ins for w in ("401", "render_pdf", "render_report", "fixtures/quadro.json")),
-       "the checks inside the image cover the door and both renderers")
+    ok(all(w in ins for w in ("401", "render_pdf", "render_report", "fixtures/quadro.json",
+                              'ds.view("smoke.pdf")', 'ds.pdf_text("smoke.pdf"',
+                              'ds.view("finta.heic"', "preview", "fixtures/finta.heic")),
+       "the checks inside the image cover the door, both renderers, and the "
+       "three libraries that show a file: PDF pages, PDF text, a HEIC photo")
 
 
 def instructions_check() -> None:
@@ -1443,7 +1448,8 @@ def instructions_check() -> None:
     # will match: the tools that save round trips, and the two parameter names
     # the container log shows models getting wrong.
     for must in ("read_files", "edits", "`pattern`", "`old_text`", "BY NAME", "sha256",
-                 "depth=1", "context=2", "`from_line`", "`manifest`", "never to change a line"):
+                 "depth=1", "context=2", "`from_line`", "`manifest`", "never to change a line",
+                 "`view`", "`pdf_text`", "preview=True", "LOOK"):
         ok(must in text, f"the instructions say {must!r}")
     # Every tool named in them exists: a backticked name that looks like a
     # tool and is not one is a door that is not there.
@@ -1608,6 +1614,7 @@ def guide_signature_check() -> None:
     import render as _r      # the renderer's own ceiling, read from the constant
     import rxlimit as _rx    # the clock on a caller's regex: one number, three cards
     import report as _rp     # and the other renderer's, which is a different number
+    import look as _lk       # how much of a file `view` and `pdf_text` hand over
     limits = [("write_file", mb(_v.MAX_WRITE_BYTES)),
               ("read_binary", mb(_v.MAX_BINARY_BYTES)),
               ("write_binary", mb(_v.MAX_BINARY_BYTES)),
@@ -1622,10 +1629,30 @@ def guide_signature_check() -> None:
               ("dataset_create", f"{_v.MAX_DATASETS} datasets"),
               ("render_pdf", f"{_r.MAX_PAGES} pages"),
               ("render_report", f"{_rp.MAX_PAGES} pages"),
-              ("render_report", f"{_rp.MAX_SOURCE_BYTES // 1_000_000} MB of Markdown")]
+              ("render_report", f"{_rp.MAX_SOURCE_BYTES // 1_000_000} MB of Markdown"),
+              ("render_pdf", f"the first {_lk.MAX_VIEW_PAGES}"),
+              ("view", f"Max {_lk.MAX_VIEW_PAGES} pages"),
+              ("view", f"{_lk.VIEW_SIZES['medium']:,}\n  pixels"),
+              ("view", f"{_lk.VIEW_SIZES['thumb']} pixels"),
+              ("view", f"{_lk.MAX_SHEET_ITEMS} per sheet"),
+              ("view", mb(_v.MAX_VIEW_BYTES)),
+              ("pdf_text", f"Max {_lk.MAX_TEXT_PAGES} pages"),
+              ("pdf_text", mb(_v.MAX_READ_BYTES) + " of text")]
     for name, shown in limits:
         ok(name in cards and shown in cards[name],
            f"the card for {name} still states the limit the code enforces", shown)
+    # The DESCRIPTIONS are read far more than the cards — they are what a
+    # client shows the model with every tool — and two of them carry a number.
+    docs = {n.name: ast.get_docstring(n) or "" for n in tree.body
+            if isinstance(n, ast.FunctionDef) and is_tool(n)}
+    for name, shown in (("search", f"{_v.MAX_SEARCH_HITS} matches"),
+                        ("view", f"({_lk.MAX_VIEW_PAGES} a call)")):
+        ok(shown in docs.get(name, ""),
+           f"the description of {name} states the limit the code enforces", shown)
+    # And none of them is so long that a client cuts it: the longest one in
+    # 4.1.0 was 330 characters.
+    long = {n: len(d) for n, d in docs.items() if len(d) > 400}
+    ok(not long, "no tool description is over 400 characters", long)
 
 
 def regex_clock_static_check() -> bool:
@@ -1867,6 +1894,434 @@ def ask_for_less_check() -> None:
             # What a section that died left behind must not turn the sections
             # after it red as well: one defect, one name.
             (root / "bait.md").unlink(missing_ok=True)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def annotation_check() -> None:
+    """4.2.0: every tool tells the client what it does to the vault. A client
+    runs a read-only tool without asking and several of them at once; told
+    nothing, the protocol's defaults describe every tool as a destructive
+    write on the open world. So the table must be complete — and TRUE, which
+    is the part no schema can check: a writer filed under READ_ONLY is a write
+    the client will not ask about. What a tool really does is read off the
+    method it calls in vault.py."""
+    print("\n[0a] annotations — every tool says what it does, and it is true")
+    import vault as _v
+    src = (HERE / "server.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    def is_tool(fn) -> bool:
+        return any(isinstance(d, ast.Name) and d.id == "tool" for d in fn.decorator_list)
+
+    tools = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef) and is_tool(n)}
+    groups = {}
+    for n in tree.body:
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) \
+                and n.targets[0].id in ("READ_ONLY", "WRITES", "DESTRUCTIVE"):
+            try:
+                groups[n.targets[0].id] = list(ast.literal_eval(n.value))
+            except ValueError:
+                groups[n.targets[0].id] = None
+    ok(set(groups) == {"READ_ONLY", "WRITES", "DESTRUCTIVE"}
+       and all(isinstance(g, list) for g in groups.values()),
+       "server.py declares READ_ONLY, WRITES and DESTRUCTIVE as literal tuples of names",
+       sorted(groups))
+    if set(groups) != {"READ_ONLY", "WRITES", "DESTRUCTIVE"} or None in groups.values():
+        return
+    filed = [n for g in groups.values() for n in g]
+    ok(len(filed) == len(set(filed)), "no tool is filed under two kinds",
+       sorted({n for n in filed if filed.count(n) > 1}))
+    ok(set(filed) == set(tools), "and the three together are exactly the tools: none "
+       "missing, none that does not exist",
+       {"not filed": sorted(set(tools) - set(filed)), "not a tool": sorted(set(filed) - set(tools))})
+
+    # What each kind is TOLD to the client: read off the dict that builds the
+    # table, comprehension by comprehension.
+    table = next((n.value for n in tree.body if isinstance(n, ast.Assign)
+                  and any(isinstance(t, ast.Name) and t.id == "ANNOTATIONS" for t in n.targets)), None)
+    told = {}
+    if isinstance(table, ast.Dict):
+        for v in table.values:
+            if isinstance(v, ast.DictComp) and isinstance(v.value, ast.Call) \
+                    and isinstance(v.generators[0].iter, ast.Name):
+                told[v.generators[0].iter.id] = {k.arg: ast.literal_eval(k.value)
+                                                 for k in v.value.keywords}
+    ok(told.get("READ_ONLY", {}).get("readOnlyHint") is True,
+       "READ_ONLY tools are announced readOnlyHint=True", told.get("READ_ONLY"))
+    ok(told.get("WRITES", {}).get("readOnlyHint") is False
+       and told.get("WRITES", {}).get("destructiveHint") is False,
+       "WRITES are announced as writes that history can take back", told.get("WRITES"))
+    ok(told.get("DESTRUCTIVE", {}).get("readOnlyHint") is False
+       and told.get("DESTRUCTIVE", {}).get("destructiveHint") is True,
+       "DESTRUCTIVE tools are announced destructiveHint=True", told.get("DESTRUCTIVE"))
+    ok(all(t.get("openWorldHint") is False for t in told.values()) and len(told) == 3,
+       "and nothing is open-world: the vault is all a tool can touch", told)
+
+    # And whether it is TRUE. A tool's wrapper calls one method of the vault;
+    # that method either reaches one of the few things that change the disk,
+    # or it does not.
+    WRITERS = ("_commit(", "_write_bytes(", "_atomic_write(", "rmtree(", ".mkdir(",
+               ".unlink(", ".rename(", "os.replace(")
+    PLUMBING = {"open", "open_by_name", "check_path"}
+    wrong = []
+    seen_writers = 0
+    for name, fn in tools.items():
+        calls = [(c.func.value.id, c.func.attr) for c in ast.walk(fn)
+                 if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+                 and isinstance(c.func.value, ast.Name) and c.func.value.id in ("vault", "ds")
+                 and c.func.attr not in PLUMBING]
+        writes = False
+        for owner, attr in calls:
+            cls = _v.VaultRoot if owner == "vault" else _v.Dataset
+            method = getattr(cls, attr, None)
+            if method is None:
+                wrong.append(f"{name}: calls {owner}.{attr}, which does not exist")
+                continue
+            writes = writes or any(w in inspect.getsource(method) for w in WRITERS)
+        seen_writers += writes
+        if writes and name in groups["READ_ONLY"]:
+            wrong.append(f"{name}: announced read-only, and its method writes")
+        if not writes and name not in groups["READ_ONLY"]:
+            wrong.append(f"{name}: announced as a write, and its method changes nothing")
+    ok(not wrong, "every tool's kind matches what its method in vault.py does", wrong)
+    ok(seen_writers == len(groups["WRITES"]) + len(groups["DESTRUCTIVE"]) and seen_writers >= 5,
+       "and the check really found the writers (it is not green for lack of looking)",
+       seen_writers)
+    drops = [n for n in groups["DESTRUCTIVE"]]
+    ok(sorted(drops) == ["dataset_drop", "trash_purge"],
+       "the tools nothing takes back are the two that delete for good", drops)
+
+    # The seam: pictures become image blocks in ONE place.
+    fin = next((n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_finish"), None)
+    body = ast.unparse(fin) if fin else ""
+    ok(fin is not None and "isinstance(result, WithImages)" in body and "ImageContent(" in body
+       and "'image/jpeg'" in body and "result.images" in body,
+       "_finish turns a WithImages into a text block and one JPEG image block per picture")
+    ok(issubclass(_v.WithImages, dict) and _v.WithImages({"a": 1}, [b"x"]) == {"a": 1}
+       and _v.WithImages({"a": 1}, [b"x"]).images == [b"x"],
+       "and WithImages IS the dict every tool returns, with the pictures beside it")
+
+
+def see_check() -> None:
+    """4.2.0: a file can be LOOKED at — a picture reduced, the pages of a PDF,
+    a folder as a sheet — and a PDF read. And a PDF the server has just drawn
+    comes back with its pages, because `pages: 1, missing: []` was being taken
+    for having checked it.
+
+    Its own vault in its own temp folder. The pages of the test PDF are each
+    ONE flat colour that encodes the page number: a view that shows the wrong
+    page, or a blank one, shows the wrong colour."""
+    import hashlib
+    import io
+    import unittest.mock as _mock
+    import vault as _v
+    import look as _lk
+    from PIL import Image
+    from reportlab.pdfgen import canvas as _canvas
+
+    def shade(n: int) -> int:
+        return 20 * n
+
+    def many_pages(n: int) -> bytes:
+        buf = io.BytesIO()
+        c = _canvas.Canvas(buf, pagesize=(300, 400))
+        for i in range(1, n + 1):
+            c.setFillColorRGB(shade(i) / 255, 0, 0)
+            c.rect(0, 0, 300, 400, stroke=0, fill=1)
+            if i != 3:                       # page 3 is "a scan": no text layer
+                c.setFillColorRGB(1, 1, 1)
+                c.drawString(40, 200, f"pagina inventata numero {i}")
+            if i in (1, 5):
+                c.bookmarkPage(f"p{i}")
+                c.addOutlineEntry(f"Capitolo finto {i}", f"p{i}", level=0)
+            c.showPage()
+        c.save()
+        return buf.getvalue()
+
+    def opened(jpeg: bytes):
+        im = Image.open(io.BytesIO(jpeg))
+        im.load()
+        return im
+
+    def png(size, colour, mode="RGB") -> bytes:
+        b = io.BytesIO()
+        Image.new(mode, size, colour).save(b, "PNG")
+        return b.getvalue()
+
+    tmp = tempfile.mkdtemp(prefix="archivist-see-")
+    try:
+        (Path(tmp) / "See" / "sub").mkdir(parents=True)
+        (Path(tmp) / "See" / "many").mkdir()
+        (Path(tmp) / "See" / "words").mkdir()
+        (Path(tmp) / "keys.txt").write_text("See |\n")
+        root = Path(tmp) / "See"
+        (root / "a-big.png").write_bytes(png((3000, 2000), (10, 200, 10)))
+        (root / "b-small.png").write_bytes(png((120, 80), (10, 10, 200)))
+        (root / "c-clear.png").write_bytes(png((600, 600), (0, 0, 0, 0), "RGBA"))
+        b = io.BytesIO()
+        ex = Image.Exif()
+        ex[0x0112] = 6                       # "rotate 90° to see it upright"
+        Image.new("RGB", (400, 200), (200, 200, 10)).save(b, "JPEG", exif=ex)
+        (root / "d-turned.jpg").write_bytes(b.getvalue())
+        shutil.copy(HERE / "scripts" / "fixtures" / "finta.heic", root / "e-phone.heic")
+        (root / "f-broken.jpg").write_bytes(b"this is not a picture")
+        (root / "g-twelve.pdf").write_bytes(many_pages(12))
+        (root / "h-disguised.jpg").write_bytes(many_pages(2))
+        (root / "notes.md").write_text("# testo\n")
+        (root / "sub" / "deep.png").write_bytes(png((50, 50), (1, 2, 3)))
+        for i in range(31):
+            (root / "many" / f"p{i:02}.png").write_bytes(png((40, 30), (i * 8, 0, 0)))
+        (root / "words" / "only.md").write_text("niente da vedere\n")
+        v = VaultRoot(tmp)
+        v.boot(0)
+        ds, _ = v.open("See")
+
+        def _sha_of(rel: str) -> str:
+            return hashlib.sha256((root / rel).read_bytes()).hexdigest()
+
+        commits_before = len(ds.history("", 50)["entries"])
+        sha_before = _sha_of("a-big.png")
+
+        sections = []
+
+        def _p():
+            print("\n[7a] view — a picture leaves reduced, upright, on white, and nothing is written")
+            r = ds.view("a-big.png")
+            ok(isinstance(r, _v.WithImages) and len(r.images) == 1 and r.images[0][:3] == b"\xff\xd8\xff",
+               "a picture comes back as ONE JPEG beside the JSON")
+            im = opened(r.images[0])
+            ok(max(im.size) == _lk.VIEW_SIZES["medium"] and r["shown"] == list(im.size),
+               "reduced to the medium size on its long side, and `shown` says so", im.size)
+            ok(r["pixels"] == [3000, 2000] and r["kind"] == "picture",
+               "`pixels` is the original's size: the caller knows what it did not get", r["pixels"])
+            ok(len(r.images[0]) < (root / "a-big.png").stat().st_size * 20 and len(r.images[0]) < 200_000,
+               "and it is small", len(r.images[0]))
+            g = im.getpixel((im.width // 2, im.height // 2))
+            ok(g[1] > 150 and g[0] < 80, "and it is the picture, not a blank", g)
+            t = opened(ds.view("a-big.png", "", "thumb").images[0])
+            ok(max(t.size) == _lk.VIEW_SIZES["thumb"], "size='thumb' is the small one", t.size)
+            s_ = ds.view("b-small.png")
+            ok(s_["shown"] == [120, 80], "a picture smaller than the view is NOT enlarged", s_["shown"])
+            turned = ds.view("d-turned.jpg")
+            ok(turned["shown"] == [200, 400] and turned["pixels"] == [400, 200],
+               "the camera's rotation tag is applied: a portrait arrives upright", turned["shown"])
+            clear = opened(ds.view("c-clear.png").images[0]).getpixel((300, 300))
+            ok(min(clear) > 240, "transparency comes out WHITE, not the black JPEG would make of it", clear)
+            heic = ds.view("e-phone.heic")
+            left = opened(heic.images[0]).getpixel((100, 240))
+            ok(heic["pixels"] == [640, 480] and left[0] > 150 and left[2] < 120,
+               "a HEIC, the format a phone camera writes, opens like any other", (heic["pixels"], left))
+            ok(_sha_of("a-big.png") == sha_before
+               and len(ds.history("", 50)["entries"]) == commits_before
+               and sorted(q.name for q in root.iterdir() if q.is_file() and not q.name.startswith("."))
+               == ["a-big.png", "b-small.png", "c-clear.png", "d-turned.jpg", "e-phone.heic",
+                   "f-broken.jpg", "g-twelve.pdf", "h-disguised.jpg", "notes.md"],
+               "the original is untouched, nothing was written beside it, nothing committed")
+            msg = refusal(lambda: ds.view("f-broken.jpg")) or ""
+            ok("cannot show 'f-broken.jpg'" in msg and "not a picture" in msg,
+               "a file that is not a picture is a refusal that names it", msg)
+            msg = refusal(lambda: ds.view("notes.md")) or ""
+            ok("not a picture" in msg, "and so is a text file", msg)
+            msg = refusal(lambda: ds.view("a-big.png", "2")) or ""
+            ok("`pages` is for a PDF or a folder" in msg,
+               "`pages` on a picture is refused, not ignored", msg)
+            msg = refusal(lambda: ds.view("a-big.png", "", "huge")) or ""
+            ok("medium" in msg and "thumb" in msg, "an unknown size is a refusal that lists the two", msg)
+            must_fail("a file that is not there", lambda: ds.view("nope.png"))
+            with _mock.patch.object(_v, "MAX_VIEW_BYTES", 1000):
+                msg = refusal(lambda: ds.view("a-big.png")) or ""
+            ok("too large to open here" in msg, "a source over the ceiling is refused before it is read", msg)
+            with _mock.patch.object(_lk, "MAX_PIXELS", 1_000_000):
+                msg = refusal(lambda: ds.view("a-big.png")) or ""
+            ok("megapixels" in msg, "and so is a picture of too many pixels, before it is decoded", msg)
+        sections.append(("[7a]", _p))
+
+        def _d():
+            print("\n[7b] view — the pages of a PDF, the ones asked for and no more than the ceiling")
+
+            def reds(r):
+                return [opened(j).getpixel((20, 20))[0] for j in r.images]
+
+            def near(got, pages):
+                return len(got) == len(pages) and all(abs(g - shade(p)) <= 6 for g, p in zip(got, pages))
+
+            r = ds.view("g-twelve.pdf")
+            ok(r["kind"] == "pdf" and r["pages"] == 12 and r["shown"] == [1] and near(reds(r), [1]),
+               "with no `pages` it is page 1, and the answer says the PDF has twelve",
+               (r["shown"], reds(r)))
+            ok(max(opened(r.images[0]).size) == _lk.VIEW_SIZES["medium"],
+               "a page is rendered at the medium size", opened(r.images[0]).size)
+            r = ds.view("g-twelve.pdf", "2-4")
+            ok(r["shown"] == [2, 3, 4] and near(reds(r), [2, 3, 4]),
+               "pages='2-4' are pages 2, 3 and 4, in order — each one's own colour",
+               (r["shown"], reds(r)))
+            r = ds.view("g-twelve.pdf", "12")
+            ok(near(reds(r), [12]), "the last page is the last page, not one before", reds(r))
+            r = ds.view("g-twelve.pdf", "all")
+            ok(len(r.images) == _lk.MAX_VIEW_PAGES and r["shown"] == list(range(1, _lk.MAX_VIEW_PAGES + 1)),
+               "pages='all' stops at the ceiling", len(r.images))
+            ok("11-12" in r.get("more", "") and "pages='11-12'" in r.get("more", ""),
+               "and says which pages were left out and how to ask for them", r.get("more"))
+            ok("more" not in ds.view("g-twelve.pdf", "1-10"), "exactly the ceiling leaves nothing out")
+            for bad in ("0", "13", "5-2", "x", "1,3", "2-"):
+                must_fail(f"pages={bad!r}", lambda bad=bad: ds.view("g-twelve.pdf", bad))
+            msg = refusal(lambda: ds.view("g-twelve.pdf", "13")) or ""
+            ok("12 pages" in msg, "a page past the end is told how many there are", msg)
+            r = ds.view("h-disguised.jpg")
+            ok(r["kind"] == "pdf" and r["pages"] == 2,
+               "a file is judged by its content: a PDF called .jpg is shown as a PDF", r["kind"])
+            (root / "i-torn.pdf").write_bytes(b"%PDF-1.4 and then nothing a reader can use")
+            msg = refusal(lambda: ds.view("i-torn.pdf")) or ""
+            ok("cannot be opened" in msg, "a damaged PDF is a refusal, not a fault", msg)
+            (root / "i-torn.pdf").unlink()
+            # PDFium is not thread-safe: every use of it is inside the one lock.
+            ltree = ast.parse((HERE / "look.py").read_text(encoding="utf-8"))
+            parents = {c: p for p in ast.walk(ltree) for c in ast.iter_child_nodes(p)}
+
+            def locked(node) -> bool:
+                while node in parents:
+                    node = parents[node]
+                    if isinstance(node, ast.With) and any(
+                            ast.unparse(i.context_expr) == "_PDFIUM_LOCK" for i in node.items):
+                        return True
+                return False
+            loose = [f"look.py:{n.lineno}" for n in ast.walk(ltree) if isinstance(n, ast.Call)
+                     and isinstance(n.func, ast.Name) and n.func.id in ("_open_pdf", "_render_page")
+                     and not locked(n)]
+            uses = [n for n in ast.walk(ltree) if isinstance(n, ast.Call)
+                    and isinstance(n.func, ast.Name) and n.func.id == "_open_pdf"]
+            ok(not loose and len(uses) >= 3,
+               "every use of PDFium in look.py sits inside `with _PDFIUM_LOCK`", loose or len(uses))
+        sections.append(("[7b]", _d))
+
+        def _f():
+            print("\n[7c] view — a folder is one numbered sheet, one level, a cell per file")
+            r = ds.view("")
+            names = [i["name"] for i in r["items"]]
+            ok(r["kind"] == "folder" and names == ["a-big.png", "b-small.png", "c-clear.png",
+                                                   "d-turned.jpg", "e-phone.heic", "f-broken.jpg",
+                                                   "g-twelve.pdf", "h-disguised.jpg"],
+               "the sheet lists the pictures and PDFs of THAT folder, sorted", names)
+            ok([i["n"] for i in r["items"]] == list(range(1, 9)), "numbered from 1, as drawn")
+            ok("deep.png" not in names, "one level: a subfolder's picture is not on it")
+            # Two: notes.md and the .gitignore every dataset is born with —
+            # the same files list_files counts there, by the same rule.
+            ok(r.get("not_shown", "").startswith("2 other files"),
+               "and what is neither is counted, not listed", r.get("not_shown"))
+            broken = next(i for i in r["items"] if i["name"] == "f-broken.jpg")
+            ok("error" in broken and broken["n"] == 6,
+               "a file that will not open keeps its cell and its number, and says why", broken)
+            ok(next(i for i in r["items"] if i["name"] == "g-twelve.pdf").get("pages") == 12,
+               "a PDF on the sheet says how many pages it has")
+            sheet = opened(r.images[0])
+            ok(len(r.images) == 1 and sheet.width == _lk.SHEET_COLUMNS * _lk.SHEET_CELL
+               and sheet.height == 2 * (_lk.SHEET_CELL + _lk.SHEET_LABEL),
+               "one picture: eight cells are two rows of five", sheet.size)
+            cx = _lk.SHEET_CELL // 2
+            cell1 = sheet.getpixel((cx, _lk.SHEET_LABEL + _lk.SHEET_CELL // 2))
+            ok(cell1[1] > 150 and cell1[0] < 80, "and cell 1 holds file 1 (the green one)", cell1)
+            m = ds.view("many")
+            ok(m["files"] == 31 and m["sheets"] == 2 and len(m["items"]) == _lk.MAX_SHEET_ITEMS
+               and "pages='2'" in m.get("more", ""),
+               "a folder of 31 is two sheets, and the first says how to get the second",
+               (m["files"], m["sheets"], m.get("more")))
+            m2 = ds.view("many", "2")
+            ok([i["name"] for i in m2["items"]] == ["p30.png"] and "more" not in m2,
+               "pages='2' is the second sheet: the one file left", m2["items"])
+            must_fail("a sheet that is not there", lambda: ds.view("many", "3"))
+            must_fail("a range on a folder", lambda: ds.view("many", "1-2"))
+            msg = refusal(lambda: ds.view("words")) or ""
+            ok("no pictures and no PDFs" in msg and "list_files" in msg,
+               "a folder with nothing to show is a refusal that says where to look", msg)
+        sections.append(("[7c]", _f))
+
+        def _t():
+            print("\n[7d] pdf_text — the map first, then the pages; a scan has no text and says so")
+            r = ds.pdf_text("g-twelve.pdf")
+            ok(r["pages"] == 12 and len(r["chars_per_page"]) == 12 and "text" not in r,
+               "with no `pages` it is the map: how many, and how much text on each", r["chars_per_page"])
+            ok(r["outline"] == [{"level": 1, "title": "Capitolo finto 1", "page": 1},
+                                {"level": 1, "title": "Capitolo finto 5", "page": 5}],
+               "the outline carries each title with the page it points to", r["outline"])
+            ok(r["chars_per_page"][2] == 0 and r["no_text"] == [3] and "view" in r["no_text_note"],
+               "the page with no text layer is named, and the answer says to LOOK at it",
+               (r["chars_per_page"][:4], r.get("no_text")))
+            r = ds.pdf_text("g-twelve.pdf", "2")
+            ok(r["text"] == [{"page": 2, "text": "pagina inventata numero 2"}],
+               "pages='2' is the text of page 2 and of no other", r["text"])
+            r = ds.pdf_text("g-twelve.pdf", "11-12")
+            ok([t["page"] for t in r["text"]] == [11, 12] and "numero 12" in r["text"][1]["text"],
+               "a range, in order")
+            ok(ds.pdf_text("g-twelve.pdf", "3")["no_text"] == [3],
+               "asked for the scan itself, the answer is empty and says why")
+            with _mock.patch.object(_lk, "MAX_TEXT_PAGES", 5):
+                r = ds.pdf_text("g-twelve.pdf", "all")
+            ok(len(r["text"]) == 5 and "6-12" in r.get("more", ""),
+               "the pages of text in one call have a ceiling, and the rest is named", r.get("more"))
+            with _mock.patch.object(_v, "MAX_READ_BYTES", 30):
+                msg = refusal(lambda: ds.pdf_text("g-twelve.pdf", "1-2")) or ""
+            ok("ask for fewer pages" in msg, "and so has the text itself, as any read", msg)
+            msg = refusal(lambda: ds.pdf_text("a-big.png")) or ""
+            ok("not a PDF" in msg and "view" in msg, "a picture is not a PDF, and is sent to view", msg)
+            must_fail("a folder", lambda: ds.pdf_text(""))
+            must_fail("a page past the end", lambda: ds.pdf_text("g-twelve.pdf", "13"))
+        sections.append(("[7d]", _t))
+
+        def _r():
+            print("\n[7e] render_pdf — the preview is the page, and the result says whether anyone looked")
+            doc = json.loads((HERE / "scripts" / "fixtures" / "quadro.json").read_text(encoding="utf-8"))
+            plain = ds.render_pdf("out/plain.pdf", doc)
+            ok(not isinstance(plain, _v.WithImages) and plain["look"] == _v.NOT_LOOKED_AT
+               and "preview=True" in plain["look"] and "view" in plain["look"],
+               "without preview the result SAYS it has not been looked at, and how to",
+               plain.get("look"))
+            seen = ds.render_pdf("out/seen.pdf", doc, "new", True)
+            ok(isinstance(seen, _v.WithImages) and len(seen.images) == plain["pages"] == 1,
+               "with preview=True the page comes back as a picture, one per page", len(getattr(seen, "images", [])))
+            ok("attached" in seen["look"] and "LOOK" in seen["look"] and seen["look"] != plain["look"],
+               "and the result says so, in other words than the unseen one", seen["look"])
+            ok(seen["sha256"] == _sha_of("out/seen.pdf") and seen["commit"],
+               "the file is written and committed exactly as without it")
+            page = opened(seen.images[0])
+            same = opened(ds.view("out/seen.pdf").images[0])
+            ok(page.size == same.size and page.tobytes() == same.tobytes(),
+               "the preview IS what view shows of the file written: one picture, not two renderers")
+            dark = sum(1 for px in page.convert("L").getdata() if px < 100)
+            ok(dark > 2000, "and it is a page with things on it, not a white sheet", dark)
+            live = ds.render_pdf("", doc, "new", True)
+            ok(len(live.images) == 1 and live["path"] == "" and "pdf_base64" in live,
+               "an unwritten render previews too")
+            with _mock.patch.object(_lk, "pdf_pages", side_effect=_lk.LookFault("no library")):
+                try:
+                    ds.render_pdf("out/never.pdf", doc, "new", True)
+                    ok(False, "a preview that cannot be made is a fault")
+                except _v.VaultFault as e:
+                    ok("view machinery" in str(e), "a preview that cannot be made is a FAULT, by name", str(e))
+                except Exception as e:                               # noqa: BLE001
+                    ok(False, "a preview that cannot be made is a fault", f"{type(e).__name__}: {e}")
+            ok(not (root / "out" / "never.pdf").exists(),
+               "and it left NO file behind: the pictures are made before the write")
+            (root / "scheda.md").write_text("# Scheda finta\n\nRiga inventata.\n")
+            rep_ = ds.render_report("out/report.pdf", {"groups": [{"title": "G", "files": ["scheda.md"]}]})
+            ok(rep_["look"] == _v.NOT_LOOKED_AT, "render_report says the same: not looked at yet")
+            ok(ds.view("out/report.pdf", "all")["pages"] == rep_["pages"],
+               "and view shows the report it wrote, page for page")
+        sections.append(("[7e]", _r))
+
+        for title, fn in sections:
+            try:
+                fn()
+            except Exception as e:                                   # noqa: BLE001
+                ok(False, f"{title} ran to the end", f"died on {type(e).__name__}: {str(e)[:160]}")
+
+        dk = (HERE / "Dockerfile").read_text(encoding="utf-8")
+        req = (HERE / "requirements.txt").read_text(encoding="utf-8")
+        ok(re.search(r"^COPY [^\n]*\blook\.py\b", dk, re.MULTILINE) is not None,
+           "the image carries look.py")
+        for dist in ("pypdfium2", "pillow-heif"):
+            ok(re.search(rf"^{dist}==\d", req, re.MULTILINE) is not None,
+               f"requirements.txt pins {dist} to one version")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -3764,6 +4219,8 @@ def main() -> int:
         ship_scripts_check()
         smoke_check()
         ask_for_less_check()
+        annotation_check()
+        see_check()
 
         print("\n[14c] the manual says what the code actually offers")
         guide_signature_check()

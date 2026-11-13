@@ -45,32 +45,79 @@ The check has to move with the code: it stops asserting "one `def tool`, never
 rebound" and starts asserting "the name `tool` is bound exactly once, at module
 level, to a call of `make_tool` from this package". That check must be written
 BEFORE the move, not after.
+
+ONE LINE PER CALL, since 1.3.0, and what is NOT in it is the design. A call
+that returns leaves `call <tool>: <ms> ms, <bytes> bytes` at INFO: which tool,
+how long the work took on this side, how much went back. No argument and no
+path, ever — uvicorn's access log is kept off in the consumers precisely
+because a path names a document, and this line must not become the same
+record by another road. It exists because nothing else says where the time of
+a call goes: with it, eight lines in one second are eight calls that arrived
+together, and a slow chat can be told from a slow server. A refusal keeps its
+own line and gets no second one; a fault keeps its traceback.
+
+ANNOTATIONS are the consumer's table, name → whatever its framework wants,
+and a tool that is not in the table does not register: the import dies naming
+it. A table with a hole would otherwise hand the client the protocol's
+defaults for that tool — "not read-only, destructive, open world" — which is
+the most alarming description there is, given to whichever tool was added
+last.
 """
 
 import functools
+import json
 import logging
+import time
 
 from fastmcp.exceptions import ToolError
 
 
-def make_tool(mcp, log, *, refusal, fault):
+def json_bytes(result) -> int:
+    """How much a result weighs on the wire, near enough: its JSON, in bytes.
+    A result that will not serialise still gets a line — zero, not a crash in
+    the one place that must never be the reason a call fails."""
+    try:
+        return len(json.dumps(result, ensure_ascii=False, default=str).encode("utf-8"))
+    except (TypeError, ValueError):
+        return 0
+
+
+def make_tool(mcp, log, *, refusal, fault, annotations=None, finish=None):
     """Build the `@tool` decorator for one server.
 
     `refusal` is the engine's ordinary error class — every instance of it is a
     refusal the server meant to give. `fault` is its subclass reserved for
     genuine faults, caught first and left alone.
+
+    `annotations` maps a tool's name to what the framework is handed as its
+    annotations; given, EVERY tool must be in it. `finish` turns what the
+    function returned into (what travels, its size in bytes): it is where a
+    server that returns pictures builds its content blocks and counts them.
+    Left out, the result travels as it is and its size is its JSON.
     """
 
     def tool(fn):
+        extra = {}
+        if annotations is not None:
+            if fn.__name__ not in annotations:
+                raise LookupError(f"tool {fn.__name__!r} has no annotations: add it "
+                                  "to the table handed to make_tool")
+            extra["annotations"] = annotations[fn.__name__]
+
         @functools.wraps(fn)
         def guarded(*args, **kwargs):
+            started = time.monotonic()
             try:
-                return fn(*args, **kwargs)
+                result = fn(*args, **kwargs)
             except fault:
                 raise
             except refusal as e:
                 log.info("refused %s: %s", fn.__name__, e)
                 raise ToolError(str(e), log_level=logging.INFO) from None
-        return mcp.tool(guarded)
+            wire, size = finish(result) if finish else (result, json_bytes(result))
+            log.info("call %s: %d ms, %d bytes", fn.__name__,
+                     round((time.monotonic() - started) * 1000), size)
+            return wire
+        return mcp.tool(guarded, **extra)
 
     return tool

@@ -53,6 +53,8 @@ Environment:
 """
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import os
 import sys
@@ -60,9 +62,10 @@ from pathlib import Path
 
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.github import GitHubProvider
+from fastmcp.tools.tool import ToolResult
 # Imported by name on purpose: `mcp` is the server object below, and that name
 # would shadow the package it comes from.
-from mcp.types import Icon
+from mcp.types import Icon, ImageContent, TextContent, ToolAnnotations
 
 # The engine: gate, refusal conversion, config helpers — the part of this
 # repository that knows nothing about vaults (mcp_common_engine/, a repository
@@ -76,15 +79,16 @@ from mcp_common_engine import (VERSION as ENGINE_VERSION, cidrs_from_env,
                                describe_cidrs, log_level_from_env)
 from mcp_common_engine.gate import Gate
 from mcp_common_engine.logs import arm_argument_redaction, arm_timestamps
-from mcp_common_engine.refusals import make_tool
+from mcp_common_engine.refusals import json_bytes, make_tool
 # Read from preflight and not restated here for the same reason the log level
 # is read from one expression: the suite can import preflight (it drags no
 # fastmcp in) and cannot import this file, so a knob resolved here would be a
 # knob nothing exercises.
 from preflight import HTTP_MODES, http_mode_from_env
-from vault import VaultRoot, VaultError, VaultFault, guide_for, server_instructions
+from vault import (VaultRoot, VaultError, VaultFault, WithImages, guide_for,
+                   server_instructions)
 
-VERSION = "4.1.0"
+VERSION = "4.2.0"
 
 # The shape of a line of ours. It is a NAME because it is used twice: here, and
 # again below where fastmcp's own handlers are given the same shape. Written out
@@ -289,7 +293,57 @@ arm_timestamps(LOG_FORMAT)
 #     was switched off above for exactly that reason; this records only what
 #     was REFUSED, which is rare and is the thing being diagnosed. The knob
 #     is documented: LOG_LEVEL=WARNING takes the line away.
-tool = make_tool(mcp, log, refusal=VaultError, fault=VaultFault)
+#
+# Since 4.2.0 two more things ride on the same seam, both the engine's doing
+# (its docstring has the reasoning) and both bound here because only this
+# file knows the answers:
+#   - what each tool DOES to the vault, as MCP annotations. Three kinds, three
+#     tuples, and every tool is in exactly one: the engine refuses to register
+#     a tool that is in none, and the suite checks each tuple against what the
+#     tool's method in vault.py really does. A client may run read-only tools
+#     without asking and in parallel; one that is told nothing assumes the
+#     worst of all of them. Nothing here is open-world: the vault is the whole
+#     of what a tool can touch.
+#   - what travels. Every tool returns a dict and it travels as one; `view`,
+#     and a render asked for its preview, return a dict WITH pictures, and
+#     _finish turns that into a text block and image blocks.
+READ_ONLY = ("vault_status", "reference_guide", "dataset_status", "list_files",
+             "read_file", "read_files", "search", "manifest", "archive",
+             "read_binary", "view", "pdf_text", "read_at", "history", "diff")
+# They change the vault, and every change is a commit that history, read_at
+# and dataset_restore can take back: not destructive.
+WRITES = ("dataset_create", "append", "write_file", "render_pdf", "render_report",
+          "edit_file", "move_path", "write_binary", "dataset_restore")
+# Nothing takes these back.
+DESTRUCTIVE = ("dataset_drop", "trash_purge")
+ANNOTATIONS = {
+    **{n: ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+       for n in READ_ONLY},
+    **{n: ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=False)
+       for n in WRITES},
+    **{n: ToolAnnotations(readOnlyHint=False, destructiveHint=True, openWorldHint=False)
+       for n in DESTRUCTIVE},
+}
+
+
+def _finish(result):
+    """What a tool returned → (what travels, its size in bytes for the log
+    line). A plain dict travels as it is. A WithImages becomes its JSON as a
+    text block followed by one image block per picture, in order: the text
+    says which page or which file each picture is."""
+    if not isinstance(result, WithImages):
+        return result, json_bytes(result)
+    meta = dict(result)
+    blocks = [TextContent(type="text", text=json.dumps(meta, ensure_ascii=False))]
+    blocks += [ImageContent(type="image", mimeType="image/jpeg",
+                            data=base64.b64encode(jpeg).decode("ascii"))
+               for jpeg in result.images]
+    return (ToolResult(content=blocks, structured_content=meta),
+            json_bytes(meta) + sum(len(jpeg) for jpeg in result.images))
+
+
+tool = make_tool(mcp, log, refusal=VaultError, fault=VaultFault,
+                 annotations=ANNOTATIONS, finish=_finish)
 
 
 # The Gate — GitHub identity plus source-IP filter, hooked on `on_request` —
@@ -400,18 +454,22 @@ def write_file(dataset: str, path: str, content: str,
 
 @tool
 def render_pdf(dataset: str, path: str, document: dict, expected_sha256: str = "new",
-               key: str = "") -> dict:
-    """A PDF drawn by the server from a document of blocks (see the guide)
-    and written with CAS; an empty path returns it as base64, unwritten."""
+               preview: bool = False, key: str = "") -> dict:
+    """A PDF drawn by the server from a document of blocks (read its card)
+    and written with CAS. ALWAYS pass preview=True: the pages come back as
+    pictures in the same answer — LOOK at them before you say it is done,
+    `pages` and `missing` do not show clipped text or a wrong colour. An
+    empty path returns the PDF as base64, unwritten."""
     ds, rel = vault.open(dataset, path, key)
-    return ds.render_pdf(rel, document, expected_sha256)
+    return ds.render_pdf(rel, document, expected_sha256, preview)
 
 
 @tool
 def render_report(dataset: str, path: str, sources: dict, layout: dict | None = None,
                   expected_sha256: str = "new", key: str = "") -> dict:
     """Markdown files of the dataset bound into one PDF, laid out by the
-    server and written with CAS. `path` is required: no base64."""
+    server and written with CAS. `path` is required: no base64. It is not
+    checked until you LOOK at it: view on the same path, a few pages."""
     ds, rel = vault.open(dataset, path, key)
     return ds.render_report(rel, sources, layout, expected_sha256)
 
@@ -447,7 +505,7 @@ def search(dataset: str, pattern: str, path: str = "", regex: bool = False,
     something: the text goes in `pattern` (not `query`). Literal unless
     regex=True; ignore_case=True for either. Answers path:line: text;
     context=2 adds the lines around each match, so the hit needs no
-    read_file after."""
+    read_file after. 200 matches at most: past that, narrow `path`."""
     ds, rel = vault.open(dataset, path, key)
     return ds.search(pattern, rel, regex, context, ignore_case)
 
@@ -473,10 +531,31 @@ def archive(dataset: str, path: str = "", pattern: str = "*.md",
 
 @tool
 def read_binary(dataset: str, path: str, key: str = "") -> dict:
-    """Read any file (PDF, binary) as base64 plus sha256. Only useful where
-    you can run code to decode it; for its sha alone, list_files on it."""
+    """The ORIGINAL bytes of any file as base64, plus sha256: to hand a
+    file to the user or to code. Not for looking: to SEE a picture or a PDF
+    use view, for what a PDF says pdf_text, for a sha alone list_files."""
     ds, rel = vault.open(dataset, path, key)
     return ds.read_binary(rel)
+
+
+@tool
+def view(dataset: str, path: str = "", pages: str = "", size: str = "medium",
+         key: str = "") -> dict:
+    """SEE a file: the answer carries pictures. A photo or a scan (HEIC
+    too), reduced; a PDF, page 1 or pages="2-5" or "all" (10 a call); a
+    folder, a numbered sheet of what is in it. size="thumb" for smaller.
+    This is how a PDF just rendered is checked."""
+    ds, rel = vault.open(dataset, path, key)
+    return ds.view(rel, pages, size)
+
+
+@tool
+def pdf_text(dataset: str, path: str, pages: str = "", key: str = "") -> dict:
+    """What a PDF SAYS. Without pages: how many pages, the outline, the
+    characters on each — the map. With pages="3" or "2-5" or "all": their
+    text. No OCR: a page with no text is a scan, look at it with view."""
+    ds, rel = vault.open(dataset, path, key)
+    return ds.pdf_text(rel, pages)
 
 
 @tool

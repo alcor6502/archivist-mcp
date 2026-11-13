@@ -13,6 +13,12 @@ reportlab==5.0.1
 # stopped, `regex` takes a timeout. No dependencies of its own.
 regex==2026.9.29
 pillow==12.3.0
+# view and pdf_text (look.py). pypdfium2 carries PDFium itself in its wheel:
+# pages rendered and text read with no system package. pillow-heif carries
+# libheif the same way and teaches Pillow the HEIC a phone camera writes.
+# Neither has a dependency of its own beyond Pillow, pinned above.
+pypdfium2==5.14.0
+pillow-heif==1.8.1
 # render_report lays Markdown out with WeasyPrint, which draws text through
 # Pango and fontconfig: those come from the image (libpangoft2, libharfbuzz,
 # fonts-dejavu-core), not from pip. Every install here is --no-deps, so
