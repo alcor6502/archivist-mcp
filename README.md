@@ -1225,6 +1225,9 @@ copy across datasets: read_file("A", "x.md") → write_file("B", "x.md", …, "n
 | `edit N of M: ...` | that change of the list failed and nothing was written: fix it and resend the list |
 | `dataset ... is closed: it has no line in the key registry` | add `name \|` (open) or `name \| key` (locked) to `keys.txt` on the server |
 | `path not allowed` | a segment is `..`, `.git`, or a lockfile: those names never appear in a path |
+| `is one of git's own control files` | `.gitignore`, `.gitattributes` and `.gitmodules` can be read, never written from the tools: change them on the server |
+| `is a file, not a folder` / `is a folder` / `not a file` | the path names the wrong kind of thing: a file in the middle of it, or a folder where a file is needed |
+| `cannot move ... into itself` | the destination is inside the source |
 | `destination already exists` | `move_path` never overwrites |
 | `more than 3000 files` | go one level deeper |
 | `block too large` | `append` is not for rewrites |

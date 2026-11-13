@@ -270,13 +270,35 @@ _GIT_IDENTITY = {
     "GIT_COMMITTER_NAME": "archivist-mcp", "GIT_COMMITTER_EMAIL": "archivist-mcp@localhost",
 }
 
+# The permission bits of a file are NOT content, and git must not version
+# them. The entrypoint sets every file to 666 at every start, while a file
+# dropped over SMB can arrive with the owner-execute bit: git recorded it as
+# 100755, the next restart made it 100644, and the boot committed "external
+# changes" nobody had made — 5,390 mode changes in the history of one dataset
+# (counted 2026-11-12). Handed to git in the environment of each call, like the
+# identity and for the same reason: it holds on a repository adopted from a
+# folder made by hand, whatever its own config says, and costs no process.
+_GIT_CONFIG = {
+    "GIT_CONFIG_COUNT": "1",
+    "GIT_CONFIG_KEY_0": "core.fileMode", "GIT_CONFIG_VALUE_0": "false",
+}
+
 
 def _git_env() -> dict[str, str]:
-    return {**os.environ, **_GIT_IDENTITY}
+    return {**os.environ, **_GIT_IDENTITY, **_GIT_CONFIG}
 
 
 def _has_forbidden(parts) -> bool:
     return any(_fold(x) in _FORBIDDEN_SEGMENTS for x in parts)
+
+
+# Files git itself obeys. They stay READABLE — '.gitignore' lives in every
+# dataset, see above — but no tool may write, edit or move one: a '.gitignore'
+# holding `*` turned every later write into "(nothing to commit)", a file on
+# disk with no history, and nothing said so. Whoever needs one changed does it
+# on the server. A separate set from _FORBIDDEN_SEGMENTS on purpose: that one
+# refuses reads too.
+_GIT_CONTROL_FILES = {".gitignore", ".gitattributes", ".gitmodules"}
 
 
 # =====================================================================
@@ -689,6 +711,27 @@ class Dataset:
             raise VaultError(f"no such file: {self._rel(rel)!r} in dataset {self.name!r}")
         return rp
 
+    def _check_writable(self, p: Path) -> None:
+        """What every door that changes the tree asks before touching `p`:
+        not one of git's control files, and no FILE where a folder has to be.
+
+        The second half is the caller's mistake reaching the kernel: writing
+        `a.md/b.md` when `a.md` is a file came back as a bare FileExistsError
+        — a traceback in the log and an absolute server path in the answer,
+        for what is an ordinary refusal."""
+        parts = p.relative_to(self.root).parts
+        if any(_fold(x) in _GIT_CONTROL_FILES for x in parts):
+            raise VaultError(
+                f"{self._rel(p)!r} is one of git's own control files "
+                f"({', '.join(sorted(_GIT_CONTROL_FILES))}): readable, never "
+                "written from the tools")
+        q = self.root
+        for part in parts[:-1]:
+            q = q / part
+            if q.exists() and not q.is_dir():
+                raise VaultError(
+                    f"{self._rel(q)!r} is a file, not a folder: nothing can live under it")
+
     def _skip(self, p: Path) -> bool:
         """The single exclusion rule. Every counting or listing operation goes
         through here, so they can never disagree on what counts as a file."""
@@ -826,7 +869,10 @@ class Dataset:
 
     @staticmethod
     def _check_rev(rev: str) -> None:
-        if not rev or not all(c.isalnum() or c in "~^-_." for c in rev) or len(rev) > 40:
+        # A leading '-' is not a revision, it is an OPTION: `diff("-h", ...)`
+        # reached git as one and came back with its usage page.
+        if (not rev or rev.startswith("-") or len(rev) > 40
+                or not all(c.isalnum() or c in "~^-_." for c in rev)):
             raise VaultError(f"invalid revision: {rev!r}")
 
     def _git_size(self) -> int:
@@ -1012,25 +1058,22 @@ class Dataset:
         if len(text.encode("utf-8")) > MAX_APPEND_BYTES:
             raise VaultError(f"block too large (max {MAX_APPEND_BYTES} bytes): use write_file to rewrite")
         p = self._resolve(rel, must_exist=True)
+        if not p.is_file():
+            raise VaultError(f"not a file: {self._rel(rel)!r}")
+        self._check_writable(p)
         with self._lock():
             external = self._commit_external_if_dirty()
+            old = self._read_bytes(p)
+            size = len(old)
             if expected_sha256:
-                cur = _sha(p.read_bytes())
+                cur = _sha(old)
                 if cur != expected_sha256:
                     raise VaultError(
                         f"CONFLICT: expected sha {expected_sha256[:12]}... but the file is {cur[:12]}... "
                         "Someone wrote after you read it — or your previous append DID arrive: "
                         "re-read the tail before appending again.")
-            # Only the LAST byte decides whether a newline goes first: the file
-            # is not read whole before the write — it is read whole after it,
-            # for the sha, and that read used to happen twice.
-            size = p.stat().st_size
-            if size > MAX_READ_BYTES:
-                raise VaultError(f"file too large ({size} bytes, max {MAX_READ_BYTES})")
-            with open(p, "rb") as fh:
-                fh.seek(-1, os.SEEK_END) if size else None
-                last = fh.read(1) if size else b""
-            add = ("" if (not size or last == b"\n") else "\n") + text.rstrip("\n") + "\n"
+            # The last byte decides whether a newline goes first.
+            add = ("" if (not size or old.endswith(b"\n")) else "\n") + text.rstrip("\n") + "\n"
             # The ceiling is checked BEFORE the bytes land, on the size the file
             # will have. Checked after — which is what the read-back below used
             # to do on its own — the refusal arrived with the block already on
@@ -1041,16 +1084,17 @@ class Dataset:
                 raise VaultError(
                     f"the file would exceed {MAX_READ_BYTES} bytes after the append "
                     f"({size} now): split the document instead")
-            with open(p, "ab") as fh:
-                fh.write(add.encode("utf-8"))
-                fh.flush()
-                os.fsync(fh.fileno())
-            new = self._read_bytes(p)
-            if not new.endswith(add.encode("utf-8")):
-                raise VaultFault("post-append verification failed: the file does not end with the block written")
+            # Written like every other write: a new file beside the old one,
+            # then one rename. Until 4.0.1 the block was appended IN PLACE —
+            # the one write a reader could catch halfway and a crash could
+            # leave half done, under a manual that says no write is partial.
+            # The existing bytes are still never changed: they are copied.
+            new, sha = self._atomic_write(p, old + add.encode("utf-8"))
+            if not (new.startswith(old) and new.endswith(add.encode("utf-8"))):
+                raise VaultFault("post-append verification failed: the file is not the old bytes plus the block")
             commit = self._commit(f"append: {p.relative_to(self.root)}")
         return {"dataset": self.name, "path": self._rel(p), "size": len(new),
-                "sha256": _sha(new), "commit": commit,
+                "sha256": sha, "commit": commit,
                 **({"external_commit_first": external} if external else {})}
 
     def write_file(self, rel: str, content: str, expected_sha256: str) -> dict:
@@ -1177,6 +1221,9 @@ class Dataset:
 
     def _write_bytes(self, rel: str, data: bytes, expected_sha256: str, label: str) -> dict:
         p = self._resolve(rel, must_exist=False)
+        if p == self.root or p.is_dir():
+            raise VaultError(f"{self._rel(p) or 'the dataset root'!r} is a folder: a write needs a file path")
+        self._check_writable(p)
         with self._lock():
             external = self._commit_external_if_dirty()
             if p.exists():
@@ -1250,6 +1297,9 @@ class Dataset:
         the sha the previous one returned."""
         pairs = self._edit_pairs(old_text, new_text, edits)
         p = self._resolve(rel, must_exist=True)
+        if not p.is_file():
+            raise VaultError(f"not a file: {self._rel(rel)!r}")
+        self._check_writable(p)
         with self._lock():
             external = self._commit_external_if_dirty()
             data = self._read_bytes(p)
@@ -1291,6 +1341,15 @@ class Dataset:
     def move_path(self, src: str, dst: str) -> dict:
         s = self._resolve(src, must_exist=True)
         d = self._resolve(dst, must_exist=False)
+        # The moves the kernel refuses with EINVAL, refused here in words.
+        if s == self.root:
+            raise VaultError("src is empty: the dataset itself cannot be moved")
+        if d == self.root:
+            raise VaultError("dst is empty: name where it goes")
+        if d == s or s in d.parents:
+            raise VaultError(f"cannot move {self._rel(s)!r} into itself")
+        self._check_writable(s)
+        self._check_writable(d)
         with self._lock():
             external = self._commit_external_if_dirty()
             if d.exists():

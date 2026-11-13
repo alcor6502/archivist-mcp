@@ -1980,6 +1980,109 @@ def main() -> int:
            "and the commit still carries our identity, from the environment",
            ds._git("log", "-1", "--format=%an <%ae>"))
 
+        print("\n[4e] the caller's mistakes are refusals, and a refusal leaves the tree as it was")
+        # Each of these reached the kernel until 4.0.1 and came back as a bare
+        # OSError: a traceback in the log and an absolute server path in the
+        # answer. `refusal` returns None for a call that went through AND lets
+        # anything that is not a VaultError escape, so a regression is red
+        # with its name, not a dead suite.
+        ds.write_file("shape/inner.md", "x\n", "new")
+        _mf = ds.manifest("")["manifest_sha256"]
+        def _mv(src, dst):
+            d_, rs = v.open("Example Project", src, KEY)
+            return d_.move_path(rs, v.check_path("Example Project", dst))
+        def _refused(label, fn, word):
+            try:
+                msg = refusal(fn)
+            except Exception as e:   # noqa: BLE001 — the defect IS a stray exception
+                msg, word = f"{type(e).__name__}: {e}", "\x00never"
+            ok(msg is not None and word in msg, f"{label} is a refusal that says why", msg)
+        _refused("moving a folder into itself", lambda: _mv("shape", "shape/deeper"), "into itself")
+        _refused("moving the dataset root", lambda: _mv("", "elsewhere"), "cannot be moved")
+        _refused("writing under a file", lambda: ds.write_file("log.md/child.md", "x", "new"), "is a file, not a folder")
+        _refused("moving under a file", lambda: _mv("shape/inner.md", "log.md/inner.md"), "is a file, not a folder")
+        _refused("writing onto a folder", lambda: ds.write_file("shape", "x", "new"), "is a folder")
+        _refused("appending to a folder", lambda: ds.append("shape", "x"), "not a file")
+        _refused("editing a folder", lambda: ds.edit_file("shape", "a", "b", "0" * 64), "not a file")
+        ok(ds.manifest("")["manifest_sha256"] == _mf and ds.status()["git"] == "clean",
+           "after all seven the dataset is byte for byte as it was, and clean")
+
+        print("\n[4f] git's own control files are read, never written")
+        # The defect: a '.gitignore' holding `*` made every later write answer
+        # "(nothing to commit)" — a file on disk with no history. Checked on
+        # the STATE too: after the refusals a new file is still tracked.
+        _gi = ds.read_file(".gitignore")
+        for _name in (".gitignore", ".gitattributes", ".gitmodules", "shape/.GitIgnore"):
+            _refused(f"write_file on {_name}", lambda n=_name: ds.write_file(n, "*\n", "new"), "control files")
+        _refused("write_file on the existing .gitignore, right sha",
+                 lambda: ds.write_file(".gitignore", "*\n", _gi["sha256"]), "control files")
+        _refused("append to .gitignore", lambda: ds.append(".gitignore", "*"), "control files")
+        _refused("edit_file on .gitignore",
+                 lambda: ds.edit_file(".gitignore", ".DS_Store", "*", _gi["sha256"]), "control files")
+        _refused("moving .gitignore away", lambda: _mv(".gitignore", "Trash/.gitignore"), "control files")
+        _refused("moving a file onto .gitattributes", lambda: _mv("shape/inner.md", ".gitattributes"), "control files")
+        ok(ds.read_file(".gitignore")["sha256"] == _gi["sha256"], "and .gitignore still reads, unchanged")
+        ok(ds.write_file("shape/tracked.md", "t\n", "new")["commit"] != "(nothing to commit)"
+           and ds._git("ls-files", "shape/tracked.md").strip() == "shape/tracked.md",
+           "a file written afterwards is committed and tracked")
+
+        print("\n[4g] a revision cannot be an option")
+        for _rev in ("-h", "--help", "--no-index", "-p"):
+            _refused(f"read_at at {_rev!r}", lambda r=_rev: ds.read_at("log.md", r), "invalid revision")
+            _refused(f"diff from {_rev!r}", lambda r=_rev: ds.diff(r, "HEAD"), "invalid revision")
+            _refused(f"diff to {_rev!r}", lambda r=_rev: ds.diff("HEAD", r), "invalid revision")
+            _refused(f"restore to {_rev!r}", lambda r=_rev: ds.restore(r, _mf), "invalid revision")
+        ok(ds.read_at("log.md", "HEAD~1")["rev"] == "HEAD~1", "while HEAD~1 is still a revision")
+
+        print("\n[4h] append is atomic: a write that dies leaves the old file whole")
+        # In place, the block was on disk before anything could fail. Now the
+        # only step that changes the file is one rename: make THAT fail, and
+        # the file must be the old bytes — no block, no leftover beside it.
+        _lp = Path(root) / "Example Project" / "log.md"
+        _old = _lp.read_bytes()
+        def _boom(*a, **k):
+            raise OSError("injected: the rename failed")
+        _died = False
+        with _mock.patch.object(_v.os, "replace", _boom):
+            try:
+                ds.append("log.md", "never lands")
+            except OSError:
+                _died = True
+        ok(_died, "with the rename failing, the append fails")
+        ok(_lp.read_bytes() == _old, "and the file is exactly the old bytes",
+           (len(_old), _lp.stat().st_size))
+        ok(not [f for f in os.listdir(_lp.parent) if f.startswith(".archivist-tmp-")],
+           "with no temporary file left beside it")
+        ok(ds.status()["git"] == "clean", "and nothing for the next call to commit as external")
+        _ino = _lp.stat().st_ino
+        _r = ds.append("log.md", "lands")
+        ok(_lp.read_bytes() == _old + b"lands\n" and _r["sha256"] == _v._sha(_lp.read_bytes()),
+           "a healthy append is the old bytes plus the block, and returns its sha")
+        ok(_lp.stat().st_ino != _ino, "written beside and renamed: the file is a new inode")
+
+        print("\n[4i] a permission bit is not a change")
+        # The entrypoint sets every file to 666 at each start; a file dropped
+        # over SMB can carry the execute bit. git versioned the bit, so every
+        # restart committed "external changes" nobody had made.
+        _xp = Path(root) / "Example Project" / "shape" / "dropped.md"
+        _xp.write_text("by hand\n")
+        os.chmod(_xp, 0o766)
+        ds.write_file("shape/after.md", "a\n", "new")      # adopts dropped.md as external
+        ok(ds.status()["git"] == "clean", "the dropped file is committed")
+        _n = int(ds._git("rev-list", "--count", "HEAD").strip())
+        os.chmod(_xp, 0o666)
+        ok(ds.status()["git"] == "clean", "after chmod 666 the tree is still clean",
+           ds.status()["git"])
+        ok(ds.ensure_git() == "git repository present",
+           "and a boot finds nothing to commit")
+        ok(int(ds._git("rev-list", "--count", "HEAD").strip()) == _n,
+           "the history did not grow by a mode change")
+        os.chmod(_xp, 0o766)
+        ok(ds.status()["git"] == "clean", "nor does the bit coming back count")
+        import shutil as _sh
+        _sh.rmtree(Path(root) / "Example Project" / "shape")
+        ds._commit("cleanup shape")
+
         print("\n[5] binaries")
         import base64
         b = base64.b64encode(b"\xff\xfe\x00%PDF").decode()   # deliberately not valid UTF-8

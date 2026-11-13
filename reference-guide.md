@@ -34,7 +34,9 @@ the registry: every call refused). `vault_status()` says which. No tool opens,
 closes or locks a dataset, and a new one is born closed.
 
 Each dataset has its own git, so `HEAD~3` is three commits back *in that
-dataset*. Writing a path never creates a dataset.
+dataset*. Writing a path never creates a dataset. Git's own control files —
+`.gitignore`, `.gitattributes`, `.gitmodules` — can be read and never written,
+edited or moved: they are changed on the server, by the owner.
 
 ## FOUR THINGS THAT ARE NOT LIKE ELSEWHERE
 
@@ -533,6 +535,11 @@ modified: a document from 2024 thrown away yesterday survives
 | `edit N of M: ...` | that change of the list failed, and none was written: fix it, resend the list |
 | `nothing to edit` | the names are `old_text`/`new_text`, or a list in `edits` |
 | `path not allowed` | a segment is `..`, `.git`, or a lockfile |
+| `is one of git's own control files` | `.gitignore`, `.gitattributes`, `.gitmodules` are read-only from the tools: tell the person |
+| `is a file, not a folder` | a segment in the middle of the path is a file: nothing can be written under it |
+| `is a folder: a write needs a file path` / `not a file` | the path names a folder: add the file name |
+| `cannot move ... into itself` | the destination is inside the source: move it elsewhere |
+| `invalid revision` | a hash from `history`, or `HEAD~3`: never something starting with `-` |
 | `destination already exists` | `move_path` never overwrites: choose another name |
 | `more than 3000 files` | go one level deeper with `path` |
 | `is locked and cannot be dropped` / `is closed and cannot be dropped` | only an open dataset can be dropped: its line must become `name \|` first |
