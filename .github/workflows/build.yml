@@ -42,9 +42,14 @@ jobs:
         with:
           python-version: '3.12'
 
-      # The common engine, from the SAME pin the image will use — one number,
-      # one place. --no-deps on purpose: the suite needs no FastMCP, which is
-      # exactly why it can run here in under a minute.
+      # The engine's own suite FIRST, on a runner with nothing installed: the
+      # absence of fastmcp is its fixture, and it proves the package imports
+      # without it — which is what lets the preflight report on a broken image.
+      - run: python3 test_engine.py
+
+      # The same pins the image will use — one number, one place. --no-deps on
+      # purpose: the suite needs no FastMCP, which is exactly why it can run
+      # here in under a minute.
       - run: pip install --no-deps -r requirements.txt
 
       # The faces the two renderers embed and the text engine WeasyPrint dlopens,

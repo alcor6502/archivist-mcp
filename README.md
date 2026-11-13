@@ -362,13 +362,14 @@ old image, convinced you fixed something.
 Before installing, test the engine with no Docker:
 
 ```sh
-scripts/test.sh           # a venv on python3.12, the engine from the pin, the suite to a log
+scripts/test.sh           # a venv on python3.12, the pins of requirements.txt, both suites to a log
 ```
 
 It prints the last lines of the log and `exit=0` when everything passed; any
 other exit code is a suite that did not get to the end, whatever the lines
-above it say. The engine comes from the tag pinned in `requirements.txt` — the
-tarball, or a git clone of the same tag where the network refuses the tarball.
+above it say. There are two suites and two counts: `test_engine.py` for the
+`mcp_common_engine/` folder (the identity gate, the refusals, the config
+helpers) and `test_vault.py` for everything else.
 Half of the checks verify things that must **not** happen — traversal, wrong
 keys, dropping protected datasets — and they are the ones that matter most.
 `scripts/ship.sh <message-file> <file>...` runs the same suite, commits the
@@ -1267,7 +1268,9 @@ between projects, not a defence against an attacker. That is what OAuth is for.
 | `archivist-icon.png` | the icon, used in **two** places — see below |
 | `render.py` | the PDF renderer behind `render_pdf`: twelve blocks, two passes, a draw log |
 | `report.py` | the one behind `render_report`: Markdown of the dataset laid out with WeasyPrint, an index with real page numbers, and a fetcher that serves nothing |
-| `test_vault.py` | the engine checks, no network needed |
+| `test_vault.py` | the vault checks, no network needed |
+| `mcp_common_engine/` · `test_engine.py` | the part that knows nothing about vaults — identity gate, designed refusals, config helpers, preflight harness, log discipline — and its own suite. A repository of its own until 4.0.2; kept as a self-contained folder so it can be lifted out again |
+| `requirements.txt` · `requirements-server.txt` | the pins the suite needs, and FastMCP on top of them for the image only |
 | `scripts/test.sh` · `scripts/ship.sh` | the suite on a fresh bench, and a delivery from the clone alone |
 | `scripts/smoke.sh` · `scripts/smoke_inside.py` | the image, STARTED, before it is published: the workflow builds it, runs it through its real entrypoint on an empty vault, and inside it checks that a caller with no token gets 401 and that both renderers draw a PDF with the fonts the image carries. A manual run of the workflow does all of this and publishes nothing |
 | `scripts/geolog.py` | what the renderer DREW, as text: every string, rectangle, line and measured height. Two PDFs of one document are never byte-identical — reportlab stamps a creation date — so a change to `render.py` is proved to have moved nothing by diffing this log before and after, not by comparing files |

@@ -1,0 +1,5 @@
+# What the IMAGE needs on top of requirements.txt, and the suite does not:
+# FastMCP, installed WITH its dependencies. Pinned ==, one number, one place:
+# mcp_common_engine/gate.py and refusals.py depend on where this exact version
+# routes messages and where it logs them, both established by experiment.
+fastmcp==3.4.5

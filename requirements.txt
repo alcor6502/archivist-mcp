@@ -1,10 +1,9 @@
-# The common engine — gate, refusal conversion, config helpers, preflight
-# harness — pinned to a TAG: a tag is a number a check can compare, and
-# test_vault compares it with what actually installed. The tarball form,
-# not git+: a public tarball needs no git at pip time. fastmcp is pinned
-# INSIDE the engine (==3.4.5), where the code that depends on its routing
-# lives — one number, one place.
-mcp-common-engine @ https://github.com/alcor6502/mcp-common-engine/archive/refs/tags/v1.2.0.tar.gz
+# Everything the SUITE needs, installed --no-deps: every line is a pin, and a
+# dependency nobody pinned is a module that is not there. fastmcp is NOT here
+# on purpose — the suite runs without it — and lives in requirements-server.txt,
+# which only the image installs. The engine (gate, refusal conversion, config
+# helpers, preflight harness) is the mcp_common_engine/ folder of this
+# repository since 4.0.2: nothing to install.
 # The PDF renderer behind render_pdf; the fonts it embeds come from the image
 # (fonts-liberation), not from pip. reportlab 5 imports Pillow at load time,
 # and every install here is --no-deps, so Pillow is pinned beside it: without

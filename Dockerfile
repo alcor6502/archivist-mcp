@@ -10,9 +10,12 @@ FROM python:3.12-slim
 # with a name, never a silent fallback to whatever fontconfig answers.
 RUN apt-get update && apt-get install -y --no-install-recommends git util-linux fonts-liberation fonts-dejavu-core libpangoft2-1.0-0 libharfbuzz-subset0 && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt requirements-server.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -r requirements-server.txt
 COPY vault.py render.py report.py server.py preflight.py entrypoint.sh reference-guide.md ./
+# The engine — gate, refusals, config, preflight harness, log discipline — is a
+# folder of this repository, not a pip package: it is imported from /app.
+COPY mcp_common_engine ./mcp_common_engine
 RUN chmod +x entrypoint.sh
 # Python's stdout is block-buffered, stderr is not: the service logs on stderr
 # and entrypoint.sh echoes on stdout, so the two drain at different moments and

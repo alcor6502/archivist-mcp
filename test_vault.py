@@ -745,37 +745,46 @@ def tool_conversion_check() -> None:
 
 
 def engine_adoption_check() -> None:
-    """The engine is pinned to a tag, and the pin is what is installed.
+    """The engine is a folder of THIS repository, and that folder is what runs.
 
-    Two repositories pinning a third can pin different tags, and then
-    "identical" quietly becomes "identical if both of them updated". The cure
-    is to compare the number where somebody already looks: here, against the
-    package that actually installed, and on the startup line, next to our own
-    version. Both halves are checked, because each one alone is a number
-    nobody reads twice."""
+    Until 4.0.2 it was a second repository, pinned by tag and shared with a
+    twin server; the twin was retired and the pin became a number kept in step
+    for nobody. What can still go wrong is quieter than a wrong pin: a machine
+    that once installed the old package still has it in site-packages, and a
+    suite — or an image — that imported THAT copy would be testing code this
+    repository no longer contains. So the checks are about which copy is
+    imported, here and in the image."""
     req = (HERE / "requirements.txt").read_text(encoding="utf-8")
+    sreq = (HERE / "requirements-server.txt").read_text(encoding="utf-8")
 
-    # The tarball form, not git+: the image carries no git dependency for pip,
-    # and a public tarball needs none. One pin, one tag.
-    pins = re.findall(r"^mcp-common-engine @ https://github\.com/alcor6502/"
-                      r"mcp-common-engine/archive/refs/tags/v(\d+\.\d+\.\d+)"
-                      r"\.tar\.gz\s*$", req, re.MULTILINE)
-    ok(len(pins) == 1,
-       "requirements.txt pins the engine to ONE tag, in the tarball form", pins)
+    ok("mcp-common-engine" not in req and "mcp-common-engine" not in sreq,
+       "no requirements file installs the engine: it is not a pip package any more")
 
-    # fastmcp's version is pinned in the ENGINE's pyproject, where the code
-    # that depends on its routing lives. A second pin here would be the same
-    # number in two places, with the expiry date that comes with it.
-    ok(not re.search(r"^fastmcp", req, re.MULTILINE),
-       "fastmcp is not pinned a second time in requirements.txt")
+    # fastmcp is pinned ONCE, in the file only the image installs. In
+    # requirements.txt it would be installed --no-deps on the CI runner, where
+    # it cannot import, under a suite that must run without it.
+    ok(not re.search(r"^fastmcp", req, re.MULTILINE)
+       and re.findall(r"^fastmcp\S*", sreq, re.MULTILINE) == ["fastmcp==3.4.5"],
+       "fastmcp is pinned once, ==, in requirements-server.txt and not in requirements.txt")
 
-    import importlib.util
-    ok(importlib.util.find_spec("mcp_common_engine") is not None,
-       "mcp_common_engine imports where the suite runs")
+    pkg = _engine_pkg_dir()
+    ok(pkg is not None and pkg.resolve() == (HERE / "mcp_common_engine").resolve(),
+       "the engine imported where the suite runs is the folder in this repository, "
+       "not a copy left in site-packages", pkg)
     import mcp_common_engine as eng
-    ok(pins == [eng.VERSION],
-       f"and the engine installed here IS that tag: {eng.VERSION}",
-       f"pin {pins} vs installed {eng.VERSION}")
+    ok(Path(eng.__file__).resolve().parent == (HERE / "mcp_common_engine").resolve(),
+       "and `import mcp_common_engine` resolves to it")
+    for mod in ("__init__", "config", "gate", "logs", "preflight", "refusals"):
+        ok((HERE / "mcp_common_engine" / f"{mod}.py").is_file(),
+           f"mcp_common_engine/{mod}.py is in the repository")
+    ok((HERE / "test_engine.py").is_file(), "and so is its own suite, test_engine.py")
+
+    dk0 = (HERE / "Dockerfile").read_text(encoding="utf-8")
+    ok(re.search(r"^COPY mcp_common_engine \./mcp_common_engine\s*$", dk0, re.MULTILINE) is not None,
+       "the Dockerfile copies the engine folder into /app, where server.py imports it")
+    ok(re.search(r"pip install[^\n]*-r requirements\.txt[^\n]*-r requirements-server\.txt", dk0) is not None
+       and "--no-deps" not in dk0,
+       "and installs both requirements files, WITH dependencies: fastmcp needs its own")
 
     tree = ast.parse((HERE / "server.py").read_text(encoding="utf-8"))
 
@@ -818,7 +827,11 @@ def engine_adoption_check() -> None:
     # lets it run in under a minute, and it is not one to give up.
     wf = (HERE / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
     ok("pip install --no-deps -r requirements.txt" in wf,
-       "the CI test job installs the engine from the same pin, --no-deps")
+       "the CI test job installs the same pins as the image, --no-deps")
+    i_eng, i_pip = wf.find("python3 test_engine.py"), wf.find("pip install --no-deps")
+    ok(0 <= i_eng < i_pip,
+       "and runs the engine's own suite first, on a runner with nothing installed",
+       (i_eng, i_pip))
 
     # render_pdf draws with faces the IMAGE carries and a library pip installs:
     # both are declared in files no test executes, so both are read here.
@@ -1321,14 +1334,17 @@ def ship_scripts_check() -> None:
     t = test_sh.read_text(encoding="utf-8") if test_sh.is_file() else ""
     s = ship_sh.read_text(encoding="utf-8") if ship_sh.is_file() else ""
 
-    literal = re.findall(r"\bv\d+\.\d+\.\d+\b", t)
-    ok(not literal and "requirements.txt" in t and "refs/tags" in t,
-       "test.sh reads the engine tag out of requirements.txt and carries no tag of its own",
+    literal = re.findall(r"\bv?\d+\.\d+\.\d+\b", t)
+    ok(not literal and "requirements.txt" in t and "--no-deps" in t,
+       "test.sh installs the pins of requirements.txt --no-deps, like CI, and carries no version of its own",
        literal)
-    ok("mcp-common-engine.git" in t and "--no-deps" in t,
-       "test.sh falls back to a git clone of the tag, installed --no-deps like CI")
+    ok("mcp-common-engine" not in t and "git clone" not in t,
+       "test.sh fetches no engine: it is a folder of the repository")
     ok("suite.log" in t and "exit=" in t and "set -eu" in t,
        "test.sh logs the suite to a file and prints the exit code — the form that cannot lie")
+    i_e, i_v = t.find("test_engine.py\" >"), t.find("test_vault.py\" >")
+    ok(0 <= i_e < i_v and "RC_ENGINE" in t and 'exit "$RC_ENGINE"' in t,
+       "test.sh runs BOTH suites, and a red engine suite is a red exit", (i_e, i_v))
 
     i_test, i_commit = s.find("scripts/test.sh"), s.find("commit -q")
     ok(0 <= i_test < i_commit, "ship.sh runs the suite BEFORE it commits", (i_test, i_commit))
