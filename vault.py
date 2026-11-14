@@ -10,12 +10,16 @@ The model
   dataset". There is no root-level operation at all: the entire protection
   model follows from that single rule, which up to v1.8 was expressed by
   making the dataset the first segment of the path.
-- Access is decided by keys.txt, one line per dataset, and by nothing else.
+- Access is decided by keys.txt and by nothing else.
   `name | key` makes it LOCKED: every call must carry the key. `name |`, the
   bar and nothing after it, makes it OPEN. NO LINE makes it CLOSED: every
   call is refused. Closed is the default since 4.0.0 — until then a dataset
   without a line was open, and a typo in a name opened a dataset its owner
   believed protected (2026-11-03). Now the same typo closes it.
+- Since 4.3.0 a line may end with what its key is allowed: `name | key | ro`
+  reads, `name | key | append` reads and appends. A dataset may have several
+  lines, one per key; `name | | ro` lets anyone read. The caller passes the
+  key and nothing else: what it may do is the registry's business.
 - keys.txt lives in the vault root and is unreachable BY CONSTRUCTION: it is
   not a dataset, so it cannot be named in `dataset`, and as a `path` it is
   only ever looked for INSIDE a dataset. It is not even expressible.
@@ -217,9 +221,26 @@ def _fold(s: str) -> str:
     return _norm(s).casefold()
 
 
-def parse_key_registry(text: str) -> tuple[list[tuple[str, str]], list[int]]:
-    """The key registry, read ONCE for everybody: `[(name, key), ...]` plus the
-    NUMBERS of the lines that carry no separator.
+# What a line of the registry grants, weakest first. `full` is what a line
+# with no third field has always meant, and it is never written.
+RIGHTS = ("ro", "append", "full")
+_RANK = {r: i for i, r in enumerate(RIGHTS)}
+
+
+def registry_state(rights: dict[str, str] | None) -> str:
+    """`locked`, `open` or `closed` for one dataset, from its lines alone:
+    `{key: right}`, the empty key being "no key". OPEN means what it has
+    always meant — everything, with no key. A dataset anyone may read but
+    only a key may write is LOCKED: the word answers "does writing need a
+    key", which is the question dataset_drop asks."""
+    if not rights:
+        return "closed"
+    return "open" if rights.get("") == "full" else "locked"
+
+
+def parse_key_registry(text: str) -> tuple[list[tuple[str, str, str]], list[int]]:
+    """The key registry, read ONCE for everybody: `[(name, key, right), ...]`
+    plus the NUMBERS of the lines that are not one of its forms.
 
     It exists because there used to be two readers. This one, and a second one
     inside `preflight.py` that split on TAB only — while the format has always
@@ -250,24 +271,40 @@ def parse_key_registry(text: str) -> tuple[list[tuple[str, str]], list[int]]:
     anything.
 
     An empty KEY is not malformed since 4.0.0: `name |` is how a dataset is
-    declared OPEN, and it comes back as `(name, "")`. Until 4.0.0 the line was
-    malformed and the absence of a line meant open; now the absence means
-    CLOSED, so opening has to be something written down, and this is it.
+    declared OPEN, and it comes back as `(name, "", "full")`. Until 4.0.0 the
+    line was malformed and the absence of a line meant open; now the absence
+    means CLOSED, so opening has to be something written down, and this is it.
+
+    Since 4.3.0 a line may carry a THIRD field, the right its key grants:
+    `name | key | ro` reads, `name | key | append` reads and may call `append`
+    and nothing else that writes. No third field is `full`, so every registry
+    written before 4.3.0 means what it meant. A dataset may have several
+    lines, one per key, and the empty key is a key like the others:
+    `name | | ro` lets anyone read. The third field is one of two words and
+    nothing else — `rw`, `full`, an empty one are MALFORMED, because a right
+    the service guessed is a right nobody granted. So is a line that gives a
+    key already seen for that dataset a DIFFERENT right: which of the two the
+    owner meant is not ours to pick. Malformed lines grant nothing.
     """
-    entries: list[tuple[str, str]] = []
+    entries: list[tuple[str, str, str]] = []
     malformed: list[int] = []
+    seen: dict[tuple[str, str], str] = {}
     for n, line in enumerate(text.splitlines(), start=1):
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         parts = line.split("|")
-        if len(parts) != 2:
+        if len(parts) not in (2, 3):
             malformed.append(n)
             continue
         name, key = _norm(parts[0]), parts[1].strip()
-        if name:
-            entries.append((name, key))
-        else:
+        right = parts[2].strip() if len(parts) == 3 else "full"
+        if not name or (len(parts) == 3 and right not in ("ro", "append")):
             malformed.append(n)
+            continue
+        if seen.setdefault((_fold(name), key), right) != right:
+            malformed.append(n)
+            continue
+        entries.append((name, key, right))
     return entries, malformed
 
 
@@ -379,15 +416,15 @@ class VaultRoot:
 
     # ---------- keys ----------
 
-    def keys(self) -> dict[str, str]:
+    def keys(self) -> dict[str, dict[str, str]]:
         """Read keys.txt, hot-reloading on mtime change, so a dataset can be
         protected, opened or closed from a file manager without restarting
         anything.
 
-        Format: `dataset name | key` (locked) or `dataset name |` (open), one
-        line per dataset; the value is "" for an open one. A dataset with no
+        Comes back as `{folded dataset name: {key: right}}`; the empty key is
+        "no key at all", and a right is one of RIGHTS. A dataset with no
         entry here is CLOSED — and that includes every dataset when the file
-        is missing. Blank lines and lines starting with '#' are comments.
+        is missing. The format is parse_key_registry's.
         """
         try:
             m = self.keys_file.stat().st_mtime
@@ -396,7 +433,7 @@ class VaultRoot:
             return {}
         if m == self._keys_mtime:
             return self._keys_cache
-        out: dict[str, str] = {}
+        out: dict[str, dict[str, str]] = {}
         try:
             text = self.keys_file.read_text(encoding="utf-8", errors="replace")
         except OSError as e:
@@ -404,38 +441,59 @@ class VaultRoot:
         # Malformed lines are ignored HERE and reported by the preflight, which
         # is the half that blocks: a registry the service half-understands must
         # stop the boot, not quietly protect fewer datasets than it was told to.
-        # Ignored at a hot reload, a malformed line leaves its dataset with no
-        # entry — CLOSED since 4.0.0, where until then it fell OPEN.
-        for name, key in parse_key_registry(text)[0]:
-            out[_fold(name)] = key
+        # Ignored at a hot reload, a malformed line grants nothing: a dataset
+        # whose only line it was is CLOSED, and vault_status gives its number.
+        for name, key, right in parse_key_registry(text)[0]:
+            out.setdefault(_fold(name), {})[key] = right
         self._keys_cache, self._keys_mtime = out, m
         return out
 
-    def state(self, name: str, keys: dict[str, str] | None = None) -> str:
+    def state(self, name: str, keys: dict[str, dict[str, str]] | None = None) -> str:
         """`locked`, `open` or `closed`, from the registry alone. `keys` lets a
         caller that lists every dataset read the registry once."""
-        k = (self.keys() if keys is None else keys).get(_fold(name))
-        if k is None:
-            return "closed"
-        return "locked" if k else "open"
+        return registry_state((self.keys() if keys is None else keys).get(_fold(name)))
 
-    def check_key(self, name: str, key: str) -> None:
-        """Raise if the dataset is closed, or locked and the key does not
-        match. The message reveals nothing about the correct key."""
-        expected = self.keys().get(_fold(name))
-        if expected is None:
+    def right(self, name: str, key: str) -> str | None:
+        """What this key may do on this dataset: one of RIGHTS, or None.
+
+        The better of two grants: the line of the key given, and the line of
+        the empty key — what anyone may do, key or no key. So a key is never
+        worth LESS than no key, and on an open dataset any key passes, as it
+        always has."""
+        rights = self.keys().get(_fold(name)) or {}
+        granted = [r for r in (rights.get(key), rights.get("")) if r]
+        return max(granted, key=_RANK.__getitem__) if granted else None
+
+    def check_key(self, name: str, key: str, need: str = "full") -> None:
+        """Raise unless `key` grants at least `need` on the dataset. `need` is
+        what the TOOL does — `ro`, `append` or `full` — and it defaults to
+        the most: a caller that forgets to say is refused more, never less.
+        The message reveals nothing about any key."""
+        rights = self.keys().get(_fold(name))
+        if not rights:
             raise VaultError(
                 f"dataset {name!r} is closed: it has no line in the key registry. "
                 "Only the vault's owner can open it, by adding a line on the "
                 "server; no tool can.")
-        if not expected:
-            return  # open dataset: a key, if one was passed, is not needed
-        if not key:
+        have = self.right(name, key)
+        if have is not None and _RANK[have] >= _RANK[need]:
+            return
+        if key and key not in rights:
+            raise VaultError(f"wrong key for dataset {name!r}.")
+        if have is None:
             raise VaultError(
                 f"dataset {name!r} is protected: a key is required. "
                 "You will find it in the instructions of the project it belongs to.")
-        if key != expected:
-            raise VaultError(f"wrong key for dataset {name!r}.")
+        # A right, and not enough of it. Said in the words of what was tried.
+        whose = "the key given" if key else "a call without a key"
+        may = ("may only read" if have == "ro"
+               else "may read and call `append`, nothing else that writes")
+        asked = "this call adds to a file" if need == "append" else "this call changes the dataset"
+        label = "READ-ONLY" if have == "ro" else "APPEND-ONLY"
+        raise VaultError(
+            f"{label}: on dataset {name!r} {whose} {may}, and {asked}. "
+            "Nothing was written. Do not retry: it takes another key, and only "
+            "the vault's owner has it.")
 
     # ---------- resolution ----------
 
@@ -518,17 +576,19 @@ class VaultRoot:
             ds.ensure_git()
         return ds
 
-    def open(self, dataset: str, path: str = "", key: str = "") -> tuple["Dataset", str]:
+    def open(self, dataset: str, path: str = "", key: str = "",
+             need: str = "full") -> tuple["Dataset", str]:
         """(unlocked dataset, validated relative path) — the one door every
-        path-bearing tool goes through, reads included."""
+        path-bearing tool goes through, reads included. `need` is the right
+        the tool wants of the key: see check_key."""
         name = self.resolve_dataset(dataset)
-        self.check_key(name, key)
+        self.check_key(name, key, need)
         return self._dataset(name), self.check_path(name, path)
 
-    def open_by_name(self, dataset: str, key: str = "") -> "Dataset":
+    def open_by_name(self, dataset: str, key: str = "", need: str = "full") -> "Dataset":
         """The same, for the tools that act on a whole dataset."""
         name = self.resolve_dataset(dataset)
-        self.check_key(name, key)
+        self.check_key(name, key, need)
         return self._dataset(name)
 
     # ---------- status ----------
@@ -546,6 +606,13 @@ class VaultRoot:
                      "for one command's card",
             "datasets": [{"name": n, "state": self.state(n, keys)} for n in names],
         }
+        # What anyone may do with NO key, where it is less than everything:
+        # a locked dataset that can still be read is worth knowing about
+        # before the first refusal. An open one says it with its state.
+        for d in out["datasets"]:
+            free = (keys.get(_fold(d["name"])) or {}).get("")
+            if free and free != "full":
+                d["without_key"] = free
         # The closed ones are LISTED, not hidden: a typo in a registry line
         # shows up here as a closed dataset next to an orphan line, at the
         # first call, instead of a dataset that silently vanished. The orphans
@@ -554,22 +621,30 @@ class VaultRoot:
             out["closed"] = ("a closed dataset has no line in the key registry: "
                              "every call on it is refused until the owner adds one")
         known = {_fold(n) for n in names}
-        names_in_registry = {_fold(n): n for n in self._registry_names()}
+        written, malformed = self._registry_names()
+        names_in_registry = {_fold(n): n for n in written}
         orphans = [shown for f, shown in names_in_registry.items() if f not in known]
         if orphans:
             out["orphan_registry_lines"] = sorted(orphans)
+        # NUMBERS, never lines: a line of the registry carries a key. The boot
+        # refuses a registry with one of these; a line broken AFTERWARDS, at a
+        # hot reload, grants nothing and would otherwise say nothing.
+        if malformed:
+            out["malformed_registry_lines"] = malformed
         return out
 
-    def _registry_names(self) -> list[str]:
+    def _registry_names(self) -> tuple[list[str], list[int]]:
         """The registry's dataset names as WRITTEN — the spelling a
-        person typed, which is what an orphan has to be reported by. The
-        cache keeps folded names only, so this rereads the file; it is called
-        by vault_status alone, which is not on any hot path."""
+        person typed, which is what an orphan has to be reported by — and the
+        numbers of its malformed lines. The cache keeps folded names only, so
+        this rereads the file; it is called by vault_status alone, which is
+        not on any hot path."""
         try:
             text = self.keys_file.read_text(encoding="utf-8", errors="replace")
         except OSError:
-            return []
-        return [n for n, _ in parse_key_registry(text)[0]]
+            return [], []
+        entries, malformed = parse_key_registry(text)
+        return [e[0] for e in entries], malformed
 
     # ---------- create and drop ----------
 

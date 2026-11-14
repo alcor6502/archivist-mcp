@@ -133,12 +133,47 @@ and do not start with `.` or `_`.
 | `name \|` (nothing after the bar) | **open** | needs no key |
 | no line | **closed** | is refused |
 
+A line may end with what its key is allowed, and a dataset may have several
+lines, one per key:
+
+| Line in `keys.txt` | What it grants |
+|---|---|
+| `name \| key` | everything, with that key |
+| `name \| key \| ro` | reading, with that key |
+| `name \| key \| append` | reading and the `append` tool, with that key |
+| `name \| \| ro` | reading, with no key |
+| `name \|` | everything, with no key |
+
+```
+# The night job may only add to its log; a second chat may only look.
+Example Project | k7m2xq4p
+Example Project | n4wt8hcz | append
+Example Project | r9d3kmvy | ro
+# Anyone holding the connector reads, only the key writes.
+Handbook | | ro
+Handbook | p6fj2xbe
+```
+
+- **The caller adds nothing.** It passes its key, or none, exactly as before;
+  the line decides. A write the key does not allow is refused with `READ-ONLY`
+  or `APPEND-ONLY`, and nothing is written. `dataset_status` returns `access`:
+  `full`, `append` or `ro`.
+- **The rights add up**: a key is never worth less than no key.
+- **Two words, `ro` and `append`.** Anything else in the third field — `rw`,
+  `full`, nothing — is a malformed line. So is one key given two different
+  rights on the same dataset.
+- **A comment is a whole line** starting with `#`. There is no comment at the
+  end of a line: `name | key  # note` makes `key  # note` the key.
+- A dataset is `open` only when everything is allowed with no key; `Handbook`
+  above is `locked`, and `vault_status()` shows it with `without_key: "ro"`.
+
 - **Closed is the default**: a missing line, a typo in a name or a missing file
   makes datasets unreachable, never exposed. `vault_status()` lists the closed
   ones and `orphan_registry_lines`, registry names matching no dataset.
 - **Hot-reloaded**: an edit applies at the next call. Spaces around the bar are
-  ignored; `#` starts a comment. A malformed line stops the service at startup;
-  while it runs, the line is ignored and its dataset stays closed.
+  ignored; a line starting with `#` is a comment. A malformed line stops the
+  service at startup; while it runs, the line grants nothing and
+  `vault_status()` gives its number in `malformed_registry_lines`.
 - **No tool writes `keys.txt`**: a dataset made by `dataset_create` is closed
   until you give it a line.
 - Eight alphanumeric characters make a good key (avoid `0/O`, `1/l`). Keep the
@@ -283,6 +318,8 @@ To go back, put the previous version tag in `Repository` instead of `:latest`.
   `keys.txt` first.
 - **Crossing 4.0.0**: a dataset with no line becomes **closed**. First give
   every dataset that must stay reachable without a key the line `name |`.
+- **Crossing 4.3.0**: nothing to do. A registry written before means what it
+  meant; `ro` and `append` are there when you want them.
 
 When an update changes tool names, parameters or descriptions, disconnect and
 reconnect the connector and test in a **new** conversation, or you will see the
@@ -295,7 +332,7 @@ old tools.
 | `datasets` | wrong vault mount, or an empty folder |
 | `readable` · `writable` | the mount reads short or refuses a write or delete |
 | `git` | a repository is missing: start again, boot creates it |
-| `keys` | `keys.txt` unreadable by `99:100`, or a malformed line (numbers printed, keys never) |
+| `keys` | `keys.txt` unreadable by `99:100`, or a malformed line: a wrong third field, one key with two rights (numbers printed, keys never) |
 | `oauth` | a placeholder left, `BASE_URL` not https, JWT key short |
 | `token_store` | `FASTMCP_HOME` not under `/data` |
 | `funnel` | the Funnel is off or publishes another port |

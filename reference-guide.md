@@ -48,6 +48,9 @@ The key registry on the server decides access, and nothing else: a dataset is
 the registry: every call refused). `vault_status()` says which. No tool opens,
 closes or locks a dataset, and a new one is born closed.
 
+A key may be limited: `READ-ONLY` or `APPEND-ONLY` wrote nothing, do not
+retry. `dataset_status` gives `access`.
+
 Each dataset has its own git, so `HEAD~3` is three commits back *in that
 dataset*. Writing a path never creates a dataset. Git's own control files —
 `.gitignore`, `.gitattributes`, `.gitmodules` — can be read and never written,
@@ -95,6 +98,10 @@ Not a ritual before every task: call it when you do not know a dataset's name,
 or when calls start failing — if it does not answer, stop and say so. It also
 lists `orphan_registry_lines`: names in the key registry that match no dataset,
 which is what a typo looks like (the dataset next to it shows up `closed`).
+A dataset with `without_key: "ro"` can be read with no key, and written only
+with one. `malformed_registry_lines` are the numbers of the registry lines the
+server could not read: they grant nothing, and only the vault's owner can fix
+them.
 
 ## reference_guide(name='')
 
@@ -124,6 +131,8 @@ from a chat alone.
 
 One dataset in detail: file count, Trash, git status, commits, repository size,
 last commit. Numbers only: to see the files, `list_files` with `depth=1`.
+`access` is what the key you passed may do here: `full`, `append` (read, and
+the `append` tool) or `ro` (read). Ask before a long job that ends in a write.
 
 ## list_files(dataset, path='', depth=0, pattern='', hashes=True, key='')
 
@@ -180,6 +189,8 @@ with `from_line`.
 
 Adds a block to the end of an existing file. Max 64 KB per block.
 This is the tool for a log or a register. Do not rewrite a file to add a line.
+It is also the ONE write an append-only key may make: with such a key, add to
+a file that exists, and leave everything else to who holds the full key.
 **No sha needed**: it never touches existing bytes, so no conflict is possible.
 **But pass `expected_sha256` when you can** — the sha the last read or write
 handed you. It costs nothing when the file is where you left it, and after a
@@ -637,6 +648,8 @@ modified: a document from 2024 thrown away yesterday survives
 |---|---|
 | `dataset ... is protected: a key is required` | the key is in the project's instructions |
 | `dataset ... is closed: it has no line in the key registry` | only the vault's owner can open it, on the server: tell the person |
+| `READ-ONLY: ... may only read` | your key (or no key) reads this dataset and nothing more. Nothing was written. Do not retry: tell the person |
+| `APPEND-ONLY: ... may read and call append` | your key adds to files with `append` and changes nothing else. Nothing was written: use `append`, or tell the person |
 | `no such dataset` | `vault_status` lists them; it goes in `dataset`, not in `path` |
 | `path must be relative to the dataset` | the dataset is repeated at the head of `path`: drop it |
 | `path is relative to the dataset, not absolute` | drop the leading `/` |

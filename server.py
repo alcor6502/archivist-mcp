@@ -18,7 +18,8 @@ Datasets and keys:
   to it; an empty path means "the whole dataset";
 - keys.txt decides access: `name | key` is LOCKED (every call carries the key
   in `key`), `name |` is OPEN, and a dataset with NO line is CLOSED — every
-  call refused. Closed is the default since 4.0.0.
+  call refused. Closed is the default since 4.0.0. Since 4.3.0 a third field
+  limits what a key may do: `name | key | ro`, `name | key | append`.
 
 Environment:
   VAULT_ROOT              vault root inside the container (default /vault)
@@ -88,7 +89,7 @@ from preflight import HTTP_MODES, http_mode_from_env
 from vault import (VaultRoot, VaultError, VaultFault, WithImages, guide_for,
                    server_instructions)
 
-VERSION = "4.2.1"
+VERSION = "4.3.0"
 
 # The shape of a line of ours. It is a NAME because it is used twice: here, and
 # again below where fastmcp's own handlers are given the same shape. Written out
@@ -316,6 +317,15 @@ WRITES = ("dataset_create", "append", "write_file", "render_pdf", "render_report
           "edit_file", "move_path", "write_binary", "dataset_restore")
 # Nothing takes these back.
 DESTRUCTIVE = ("dataset_drop", "trash_purge")
+# 4.3.0: the same three tuples say what a tool WANTS of the key, so the two
+# cannot drift apart. A READ_ONLY tool wants `ro`; `append` wants `append`;
+# every other one wants everything. Each tool hands its own entry to the
+# vault's door (`need=NEED["read_file"]`), and the suite reads the source to
+# check that the name in the brackets is the function's own. A tool that
+# forgets asks for everything: refused more, never less.
+NEED = {**{n: "ro" for n in READ_ONLY},
+        **{n: "full" for n in WRITES + DESTRUCTIVE},
+        "append": "append"}
 ANNOTATIONS = {
     **{n: ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
        for n in READ_ONLY},
@@ -399,7 +409,8 @@ def dataset_drop(dataset: str, expected_manifest: str) -> dict:
 def dataset_status(dataset: str, key: str = "") -> dict:
     """One dataset in numbers: files, Trash, git, size, last commit. To see
     the files themselves, list_files with depth=1."""
-    return vault.open_by_name(dataset, key).status()
+    ds = vault.open_by_name(dataset, key, need=NEED["dataset_status"])
+    return {**ds.status(), "access": vault.right(ds.name, key)}
 
 
 @tool
@@ -409,7 +420,7 @@ def list_files(dataset: str, path: str = "", depth: int = 0, pattern: str = "",
     dataset you do not know: this level, deeper folders summed up. Also
     pattern="*.pdf", and hashes=False (names and sizes only, nothing read).
     depth=0, the default, is the whole tree."""
-    ds, rel = vault.open(dataset, path, key)
+    ds, rel = vault.open(dataset, path, key, need=NEED["list_files"])
     return ds.list_files(rel, depth, pattern, hashes)
 
 
@@ -420,7 +431,7 @@ def read_file(dataset: str, path: str, from_line: int = 0, lines: int = 0,
     For a few lines of a long file do NOT read it whole: from_line (1-based,
     the number search gave) and lines (how many). The sha256 is still the
     whole file's, so it is good for edit_file."""
-    ds, rel = vault.open(dataset, path, key)
+    ds, rel = vault.open(dataset, path, key, need=NEED["read_file"])
     return ds.read_file(rel, from_line, lines)
 
 
@@ -429,7 +440,7 @@ def read_files(dataset: str, paths: list[str], key: str = "") -> dict:
     """Read SEVERAL whole text files in ONE call, content plus sha256 each:
     never one read_file per file. A missing file is an error entry, the
     others still arrive."""
-    ds = vault.open_by_name(dataset, key)
+    ds = vault.open_by_name(dataset, key, need=NEED["read_files"])
     return ds.read_files([vault.check_path(ds.name, p) for p in paths])
 
 
@@ -438,7 +449,7 @@ def append(dataset: str, path: str, text: str, expected_sha256: str = "",
            key: str = "") -> dict:
     """Add a block to the end of an existing file. No sha needed; pass
     expected_sha256 to make a retry after a lost response safe (CAS)."""
-    ds, rel = vault.open(dataset, path, key)
+    ds, rel = vault.open(dataset, path, key, need=NEED["append"])
     return ds.append(rel, text, expected_sha256)
 
 
@@ -448,7 +459,7 @@ def write_file(dataset: str, path: str, content: str,
     """Write the WHOLE file: for a new file or a full rewrite. CAS on
     expected_sha256, "new" if new. NEVER to change part of a file — that is
     edit_file, which sends only the fragments; to add at the end, append."""
-    ds, rel = vault.open(dataset, path, key)
+    ds, rel = vault.open(dataset, path, key, need=NEED["write_file"])
     return ds.write_file(rel, content, expected_sha256)
 
 
@@ -460,7 +471,7 @@ def render_pdf(dataset: str, path: str, document: dict, expected_sha256: str = "
     pictures in the same answer — LOOK at them before you say it is done,
     `pages` and `missing` do not show clipped text or a wrong colour. An
     empty path returns the PDF as base64, unwritten."""
-    ds, rel = vault.open(dataset, path, key)
+    ds, rel = vault.open(dataset, path, key, need=NEED["render_pdf"])
     return ds.render_pdf(rel, document, expected_sha256, preview)
 
 
@@ -470,7 +481,7 @@ def render_report(dataset: str, path: str, sources: dict, layout: dict | None = 
     """Markdown files of the dataset bound into one PDF, laid out by the
     server and written with CAS. `path` is required: no base64. It is not
     checked until you LOOK at it: view on the same path, a few pages."""
-    ds, rel = vault.open(dataset, path, key)
+    ds, rel = vault.open(dataset, path, key, need=NEED["render_report"])
     return ds.render_report(rel, sources, layout, expected_sha256)
 
 
@@ -482,7 +493,7 @@ def edit_file(dataset: str, path: str, expected_sha256: str, old_text: str = "",
     changes to one file are ONE call: edits=[{"old_text": ..., "new_text":
     ...}, ...], applied in order, all or nothing, one commit. CAS on
     expected_sha256: the sha of any read of the file, partial included."""
-    ds, rel = vault.open(dataset, path, key)
+    ds, rel = vault.open(dataset, path, key, need=NEED["edit_file"])
     return ds.edit_file(rel, old_text, new_text, expected_sha256, edits)
 
 
@@ -493,7 +504,7 @@ def move_path(dataset: str, src: str, dst: str, key: str = "") -> dict:
     # src and dst are relative to the SAME dataset, so a move across datasets is
     # no longer expressible: the runtime check that used to catch it is gone,
     # replaced by the shape of the call itself.
-    ds, rel_s = vault.open(dataset, src, key)
+    ds, rel_s = vault.open(dataset, src, key, need=NEED["move_path"])
     rel_d = vault.check_path(ds.name, dst)
     return ds.move_path(rel_s, rel_d)
 
@@ -506,7 +517,7 @@ def search(dataset: str, pattern: str, path: str = "", regex: bool = False,
     regex=True; ignore_case=True for either. Answers path:line: text;
     context=2 adds the lines around each match, so the hit needs no
     read_file after. 200 matches at most: past that, narrow `path`."""
-    ds, rel = vault.open(dataset, path, key)
+    ds, rel = vault.open(dataset, path, key, need=NEED["search"])
     return ds.search(pattern, rel, regex, context, ignore_case)
 
 
@@ -514,7 +525,7 @@ def search(dataset: str, pattern: str, path: str = "", regex: bool = False,
 def manifest(dataset: str, path: str = "", key: str = "") -> dict:
     """Fingerprint of a whole tree in one number: the cheapest way to know
     whether anything changed, with no listing and no content."""
-    ds, rel = vault.open(dataset, path, key)
+    ds, rel = vault.open(dataset, path, key, need=NEED["manifest"])
     return ds.manifest(rel)
 
 
@@ -525,7 +536,7 @@ def archive(dataset: str, path: str = "", pattern: str = "*.md",
     useful where you can run code to unpack it; in a chat use read_files.
     READ reference_guide('archive') FIRST — its defaults and its
     ceilings hand you less than you asked for, silently."""
-    ds, rel = vault.open(dataset, path, key)
+    ds, rel = vault.open(dataset, path, key, need=NEED["archive"])
     return ds.archive(rel, pattern, max_chars)
 
 
@@ -534,7 +545,7 @@ def read_binary(dataset: str, path: str, key: str = "") -> dict:
     """The ORIGINAL bytes of any file as base64, plus sha256: to hand a
     file to the user or to code. Not for looking: to SEE a picture or a PDF
     use view, for what a PDF says pdf_text, for a sha alone list_files."""
-    ds, rel = vault.open(dataset, path, key)
+    ds, rel = vault.open(dataset, path, key, need=NEED["read_binary"])
     return ds.read_binary(rel)
 
 
@@ -545,7 +556,7 @@ def view(dataset: str, path: str = "", pages: str = "", size: str = "medium",
     too), reduced; a PDF, page 1 or pages="2-5" or "all" (10 a call); a
     folder, a numbered sheet of what is in it. size="thumb" for smaller.
     This is how a PDF just rendered is checked."""
-    ds, rel = vault.open(dataset, path, key)
+    ds, rel = vault.open(dataset, path, key, need=NEED["view"])
     return ds.view(rel, pages, size)
 
 
@@ -554,7 +565,7 @@ def pdf_text(dataset: str, path: str, pages: str = "", key: str = "") -> dict:
     """What a PDF SAYS. Without pages: how many pages, the outline, the
     characters on each — the map. With pages="3" or "2-5" or "all": their
     text. No OCR: a page with no text is a scan, look at it with view."""
-    ds, rel = vault.open(dataset, path, key)
+    ds, rel = vault.open(dataset, path, key, need=NEED["pdf_text"])
     return ds.pdf_text(rel, pages)
 
 
@@ -563,7 +574,7 @@ def write_binary(dataset: str, path: str, content_base64: str,
                  expected_sha256: str, key: str = "") -> dict:
     """Write a binary file from base64. Same CAS as write_file. For small
     files only: you type the base64. A PDF is drawn by render_pdf instead."""
-    ds, rel = vault.open(dataset, path, key)
+    ds, rel = vault.open(dataset, path, key, need=NEED["write_binary"])
     return ds.write_binary(rel, content_base64, expected_sha256)
 
 
@@ -571,7 +582,7 @@ def write_binary(dataset: str, path: str, content_base64: str,
 def read_at(dataset: str, path: str, rev: str, key: str = "") -> dict:
     """Read a text file as it was at a past revision (a hash from history,
     or HEAD~3). To see only what changed, diff."""
-    ds, rel = vault.open(dataset, path, key)
+    ds, rel = vault.open(dataset, path, key, need=NEED["read_at"])
     return ds.read_at(rel, rev)
 
 
@@ -579,7 +590,7 @@ def read_at(dataset: str, path: str, rev: str, key: str = "") -> dict:
 def history(dataset: str, path: str = "", n: int = 10, key: str = "") -> dict:
     """The last n commits (10 by default) of the dataset — or of one file:
     give `path` when the question is about one file."""
-    ds, rel = vault.open(dataset, path, key)
+    ds, rel = vault.open(dataset, path, key, need=NEED["history"])
     return ds.history(rel, n)
 
 
@@ -589,21 +600,21 @@ def diff(dataset: str, rev_a: str, path: str = "", rev_b: str = "HEAD",
     """Differences between two revisions: a summary per file, or with
     `path` that file's full diff. Pass path and rev_b BY NAME: `path` sits
     between the two revisions."""
-    ds, rel = vault.open(dataset, path, key)
+    ds, rel = vault.open(dataset, path, key, need=NEED["diff"])
     return ds.diff(rev_a, rev_b, rel)
 
 
 @tool
 def dataset_restore(dataset: str, rev: str, expected_manifest: str, key: str = "") -> dict:
     """Rewrite EVERY file back to `rev`. Commits forward, so undoable."""
-    ds = vault.open_by_name(dataset, key)
+    ds = vault.open_by_name(dataset, key, need=NEED["dataset_restore"])
     return ds.restore(rev, expected_manifest)
 
 
 @tool
 def trash_purge(dataset: str, before: str, key: str = "") -> dict:
     """Empty Trash/ of what was trashed before an ISO date."""
-    ds = vault.open_by_name(dataset, key)
+    ds = vault.open_by_name(dataset, key, need=NEED["trash_purge"])
     return ds.trash_purge(before)
 
 

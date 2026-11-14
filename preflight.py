@@ -147,7 +147,7 @@ def c_keys():
     # file needs only the engine's root, so an unimportable vault.py has to
     # come out as one named FAILED check — not as a traceback that takes the
     # whole preflight with it.
-    from vault import parse_key_registry, _fold
+    from vault import parse_key_registry, registry_state, _fold
 
     if not os.path.exists(KEYS):
         return f"no registry at {KEYS}: every dataset is closed"
@@ -157,23 +157,32 @@ def c_keys():
     entries, malformed = parse_key_registry(text)
     if malformed:
         raise RuntimeError(
-            f"{len(malformed)} registry lines are not `name | key` or `name |`, at "
+            f"{len(malformed)} registry lines are not `name | key`, `name |`, "
+            f"`name | key | ro` or `name | key | append`, at "
             f"line(s) {', '.join(str(n) for n in malformed[:5])} — one '|' after "
-            f"the dataset name, then the key or nothing (until 3.0.0 the separator "
+            f"the dataset name, then the key or nothing, then at most one more "
+            f"'|' and `ro` or `append`; and one key cannot have two different "
+            f"rights on the same dataset (until 3.0.0 the separator "
             f"was a TAB: rewrite the file). The lines are not printed: they "
             f"contain keys")
     datasets = _datasets()
     known = {_fold(d) for d in datasets}
-    registry = {_fold(name): k for name, k in entries}
-    orphans = [name for name, _ in entries if _fold(name) not in known]
-    locked = sum(1 for d in datasets if registry.get(_fold(d)))
-    opened = sum(1 for d in datasets if registry.get(_fold(d)) == "")
+    registry: dict = {}
+    for name, key, right in entries:
+        registry.setdefault(_fold(name), {})[key] = right
+    orphans = sorted({name for name, _, _ in entries if _fold(name) not in known})
+    states = [registry_state(registry.get(_fold(d))) for d in datasets]
+    locked, opened = states.count("locked"), states.count("open")
     closed = [d for d in datasets if _fold(d) not in registry]
+    limited = sum(1 for name, _, right in entries
+                  if right != "full" and _fold(name) in known)
     note = ""
     if closed:
         note += f"; closed (no line): {', '.join(closed[:5])}"
     if orphans:
         note += f"; {len(orphans)} orphan lines ({', '.join(orphans[:3])}): no such dataset"
+    if limited:
+        note += f"; {limited} lines grant less than everything (ro, append)"
     return f"{locked} locked, {opened} open, {len(closed)} closed{note}"
 
 

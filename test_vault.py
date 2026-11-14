@@ -2006,6 +2006,248 @@ def annotation_check() -> None:
        "and WithImages IS the dict every tool returns, with the pictures beside it")
 
 
+def rights_check() -> None:
+    """4.3.0: a line of the registry may say what its key is allowed. The
+    caller passes the key and nothing else, so everything is decided at one
+    place — VaultRoot.check_key — and by one table in server.py, NEED, that
+    says what each tool wants. Both halves are checked: the matrix of who may
+    do what, on a real vault; and, by reading the source, that every tool
+    hands the door its OWN entry of the table."""
+    print("\n[0c] rights — a key reads, appends or does everything, and the caller says nothing")
+    import vault as _v
+    FULL, READER, ADDER = "FullKey11", "Reader22", "Adder33"
+    tmp = tempfile.mkdtemp(prefix="archivist-rights-")
+    try:
+        for name in ("Mixed", "Public", "Old Locked", "Old Open", "Only Reader", "Broken"):
+            (Path(tmp) / name).mkdir()
+            (Path(tmp) / name / "a.md").write_text("one\n")
+        kf = Path(tmp) / "keys.txt"
+        kf.write_text(
+            "# a comment\n"
+            f"Mixed | {FULL}\nMixed | {READER} | ro\nMixed | {ADDER} | append\n"
+            f"Public | | ro\nPublic | {FULL}\n"
+            f"Old Locked | {FULL}\nOld Open |\n"
+            f"Only Reader | {READER} | ro\n"
+            f"Broken | {FULL} | rw\n")
+        v = VaultRoot(tmp)
+        v.boot(0)
+
+        # WHO MAY DO WHAT. One row per (dataset, key), three columns: the
+        # right asked. Written out in full on purpose: a matrix derived from
+        # the rule it checks would agree with any rule.
+        Y, N = True, False
+        matrix = (
+            #  dataset        key      ro  append full
+            ("Mixed",        FULL,    Y,  Y,  Y),
+            ("Mixed",        READER,  Y,  N,  N),
+            ("Mixed",        ADDER,   Y,  Y,  N),
+            ("Mixed",        "",      N,  N,  N),
+            ("Mixed",        "nope",  N,  N,  N),
+            ("Public",       "",      Y,  N,  N),
+            ("Public",       "nope",  Y,  N,  N),
+            ("Public",       FULL,    Y,  Y,  Y),
+            ("Old Locked",   FULL,    Y,  Y,  Y),
+            ("Old Locked",   "",      N,  N,  N),
+            ("Old Locked",   "nope",  N,  N,  N),
+            ("Old Open",     "",      Y,  Y,  Y),
+            ("Old Open",     "any",   Y,  Y,  Y),
+            ("Only Reader",  READER,  Y,  N,  N),
+            ("Only Reader",  "",      N,  N,  N),
+            ("Broken",       FULL,    N,  N,  N),
+            ("Broken",       "",      N,  N,  N),
+        )
+        cells = 0
+        for ds_name, key, *allowed in matrix:
+            for need, may in zip(("ro", "append", "full"), allowed):
+                cells += 1
+                said = refusal(lambda: v.check_key(ds_name, key, need))
+                shown = "no key" if key == "" else ("a wrong key" if key in ("nope", "any")
+                                                    else {FULL: "the full key", READER: "the ro key",
+                                                          ADDER: "the append key"}[key])
+                ok((said is None) == may,
+                   f"{ds_name!r}, {shown}, asking {need}: "
+                   f"{'passes' if may else 'refused'}", said)
+        ok(cells == len(matrix) * 3 == 51, "the matrix was walked whole", cells)
+
+        # The doors carry the right, and with no `need` they ask for everything.
+        ok(v.open("Mixed", "a.md", READER, need="ro")[1] == "a.md",
+           "vault.open lets the ro key in for a read")
+        must_fail("vault.open with the ro key and NO need is refused: the default is the most",
+                  lambda: v.open("Mixed", "a.md", READER))
+        must_fail("and so is open_by_name", lambda: v.open_by_name("Mixed", READER))
+        ok(v.open_by_name("Mixed", ADDER, need="append").name == "Mixed",
+           "open_by_name lets the append key in for an append")
+
+        # The words. A chat that is refused has to know it is not a typo in
+        # the key, that nothing was written, and that retrying is pointless.
+        ro_said = refusal(lambda: v.check_key("Mixed", READER, "full")) or ""
+        ok(ro_said.startswith("READ-ONLY:") and "may only read" in ro_said
+           and "Nothing was written" in ro_said and "Do not retry" in ro_said,
+           "a write with the ro key is refused as READ-ONLY, and says nothing was written", ro_said)
+        ok(ro_said.startswith("READ-ONLY") and "the key given" in ro_said, "naming the key as the cause", ro_said)
+        ap_said = refusal(lambda: v.check_key("Mixed", ADDER, "full")) or ""
+        ok(ap_said.startswith("APPEND-ONLY:") and "`append`" in ap_said,
+           "an edit with the append key is refused as APPEND-ONLY, and names the one tool it has", ap_said)
+        free_said = refusal(lambda: v.check_key("Public", "", "full")) or ""
+        ok(free_said.startswith("READ-ONLY:") and "a call without a key" in free_said,
+           "a write with no key on a dataset anyone may read says it is the missing key", free_said)
+        ok("wrong key" in (refusal(lambda: v.check_key("Mixed", "nope", "ro")) or ""),
+           "a key that is on no line is still `wrong key`")
+        ok("a key is required" in (refusal(lambda: v.check_key("Mixed", "", "ro")) or ""),
+           "no key where one is needed even to read is still `a key is required`")
+        every = [refusal(lambda d=d, k=k, n=n: v.check_key(d, k, n)) or ""
+                 for d, k, *_ in matrix for n in ("ro", "append", "full")]
+        leaked = sum(msg.count(secret) for msg in every for secret in (FULL, READER, ADDER))
+        ok(leaked == 0, "no refusal of the whole matrix carries a key", f"{leaked} key(s) inside")
+
+        # What the right is called, for dataset_status.
+        ok([v.right("Mixed", k) for k in (FULL, READER, ADDER, "", "nope")]
+           == ["full", "ro", "append", None, None], "right() names what each key has",
+           [v.right("Mixed", k) for k in (FULL, READER, ADDER, "", "nope")])
+        ok(v.right("Public", "nope") == "ro" and v.right("Public", FULL) == "full",
+           "a key is never worth less than no key, and the best grant wins")
+
+        # vault_status: three states as always, and the two new facts.
+        st = v.status("t")
+        states = {d["name"]: d for d in st["datasets"]}
+        ok({n: d["state"] for n, d in states.items()}
+           == {"Mixed": "locked", "Public": "locked", "Old Locked": "locked",
+               "Old Open": "open", "Only Reader": "locked", "Broken": "closed"},
+           "the states stay three: open is everything with no key, and nothing else is",
+           {n: d["state"] for n, d in states.items()})
+        ok(states["Public"].get("without_key") == "ro"
+           and [n for n, d in states.items() if "without_key" in d] == ["Public"],
+           "a dataset anyone may read says so, and only that one",
+           {n: d.get("without_key") for n, d in states.items()})
+        ok(st.get("malformed_registry_lines") == [10],
+           "vault_status gives the NUMBER of the line that grants nothing",
+           st.get("malformed_registry_lines"))
+        ok(not any(k in json.dumps(st) for k in (FULL, READER, ADDER)),
+           "and still carries no key")
+
+        # The registry is read again when it changes: a right is taken away
+        # from the next call on, without a restart.
+        ok(refusal(lambda: v.check_key("Mixed", ADDER, "append")) is None, "before: the append key appends")
+        kf.write_text(f"Mixed | {FULL}\nMixed | {ADDER} | ro\n"); time.sleep(0.02)
+        must_fail("after the line became `ro`, the same key no longer appends",
+                  lambda: v.check_key("Mixed", ADDER, "append"))
+        ok(refusal(lambda: v.check_key("Mixed", ADDER, "ro")) is None, "and still reads")
+        ok("malformed_registry_lines" not in v.status("t"),
+           "a clean registry says nothing about malformed lines")
+
+        # dataset_drop asks for an OPEN dataset: one that is only readable
+        # without a key is not open.
+        kf.write_text("Public | | ro\n"); time.sleep(0.02)
+        said = refusal(lambda: v.drop("Public", "0" * 64)) or ""
+        ok("cannot be dropped" in said, "a dataset anyone may READ is not droppable", said)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # THE GUIDE, in the same delivery. The words are read off the refusals
+    # and the results themselves, so a label renamed in the code and not in
+    # the guide goes red here, in either direction.
+    guide = (HERE / "reference-guide.md").read_text(encoding="utf-8")
+    errors = guide[guide.index("## ERRORS"):]
+    for label, said in (("READ-ONLY", ro_said), ("APPEND-ONLY", ap_said)):
+        ok(said.startswith(label + ":") and f"| `{label}: " in errors,
+           f"the refusal that begins {label} has its row in the guide's ERRORS", said[:40])
+    ro_row = next((l for l in errors.splitlines() if l.startswith("| `READ-ONLY: ")), "")
+    ok("Do not retry" in ro_row, "and the row tells a chat not to retry", ro_row[:60])
+    for tool_name, field in (("dataset_status", "`access`"), ("vault_status", "`without_key"),
+                             ("vault_status", "`malformed_registry_lines`"),
+                             ("append", "append-only key")):
+        ok(field in guide_for(guide, tool_name)["guide"],
+           f"the card of {tool_name} explains {field.strip('`')}")
+    ok("`READ-ONLY`" in guide_for(guide, "")["guide"] and "`APPEND-ONLY`" in guide_for(guide, "")["guide"],
+       "and the model page says a key may be limited")
+
+    # The preflight, on the two shapes that are new: it stops the boot on a
+    # third field it does not know, by number and with no key, and it counts
+    # the limited lines on a registry that is good.
+    import importlib
+    pf_tmp = tempfile.mkdtemp(prefix="archivist-rights-pf-")
+    old_env = {k: os.environ.get(k) for k in ("VAULT_ROOT", "KEYS_FILE")}
+    try:
+        for name in ("Alpha", "Beta"):
+            (Path(pf_tmp) / name).mkdir()
+        reg = Path(pf_tmp) / "keys.txt"
+        os.environ["VAULT_ROOT"], os.environ["KEYS_FILE"] = pf_tmp, str(reg)
+        import preflight as _pf
+        reg.write_text(f"Alpha | {FULL}\nAlpha | {READER} | rw\n")
+        importlib.reload(_pf)
+        _pf.c_keys()
+        _name, _passed, verdict = _pf.RESULTS[-1]
+        ok(_name == "keys" and not _passed and "line(s) 2" in verdict,
+           "a third field that is not a right STOPS the boot, and the line is numbered",
+           verdict.replace(FULL, "<k>").replace(READER, "<k>")[:90])
+        ok("| ro`" in verdict and "append`" in verdict and FULL not in verdict and READER not in verdict,
+           "the complaint names the two words and no key")
+        reg.write_text(f"Alpha | {FULL}\nAlpha | {READER} | ro\nAlpha | {ADDER} | append\n"
+                       f"Beta | | ro\n")
+        importlib.reload(_pf)
+        _pf.c_keys()
+        _name, _passed, verdict = _pf.RESULTS[-1]
+        ok(_passed and "2 locked, 0 open, 0 closed" in verdict,
+           "a registry with rights passes, and a dataset only readable without a key counts as locked",
+           verdict)
+        ok("3 lines grant less than everything" in verdict,
+           "and the preflight counts the lines that grant less than everything", verdict)
+    finally:
+        for k, val in old_env.items():
+            os.environ.pop(k, None)
+            if val is not None:
+                os.environ[k] = val
+        shutil.rmtree(pf_tmp, ignore_errors=True)
+
+    # THE TABLE, read from the source. Nothing at runtime would notice a read
+    # tool that asked for everything (it would only refuse a ro key) nor — the
+    # one that matters — a writer that asked for `ro`.
+    tree = ast.parse((HERE / "server.py").read_text(encoding="utf-8"))
+    ns: dict = {}
+    for n in tree.body:
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) \
+                and n.targets[0].id in ("READ_ONLY", "WRITES", "DESTRUCTIVE", "NEED"):
+            exec(compile(ast.Module([n], []), "server.py", "exec"), ns)
+    need = ns.get("NEED", {})
+    ok(set(need) == set(ns["READ_ONLY"]) | set(ns["WRITES"]) | set(ns["DESTRUCTIVE"]),
+       "NEED has a line for every tool, and for nothing else",
+       sorted(set(need) ^ (set(ns["READ_ONLY"]) | set(ns["WRITES"]) | set(ns["DESTRUCTIVE"]))))
+    ok(all(need.get(n) == "ro" for n in ns["READ_ONLY"]),
+       "every READ_ONLY tool wants `ro`", {n: need.get(n) for n in ns["READ_ONLY"] if need.get(n) != "ro"})
+    writers = [n for n in ns["WRITES"] + ns["DESTRUCTIVE"] if n != "append"]
+    ok(need.get("append") == "append" and all(need.get(n) == "full" for n in writers),
+       "`append` wants `append`, and every other writer wants everything",
+       {n: need.get(n) for n in writers + ["append"]})
+    ok(set(need.values()) <= set(_v.RIGHTS) and len(_v.RIGHTS) == 3,
+       "and the table speaks the vault's three words", sorted(set(need.values())))
+
+    def is_tool(fn) -> bool:
+        return any(isinstance(d, ast.Name) and d.id == "tool" for d in fn.decorator_list)
+
+    doors = 0
+    for fn in (n for n in tree.body if isinstance(n, ast.FunctionDef) and is_tool(n)):
+        opens = [c for c in ast.walk(fn) if isinstance(c, ast.Call)
+                 and isinstance(c.func, ast.Attribute) and isinstance(c.func.value, ast.Name)
+                 and c.func.value.id == "vault" and c.func.attr in ("open", "open_by_name")]
+        takes_key = "key" in [a.arg for a in fn.args.args]
+        if not takes_key:
+            ok(not opens, f"{fn.name}() takes no key and opens no dataset", len(opens))
+            continue
+        ok(len(opens) >= 1, f"{fn.name}() takes a key and goes through a door", len(opens))
+        for c in opens:
+            doors += 1
+            kw = {k.arg: k.value for k in c.keywords}
+            asked = kw.get("need")
+            own = (isinstance(asked, ast.Subscript) and isinstance(asked.value, ast.Name)
+                   and asked.value.id == "NEED" and isinstance(asked.slice, ast.Constant)
+                   and asked.slice.value == fn.name)
+            ok(own, f"{fn.name}() hands the door NEED[{fn.name!r}], its own entry",
+               ast.unparse(asked) if asked is not None else "no need= at all")
+    ok(doors == sum(1 for n in need if n not in ("vault_status", "reference_guide",
+                                                 "dataset_create", "dataset_drop")),
+       "one door per tool that takes a key: every one was looked at", doors)
+
+
 def see_check() -> None:
     """4.2.0: a file can be LOOKED at — a picture reduced, the pages of a PDF,
     a folder as a sheet — and a PDF read. And a PDF the server has just drawn
@@ -3998,12 +4240,12 @@ def main() -> int:
         # tolerance that creeps back would pass a registry nobody wrote.
         for label, text, expect_entries, expect_bad in (
                 ("a bar, the one form", f"Example Project | {SECRET}\n",
-                 [("Example Project", SECRET)], []),
+                 [("Example Project", SECRET, "full")], []),
                 ("spaces around the bar are stripped, absent or many",
                  f"Example Project|{SECRET}\n   MCP Projects   |   {SECRET}   \n",
-                 [("Example Project", SECRET), ("MCP Projects", SECRET)], []),
+                 [("Example Project", SECRET, "full"), ("MCP Projects", SECRET, "full")], []),
                 ("a name with two consecutive spaces needs no special form",
-                 f"Two  Spaces | {SECRET}\n", [("Two  Spaces", SECRET)], []),
+                 f"Two  Spaces | {SECRET}\n", [("Two  Spaces", SECRET, "full")], []),
                 ("a TAB — the form until 3.0.0 — is malformed now, by NUMBER",
                  f"Example Project\t{SECRET}\n", [], [1]),
                 ("two spaces, once tolerated, are malformed now",
@@ -4011,18 +4253,51 @@ def main() -> int:
                 ("ONE space — what an editor writes for a tab next to a tab stop, "
                  "the shape that stopped the service — is malformed, and says so",
                  f"Example Project {SECRET}\n", [], [1]),
-                ("two bars are malformed: a key cannot contain the separator",
+                ("a third field that is not a right is malformed: a right the "
+                 "service guessed is a right nobody granted",
                  f"Example Project | {SECRET} | extra\n", [], [1]),
+                ("`rw` is not a right, and neither is `full`: no third field says it",
+                 f"Example Project | {SECRET} | rw\nExample Project | {SECRET} | full\n",
+                 [], [1, 2]),
+                ("an EMPTY third field is malformed, not `full`",
+                 f"Example Project | {SECRET} |\n", [], [1]),
+                ("a right in capitals is malformed: two words, written one way",
+                 f"Example Project | {SECRET} | RO\n", [], [1]),
+                ("three bars are malformed",
+                 f"Example Project | {SECRET} | ro | ro\n", [], [1]),
+                ("4.3.0: `name | key | ro` is a key that reads",
+                 f"Example Project | {SECRET} | ro\n",
+                 [("Example Project", SECRET, "ro")], []),
+                ("`name | key | append`, spaces stripped like everywhere",
+                 f"Example Project|{SECRET}|  append  \n",
+                 [("Example Project", SECRET, "append")], []),
+                ("`name | | ro`: the empty key is a key, and it may be limited",
+                 "Example Project | | ro\n", [("Example Project", "", "ro")], []),
+                ("several lines for one dataset, one per key",
+                 f"Example Project | {SECRET}\nExample Project | Reader77 | ro\n"
+                 "Example Project | | ro\n",
+                 [("Example Project", SECRET, "full"), ("Example Project", "Reader77", "ro"),
+                  ("Example Project", "", "ro")], []),
+                ("one key with two DIFFERENT rights on a dataset: the second "
+                 "line is malformed, whatever the case of the name",
+                 f"Example Project | {SECRET} | ro\nexample project | {SECRET}\n",
+                 [("Example Project", SECRET, "ro")], [2]),
+                ("the same line twice is only a repetition",
+                 f"Example Project | {SECRET} | ro\nExample Project | {SECRET} | ro\n",
+                 [("Example Project", SECRET, "ro"), ("Example Project", SECRET, "ro")], []),
+                ("the same key on two datasets is two keys",
+                 f"Example Project | {SECRET} | ro\nOther Project | {SECRET}\n",
+                 [("Example Project", SECRET, "ro"), ("Other Project", SECRET, "full")], []),
                 ("comments and blank lines count as nothing",
                  f"# a note\n\n   \nExample Project | {SECRET}\n",
-                 [("Example Project", SECRET)], []),
+                 [("Example Project", SECRET, "full")], []),
                 ("a line with no separator is malformed, by NUMBER",
                  f"Example Project | {SECRET}\nnoseparator\n",
-                 [("Example Project", SECRET)], [2]),
+                 [("Example Project", SECRET, "full")], [2]),
                 ("a name and the bar with nothing after it is an OPEN line since 4.0.0",
-                 f"Example Project |\n", [("Example Project", "")], []),
+                 f"Example Project |\n", [("Example Project", "", "full")], []),
                 ("spaces after the bar are still nothing: open",
-                 f"Example Project |   \n", [("Example Project", "")], []),
+                 f"Example Project |   \n", [("Example Project", "", "full")], []),
                 ("a key with no name is malformed too",
                  f"| {SECRET}\n", [], [1]),
                 ("two malformed lines, both numbered",
@@ -4299,6 +4574,7 @@ def main() -> int:
         smoke_check()
         ask_for_less_check()
         annotation_check()
+        rights_check()
         see_check()
 
         print("\n[14c] the manual says what the code actually offers")
