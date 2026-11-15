@@ -647,8 +647,15 @@ class Table(_Block):
     """Columns declared once; rows grouped in sections that never split. The
     first column is name + description: the name bold, the rest muted and
     truncated with an ellipsis rather than overflowing into the numbers.
-    Other cells: {text, tone, bold, sub} or {tag, style|bg,fg}."""
+    Other cells: {text, tone, bold, sub} or {tag, style|bg,fg}.
+
+    4.4.0: `name_separator` on the table is what stands between a name and its
+    description, and between a section title and its subtitle ("— " by
+    default, "" for none); `label_align` on a column places its label apart
+    from its cells; and a cell with a `sub` is placed as ONE piece, so it no
+    longer overlaps itself in a centred or left-aligned column."""
     HDR, ROW, GAP, TITLE_H = 17, 16, 8, 22
+    ALIGNS = ("left", "center", "right")
     keeps_together = False        # sections keep together; the table flows
 
     def __init__(self, spec, what):
@@ -657,6 +664,13 @@ class Table(_Block):
         self.sections = _req(spec, "sections", what)
         if not self.columns or not self.sections:
             raise RenderError(f"{what}: table needs columns and sections")
+        self.sep = spec.get("name_separator", "— ")
+        if not isinstance(self.sep, str):
+            raise RenderError(f"{what}: name_separator must be a string — \"\" draws none, the default is \"— \"")
+        for c in self.columns[1:]:
+            if "label_align" in c and c["label_align"] not in self.ALIGNS:
+                raise RenderError(f"{what}: column {_str(c.get('label'))!r} has label_align {c['label_align']!r} "
+                                  f"— one of {', '.join(self.ALIGNS)}")
 
     def _xs(self, x, width):
         """Column boundaries: the first column takes what the others leave."""
@@ -710,10 +724,12 @@ class Table(_Block):
         p.text(x, y, title, "BI", 10.5, "navy")
         if s.get("subtitle"):
             sx = x + p.width(title, "BI", 10.5) + 7
-            p.text(sx, y, p.clip("— " + _str(s["subtitle"]), "R", 8, x + room - sx), "R", 8, "muted")
+            p.text(sx, y, p.clip(self.sep + _str(s["subtitle"]), "R", 8, x + room - sx), "R", 8, "muted")
         for col, e0 in zip(self.columns[1:], edges):
             w = (edges[edges.index(e0) + 1] if edges.index(e0) + 1 < len(edges) else x + width) - e0
-            align = col.get("align", "right")
+            # The label follows its cells unless the column says otherwise:
+            # numbers on the right under a centred label is the usual wish.
+            align = col.get("label_align", col.get("align", "right"))
             label = _str(col.get("label")).upper()
             if p.width(label, "B", 6.8) + (4 if align == "center" else 15) > w:
                 raise RenderError(f"{self.what}: the column label {label!r} is wider than its column: widen it or shorten the label")
@@ -732,7 +748,7 @@ class Table(_Block):
             desc = _str(first.get("sub"))
             if desc:
                 room = (edges[0] if edges else x + width) - 6 - xd
-                t = "— " + desc
+                t = self.sep + desc
                 while p.width(t, "R", 8) > room and len(t) > 4:
                     t = t[:-2] + "…"
                 p.text(xd, y, t, "R", 8, "desc")
@@ -761,8 +777,20 @@ class Table(_Block):
                                       "widen it or shorten the text")
                 if cell.get("sub"):
                     sub = _str(cell["sub"])
-                    p.text(xx, y, sub, "R", 6.8, "muted", align)
-                    p.text(xx - p.width(sub, "R", 6.8) - 4, y, main, "B" if cell.get("bold", True) else "R", 8.6, tone, align)
+                    face = "B" if cell.get("bold", True) else "R"
+                    if align == "right":
+                        p.text(xx, y, sub, "R", 6.8, "muted", align)
+                        p.text(xx - p.width(sub, "R", 6.8) - 4, y, main, face, 8.6, tone, align)
+                    else:
+                        # The pair is ONE piece, text then sub with 4 between:
+                        # it starts at the left inset, or is centred as a
+                        # whole. Until 4.4.0 the text was shifted left by the
+                        # sub's width whatever the alignment — right only for
+                        # "right": centred, the two were drawn on each other.
+                        mw = p.width(main, face, 8.6)
+                        x0 = xx if align == "left" else xx - (mw + 4 + p.width(sub, "R", 6.8)) / 2
+                        p.text(x0, y, main, face, 8.6, tone, "left")
+                        p.text(x0 + mw + 4, y, sub, "R", 6.8, "muted", "left")
                 else:
                     p.text(xx, y, main, "B" if cell.get("bold") else "R", 8.6 if cell.get("bold") else 8.4, tone, align)
             p.line(x, y - 5, x + width, y - 5, LINE, 0.5)

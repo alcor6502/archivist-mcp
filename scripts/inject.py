@@ -14,7 +14,7 @@ clean in git, and it restores it from the copy it took — in a `finally`, and
 checked again before it exits. If it ever reports that the restore failed,
 `git checkout -- render.py` is the cure.
 
-The list is the injections of 3.2.0, 3.3.0 and 3.4.0, kept as worked examples of the
+The list is the injections of 3.2.0, 3.3.0, 3.4.0 and 4.4.0, kept as worked examples of the
 shape rather than as a suite of their own: each is (what the defect is, the
 exact text to replace, what to replace it with). Editing the list is the
 normal way to use this — write the injection for the guard you just added, run
@@ -112,6 +112,14 @@ INJECTIONS = [
     ("the title line is measured without the value's own width",
      ('room = W - 2 * M - ((p.width(value, "B", 21) + TITLE_AIR) if value else 0)',
       'room = W - 2 * M')),
+    # 4.4.0 — the table: a cell with a sub is one piece, label_align, name_separator
+    ("a centred cell with a sub is placed like a right-aligned one again (text drawn on its sub)",
+     ('                    if align == "right":\n                        p.text(xx, y, sub',
+      '                    if True:\n                        p.text(xx, y, sub')),
+    ("a column label ignores label_align",
+     ('align = col.get("label_align", col.get("align", "right"))', 'align = col.get("align", "right")')),
+    ("a row description ignores name_separator",
+     ("t = self.sep + desc", 't = "— " + desc')),
     ("ASCENT drifts from the font files",
      ("ASCENT = 0.72802734375", "ASCENT = 0.70")),
 ]

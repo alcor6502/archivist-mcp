@@ -3617,6 +3617,83 @@ def main() -> int:
            "a section subtitle ends before the first column label, not on top of it",
            (round(_sub_end, 1), round(_col0, 1)))
 
+        # [i1c] 4.4.0 — asked from use on 2026-11-15: a cell with a `sub` in a
+        # centred column drew the text ON the sub (the text was shifted left by
+        # the sub's width, which is right only for "right"); the label of a
+        # column could not be placed apart from its cells; and the dash between
+        # a name and its description could not be left out.
+        _T44 = {"type": "table", "columns": [
+                    {"label": ""}, {"label": "Dx", "width": 0.2, "label_align": "center"},
+                    {"label": "Ce", "width": 0.25, "align": "center"},
+                    {"label": "Sx", "width": 0.2, "align": "left", "label_align": "right"}],
+                "sections": [{"title": "Sezione", "subtitle": "sottotitolo", "rows": [{"cells": [
+                    {"text": "NOME", "sub": "descrizione"}, {"text": "+$41,457", "sub": "+9.6%"},
+                    {"text": "+$41,458", "sub": "+9.7%"}, {"text": "+$41,459", "sub": "+9.8%"}]}]}]}
+        _e = _rm.Table(_T44, "t")._xs(28, 595.2756 - 56) + [595.2756 - 28]
+        _f = _rm._fonts()
+        _o = _ops([_T44])
+
+        def _one(text):
+            hits = [o for o in _o if o[0] == "text" and o[3] == text]
+            return hits[0] if len(hits) == 1 else None
+
+        def _span(o):
+            """Where the ink of a text op starts and ends, whatever its alignment."""
+            w = _sw(o[3], _f[o[4]], o[5])
+            x0 = o[1] - {"right": w, "center": w / 2}.get(o[7], 0.0)
+            return x0, x0 + w
+
+        _m, _s = _one("+$41,458"), _one("+9.7%")
+        ok(_m and _s and _span(_m)[1] + 4 <= _span(_s)[0] + 0.01,
+           "centred column: the text ends 4pt before its sub starts (until 4.4.0 they were drawn on each other)",
+           (_m and _span(_m), _s and _span(_s)))
+        ok(_m and _s and abs((_span(_m)[0] + _span(_s)[1]) / 2 - (_e[1] + _e[2]) / 2) < 0.01,
+           "centred column: text and sub are centred as ONE piece on the column",
+           (_m and _s and (_span(_m)[0] + _span(_s)[1]) / 2, (_e[1] + _e[2]) / 2))
+        _m, _s = _one("+$41,459"), _one("+9.8%")
+        ok(_m and _s and abs(_span(_m)[0] - (_e[2] + 6)) < 0.01 and _span(_m)[1] + 4 <= _span(_s)[0] + 0.01,
+           "left column: the text starts at the inset and the sub follows it (it used to start left of the column)",
+           (_m and _span(_m), _s and _span(_s), _e[2] + 6))
+        _m, _s = _one("+$41,457"), _one("+9.6%")
+        ok(_m and _s and abs(_span(_s)[1] - (_e[1] - 9)) < 0.01 and abs(_span(_m)[1] + 4 - _span(_s)[0]) < 0.01,
+           "right column: the sub ends at the inset and the text 4pt before it, as it always did",
+           (_m and _span(_m), _s and _span(_s), _e[1] - 9))
+        _l = _one("DX")
+        ok(_l and _l[7] == "center" and abs(_l[1] - (_e[0] + _e[1]) / 2) < 0.01,
+           "label_align centres a label over right-aligned cells", _l)
+        _l = _one("SX")
+        ok(_l and _l[7] == "right" and abs(_l[1] - (_e[3] - 9)) < 0.01,
+           "label_align right over left-aligned cells", _l)
+        _l = _one("CE")
+        ok(_l and _l[7] == "center", "without label_align the label follows the column's align", _l)
+        ok(_one("— descrizione") and _one("— sottotitolo"),
+           "by default the dash stands before a description and before a section subtitle",
+           [o[3] for o in _o if o[0] == "text"][:6])
+        _o = _ops([dict(_T44, name_separator="")])
+        ok(_one("descrizione") and _one("sottotitolo") and not [o for o in _o if o[0] == "text" and "—" in o[3]],
+           "name_separator \"\" draws no dash, neither before a description nor before a subtitle",
+           [o[3] for o in _o if o[0] == "text"][:6])
+        _o = _ops([dict(_T44, name_separator="· ")])
+        ok(_one("· descrizione") and _one("· sottotitolo"), "name_separator is drawn as given, in both places",
+           [o[3] for o in _o if o[0] == "text"][:6])
+
+        def _refusal(doc_blocks):
+            try:
+                ds.render_pdf("", {"title": {"text": "g"}, "blocks": doc_blocks}, "new")
+            except Exception as e:
+                return str(e)
+            return ""
+
+        _r = _refusal([dict(_T44, columns=[{"label": ""}, {"label": "Dx", "width": 0.2, "label_align": "middle"},
+                                           {"label": "Ce", "width": 0.25}, {"label": "Sx", "width": 0.2}])])
+        ok("label_align 'middle'" in _r and "'Dx'" in _r and "left, center, right" in _r,
+           "a label_align that is none of the three is refused, naming the column and the three", _r)
+        _r = _refusal([dict(_T44, name_separator=None)])
+        ok("name_separator must be a string" in _r, "a name_separator that is not a string is refused", _r)
+        _c44 = (HERE / "reference-guide.md").read_text(encoding="utf-8").split("### Table geometry", 1)[1].split("### What nests", 1)[0]
+        ok("`name_separator`" in _c44 and "`label_align`" in _c44 and "as one piece" in _c44,
+           "the render_pdf card documents name_separator, label_align and how a cell with a sub is placed")
+
         # [i2] a tick of any size keeps TICK_GAP of clear space under the bar.
         _o = _ops([dict(_GAUGE, ticks=[{"at": 50, "text": "70", "size": 14}])])
         _bar_foot = min(o[2] for o in _o if o[0] == "rect" and o[5] in ("#2e7d32", "#c62828"))

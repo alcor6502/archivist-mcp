@@ -376,9 +376,22 @@ row 22.7, text `R` 11, title `B` 12.
 
 ### Table geometry, which is where the refusals come from
 
-`columns: [{label, align, width}]`, `sections: [{title, subtitle, rows:
-[{cells:[…]}]}]`. First cell `{text, sub}` — a name and a description; the
-others `{text, sub, tone, bold}` or `{tag, style}` / `{tag, bg, fg}`.
+`{title, name_separator, columns: [{label, align, label_align, width}],
+sections: [{title, subtitle, rows: [{cells:[…]}]}]}`. First cell `{text, sub}`
+— a name and a description; the others `{text, sub, tone, bold}` or
+`{tag, style}` / `{tag, bg, fg}`.
+
+| field | where | default | what it does |
+|---|---|---|---|
+| `align` | a column | `right` | where the column's **cells** go: `left`, `center`, `right` |
+| `label_align` | a column | the column's `align` | where the column's **label** goes, apart from its cells: `left`, `center`, `right`. Numbers on the right under a centred label is `{"align": "right", "label_align": "center"}`. Any other value is a refusal naming the column |
+| `name_separator` | the table | `"— "` | what is drawn between a row's name and its description (the first cell's `text` and `sub`), and between a section's `title` and its `subtitle`. `""` draws nothing: `VXUS Azionario mondo` instead of `VXUS — Azionario mondo`. One value for the whole table, both places; the gap between the two texts stays |
+
+- **A cell with a `sub` is placed as one piece**: the text, 4 points, the
+  `sub`, on the same line. `right` ends the piece at the column's right
+  inset, `left` starts it at the left one, `center` centres the whole piece.
+  (Until 4.4.0 a `sub` in a centred or left-aligned column was drawn over
+  its text.)
 
 - **`width` is a fraction of the row, strictly above 0 and below 0.9.** Not
   points. Their sum must stay under 0.9.

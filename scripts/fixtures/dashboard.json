@@ -30,15 +30,16 @@
   {"type": "spacer", "height": 6},
   {"type": "table", "title": "Prodotti",
    "columns": [{"label": ""}, {"label": "Valore", "width": 0.114}, {"label": "Capital gain", "width": 0.165},
-               {"label": "Guadagni YTD", "width": 0.126}, {"label": "Carattere", "align": "center", "width": 0.086}],
+               {"label": "Guadagni YTD", "width": 0.126, "label_align": "center"},
+               {"label": "Delta", "align": "center", "width": 0.12}, {"label": "Carattere", "align": "center", "width": 0.086}],
    "sections": [
     {"title": "Prima classe", "rows": [
      {"cells": [{"text": "AAA", "sub": "Fondo inventato ad ampia capitalizzazione"}, {"text": "$111,111", "bold": true},
-                {"text": "+$111,111", "sub": "+11.1%", "tone": "green"}, {"text": "$1,111"}, {"tag": "QUAL", "style": "t-qual"}]},
+                {"text": "+$111,111", "sub": "+11.1%", "tone": "green"}, {"text": "$1,111"}, {"text": "+$111", "sub": "+1.1%", "tone": "green"}, {"tag": "QUAL", "style": "t-qual"}]},
      {"cells": [{"text": "BBBBBB", "sub": "Societa' inventata — posizione idiosincratica di prova"}, {"text": "$22,222", "bold": true},
-                {"text": "-$2,222", "sub": "-2.2%", "tone": "red"}, {"text": "$0"}, {"tag": "ORD", "style": "t-ord"}]}]},
+                {"text": "-$2,222", "sub": "-2.2%", "tone": "red"}, {"text": "$0"}, {"text": "-$22", "sub": "-2.2%", "tone": "red"}, {"tag": "ORD", "style": "t-ord"}]}]},
     {"title": "Seconda classe", "rows": [
      {"cells": [{"text": "CCC", "sub": "Fondo inventato a reddito esente"}, {"text": "$33,333", "bold": true},
-                {"text": "+$3,333", "sub": "+3.3%", "tone": "green"}, {"text": "$2,222"}, {"tag": "MUNI", "style": "t-muni"}]},
+                {"text": "+$3,333", "sub": "+3.3%", "tone": "green"}, {"text": "$2,222"}, {"text": "+$33", "sub": "+3.3%", "tone": "green"}, {"tag": "MUNI", "style": "t-muni"}]},
      {"cells": [{"text": "DDD", "sub": "Fondo inventato su titoli di stato a media scadenza"}, {"text": "$44,444", "bold": true},
-                {"text": "n/d", "tone": "muted"}, {"text": "$1,111"}, {"tag": "ORD", "style": "t-ord"}]}]}]}]}
+                {"text": "n/d", "tone": "muted"}, {"text": "$1,111"}, {"text": "n/d", "tone": "muted"}, {"tag": "ORD", "style": "t-ord"}]}]}]}]}
