@@ -501,11 +501,13 @@ def tool_conversion_check() -> None:
             kw = {k.arg: ast.unparse(k.value) for k in val.keywords}
             ok(pos == ["mcp", "log"]
                and kw == {"refusal": "VaultError", "fault": "VaultFault",
-                          "annotations": "ANNOTATIONS", "finish": "_finish"},
+                          "annotations": "ANNOTATIONS", "finish": "_finish",
+                          "where": "CALL_SCOPE"},
                "with our server, our logger, VaultError as the refusal and "
                "VaultFault as the fault — swapped, every fault takes the "
                "quiet path — plus the table of annotations and the hook that "
-               "turns pictures into image blocks", f"{pos} {kw}")
+               "turns pictures into image blocks, and the call scope that ends "
+               "each line with the dataset", f"{pos} {kw}")
 
     # `mcp.tool` is never called in server.py at all now: the one legitimate
     # call lives inside the engine's make_tool. Any occurrence here is a tool
@@ -2077,6 +2079,36 @@ def rights_check() -> None:
         must_fail("and so is open_by_name", lambda: v.open_by_name("Mixed", READER))
         ok(v.open_by_name("Mixed", ADDER, need="append").name == "Mixed",
            "open_by_name lets the append key in for an append")
+
+        # Where the call landed, for the log line (4.5.0). The key check is the
+        # one place that sets it: what it GRANTED when it passes, the bare name
+        # when it refuses. Each case in a fresh context, as each call gets one.
+        import contextvars as _cv
+        _v.CALL_SCOPE.set(None)
+
+        def _scope(d, k, n):
+            def run():
+                refusal(lambda: v.check_key(d, k, n))
+                return _v.CALL_SCOPE.get()
+            return _cv.copy_context().run(run)
+
+        for d, k, n, want in (("Mixed", READER, "ro", "Mixed (ro)"),
+                              ("Mixed", ADDER, "append", "Mixed (append)"),
+                              ("Mixed", ADDER, "ro", "Mixed (append)"),
+                              ("Mixed", FULL, "ro", "Mixed (full)"),
+                              ("Public", "", "ro", "Public (ro)"),
+                              ("Old Open", "", "full", "Old Open (full)"),
+                              ("Mixed", READER, "full", "Mixed"),
+                              ("Mixed", "nope", "ro", "Mixed"),
+                              ("Broken", FULL, "ro", "Broken")):
+            got = _scope(d, k, n)
+            ok(got == want, f"the call scope after {d!r} asking {n}: {want!r} — "
+               "the right GRANTED, not the one asked; the bare name when refused", got)
+        scopes = [_scope(d, k, n) or "" for d, k, *_ in matrix for n in ("ro", "append", "full")]
+        ok(not any(secret in sc for sc in scopes for secret in (FULL, READER, ADDER)),
+           "and no scope, over the whole matrix, carries a key", scopes[:3])
+        ok(_v.CALL_SCOPE.get() is None,
+           "and none of it leaked into the context the test runs in", _v.CALL_SCOPE.get())
 
         # The words. A chat that is refused has to know it is not a typo in
         # the key, that nothing was written, and that retrying is pointless.

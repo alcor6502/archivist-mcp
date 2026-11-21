@@ -36,6 +36,7 @@ Invariants
 from __future__ import annotations
 
 import base64
+import contextvars
 import fcntl
 import hashlib
 import io
@@ -225,6 +226,15 @@ def _fold(s: str) -> str:
 # with no third field has always meant, and it is never written.
 RIGHTS = ("ro", "append", "full")
 _RANK = {r: i for i, r in enumerate(RIGHTS)}
+
+# Where the call in flight landed: "<dataset> (<right>)", or the bare name
+# when the key check refused before granting anything. The server hands it
+# to the engine's make_tool as `where`, which empties it at the start of each
+# call and ends the log line with it. Set in ONE place, check_key — the door
+# every dataset tool goes through — so a tool cannot forget to say. Never a
+# path and never the key: the line says where to look, not what was read.
+CALL_SCOPE: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "archivist_call_scope", default=None)
 
 
 def registry_state(rights: dict[str, str] | None) -> str:
@@ -469,6 +479,7 @@ class VaultRoot:
         what the TOOL does — `ro`, `append` or `full` — and it defaults to
         the most: a caller that forgets to say is refused more, never less.
         The message reveals nothing about any key."""
+        CALL_SCOPE.set(name)
         rights = self.keys().get(_fold(name))
         if not rights:
             raise VaultError(
@@ -477,6 +488,7 @@ class VaultRoot:
                 "server; no tool can.")
         have = self.right(name, key)
         if have is not None and _RANK[have] >= _RANK[need]:
+            CALL_SCOPE.set(f"{name} ({have})")
             return
         if key and key not in rights:
             raise VaultError(f"wrong key for dataset {name!r}.")

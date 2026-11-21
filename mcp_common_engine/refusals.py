@@ -56,6 +56,20 @@ a call goes: with it, eight lines in one second are eight calls that arrived
 together, and a slow chat can be told from a slow server. A refusal keeps its
 own line and gets no second one; a fault keeps its traceback.
 
+WHERE A CALL LANDED, since 1.4.0, is the one exception to "no argument",
+and it is the consumer's to fill. A server whose tools act on named
+compartments — a dataset — can hand `make_tool` a `contextvars.ContextVar`
+as `where`; the decorator empties it at the start of every call, the server
+sets it once it knows which compartment the call opened and with what right,
+and both the `call` and the `refused` line end with ` — <that>`. It names the
+compartment, never a path inside it and never a credential: the line says
+where to look, not what was read. Left unset, the line is exactly what it was.
+The decorator empties the variable itself, FIRST, because a worker thread
+that serves the next call must not inherit the last one's answer. Emptied at
+the start and not restored at the end: a second `try` around the one that
+converts would be a second try in the body the consumers' static checks
+read, and the start is the only moment where a stale value could do harm.
+
 ANNOTATIONS are the consumer's table, name → whatever its framework wants,
 and a tool that is not in the table does not register: the import dies naming
 it. A table with a hole would otherwise hand the client the protocol's
@@ -82,7 +96,13 @@ def json_bytes(result) -> int:
         return 0
 
 
-def make_tool(mcp, log, *, refusal, fault, annotations=None, finish=None):
+def _tail(where) -> str:
+    """` — <where the call landed>`, or nothing when nobody said."""
+    landed = where.get() if where is not None else None
+    return f" — {landed}" if landed else ""
+
+
+def make_tool(mcp, log, *, refusal, fault, annotations=None, finish=None, where=None):
     """Build the `@tool` decorator for one server.
 
     `refusal` is the engine's ordinary error class — every instance of it is a
@@ -94,6 +114,10 @@ def make_tool(mcp, log, *, refusal, fault, annotations=None, finish=None):
     function returned into (what travels, its size in bytes): it is where a
     server that returns pictures builds its content blocks and counts them.
     Left out, the result travels as it is and its size is its JSON.
+
+    `where` is a `contextvars.ContextVar` the server sets during a call to
+    name what the call opened; its value, when set, ends both log lines
+    after ` — `. Left out, the lines carry no such tail.
     """
 
     def tool(fn):
@@ -107,16 +131,18 @@ def make_tool(mcp, log, *, refusal, fault, annotations=None, finish=None):
         @functools.wraps(fn)
         def guarded(*args, **kwargs):
             started = time.monotonic()
+            if where is not None:
+                where.set(None)
             try:
                 result = fn(*args, **kwargs)
             except fault:
                 raise
             except refusal as e:
-                log.info("refused %s: %s", fn.__name__, e)
+                log.info("refused %s: %s%s", fn.__name__, e, _tail(where))
                 raise ToolError(str(e), log_level=logging.INFO) from None
             wire, size = finish(result) if finish else (result, json_bytes(result))
-            log.info("call %s: %d ms, %d bytes", fn.__name__,
-                     round((time.monotonic() - started) * 1000), size)
+            log.info("call %s: %d ms, %d bytes%s", fn.__name__,
+                     round((time.monotonic() - started) * 1000), size, _tail(where))
             return wire
         return mcp.tool(guarded, **extra)
 

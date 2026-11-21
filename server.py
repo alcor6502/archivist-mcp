@@ -86,7 +86,7 @@ from mcp_common_engine.refusals import json_bytes, make_tool
 # fastmcp in) and cannot import this file, so a knob resolved here would be a
 # knob nothing exercises.
 from preflight import HTTP_MODES, http_mode_from_env
-from vault import (VaultRoot, VaultError, VaultFault, WithImages, guide_for,
+from vault import (CALL_SCOPE, VaultRoot, VaultError, VaultFault, WithImages, guide_for,
                    server_instructions)
 
 VERSION = "4.4.0"
@@ -308,6 +308,13 @@ arm_timestamps(LOG_FORMAT)
 #   - what travels. Every tool returns a dict and it travels as one; `view`,
 #     and a render asked for its preview, return a dict WITH pictures, and
 #     _finish turns that into a text block and image blocks.
+#
+# Since 4.5.0 a third: WHERE a call landed. vault.CALL_SCOPE is set by the
+# key check, the one door every dataset tool goes through, to "<dataset>
+# (<right>)"; the engine ends both lines with it — `call edit_file: 104 ms,
+# 205 bytes — New Home (full)`. A dataset name and a right, never a path and
+# never a key: the log says where a problem is, not what was read. Tools that
+# open no dataset (vault_status, reference_guide, create, drop) carry no tail.
 READ_ONLY = ("vault_status", "reference_guide", "dataset_status", "list_files",
              "read_file", "read_files", "search", "manifest", "archive",
              "read_binary", "view", "pdf_text", "read_at", "history", "diff")
@@ -353,7 +360,7 @@ def _finish(result):
 
 
 tool = make_tool(mcp, log, refusal=VaultError, fault=VaultFault,
-                 annotations=ANNOTATIONS, finish=_finish)
+                 annotations=ANNOTATIONS, finish=_finish, where=CALL_SCOPE)
 
 
 # The Gate — GitHub identity plus source-IP filter, hooked on `on_request` —

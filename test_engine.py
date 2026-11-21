@@ -516,6 +516,52 @@ except LookupError as e:
 ok(len(shaped_mcp.registered) == 2, "and it really was not registered",
    len(shaped_mcp.registered))
 
+# `where` (1.4.0): the server names what a call opened, and both lines end
+# with it. The decorator empties it first, so a value left over from anything
+# before the call never reaches the line.
+import contextvars                                               # noqa: E402
+WHERE = contextvars.ContextVar("where", default=None)
+placed_mcp, placed_log = FakeMCP(), FakeLog()
+placed = make_tool(placed_mcp, placed_log, refusal=Refusal, fault=Fault, where=WHERE)
+
+
+@placed
+def lands(scope):
+    if scope:
+        WHERE.set(scope)
+    return 1
+
+
+@placed
+def lands_then_refuses(scope):
+    WHERE.set(scope)
+    raise Refusal("no")
+
+
+placed_mcp.registered[0]("Example Project (ro)")
+ok(len(placed_log.lines) == 1
+   and re.fullmatch(r"call lands: \d+ ms, 1 bytes — Example Project \(ro\)", placed_log.lines[0]),
+   "a call that set `where` ends its line with ` — ` and that value", placed_log.lines)
+placed_log.lines.clear()
+try:
+    placed_mcp.registered[1]("Example Project")
+except ToolError:
+    pass
+ok(placed_log.lines == ["refused lands_then_refuses: no — Example Project"],
+   "and so does a refusal's line", placed_log.lines)
+placed_log.lines.clear()
+WHERE.set("stale")
+placed_mcp.registered[0]("")
+ok(len(placed_log.lines) == 1 and re.fullmatch(r"call lands: \d+ ms, 1 bytes", placed_log.lines[0]),
+   "a call that set nothing carries no tail — not the value left before it", placed_log.lines)
+placed_mcp.registered[0]("Example Project (full)")
+placed_log.lines.clear()
+placed_mcp.registered[0]("")
+ok(len(placed_log.lines) == 1 and re.fullmatch(r"call lands: \d+ ms, 1 bytes", placed_log.lines[0]),
+   "nor the answer of the call served just before it, in the same context",
+   placed_log.lines)
+WHERE.set(None)
+
 fake_log.lines.clear()
 
 
