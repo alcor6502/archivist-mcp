@@ -2361,6 +2361,80 @@ def rights_check() -> None:
        "one door per tool that takes a key: every one was looked at", doors)
 
 
+def diff_default_check() -> None:
+    """4.5.0: `rev_a` may be left out of diff, and then it means the moment
+    before the LAST CHANGE — of the file when a path is given. Checked on a
+    history where the naive default, HEAD~1, gives the wrong answer: the last
+    commit touches another file, so HEAD~1..HEAD for this one is empty."""
+    print("\n[0d] diff without rev_a — the last change, of the file when one is named")
+    tmp = tempfile.mkdtemp(prefix="archivist-diff-")
+    try:
+        for name, fname, text in (("Work", "a.md", "one\n"), ("Fresh", "z.md", "zed\n")):
+            (Path(tmp) / name).mkdir()
+            (Path(tmp) / name / fname).write_text(text)
+        (Path(tmp) / "keys.txt").write_text("Work |\nFresh |\n")
+        v = VaultRoot(tmp)
+        v.boot(0)
+        ds = v.open_by_name("Work", "")
+        head = lambda: ds._git("rev-parse", "--short", "HEAD").strip()   # noqa: E731
+        born = head()
+        ds.write_file("b.md", "bee\n", "new")
+        ds.write_file("a.md", "one\ntwo\n", ds.read_file("a.md")["sha256"])
+        a_changed = head()
+        ds.write_file("c.md", "sea\n", "new")
+        last = head()
+
+        naive = ds.diff("HEAD~1", "HEAD", "a.md")
+        ok(naive["diff"] == "(no differences)",
+           "the trap is real here: HEAD~1..HEAD for a.md is empty, because the "
+           "last commit touched c.md", naive["diff"][:60])
+        d = ds.diff(rel="a.md")
+        ok("+two" in d["diff"] and d.get("changed", {}).get("commit") == a_changed,
+           "without rev_a and with a path: the last change of THAT file, and "
+           "`changed` names its commit", (d.get("changed"), d["diff"][-40:]))
+        ok(re.match(r"^\d{4}-\d{2}-\d{2}T", d["changed"].get("date", "")) is not None
+           and d["changed"].get("message", "").startswith("write"),
+           "with its date and its message", d.get("changed"))
+        ok(d["from"] != "HEAD~1" and d["to"] == "HEAD",
+           "`from` is the commit the diff started from, not HEAD~1", d["from"])
+
+        whole = ds.diff()
+        ok(whole.get("changed", {}).get("commit") == last and "c.md" in whole["diff"]
+           and "a.md" not in whole["diff"],
+           "without rev_a and without a path: what the last commit changed", whole)
+        ok(ds.diff("HEAD~2", "HEAD", "").get("changed") is None,
+           "with rev_a given, nothing changes: no `changed`, the two named revisions")
+
+        old = ds.diff(rev_b=a_changed, rel="b.md")
+        ok("+bee" in old["diff"] and old["changed"]["commit"] != a_changed,
+           "rev_b moves the search: the last change of b.md up to that commit", old.get("changed"))
+        first = ds.diff(rev_b=born, rel="a.md")
+        ok(first["changed"]["commit"] == born and "+one" in first["diff"]
+           and first["from"].startswith("(nothing"),
+           "a file born in the dataset's first commit is shown against nothing, "
+           "said as a sentence and not as git's empty-tree hash", first["from"])
+        must_fail("a file no commit ever touched has no last change",
+                  lambda: ds.diff(rel="never.md"))
+        said = refusal(lambda: ds.diff(rel="never.md")) or ""
+        ok("history" in said, "and the refusal points to history", said)
+        must_fail("an invalid rev_b is still refused, rev_a left out",
+                  lambda: ds.diff(rev_b="-h", rel="a.md"))
+        must_fail("a revision that does not exist is a refusal, not a fault",
+                  lambda: ds.diff(rev_b="deadbee"))
+
+        fresh = v.open_by_name("Fresh", "")
+        solo = fresh._git("rev-list", "--count", "HEAD").strip()
+        if solo == "1":
+            said = refusal(lambda: fresh.diff()) or ""
+            ok("single commit" in said,
+               "a dataset with a single commit has no earlier moment: refused, saying so", said)
+        else:
+            ok(False, "a dataset with a single commit has no earlier moment",
+               f"the boot made {solo} commits, so the case was not reached")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def see_check() -> None:
     """4.2.0: a file can be LOOKED at — a picture reduced, the pages of a PDF,
     a folder as a sheet — and a PDF read. And a PDF the server has just drawn
@@ -4765,6 +4839,7 @@ def main() -> int:
         ask_for_less_check()
         annotation_check()
         rights_check()
+        diff_default_check()
         see_check()
 
         print("\n[14c] the manual says what the code actually offers")

@@ -633,10 +633,16 @@ only, not the dataset's.
 **Stops at 10 by default** — the eleventh commit back is not missing, it was not
 asked for. The short hash goes verbatim into `read_at` and `diff`.
 
-## diff(dataset, rev_a, path='', rev_b='HEAD', key='')
+## diff(dataset, rev_a='', path='', rev_b='HEAD', key='')
 
 Differences between two revisions. Empty path gives the per-file summary; a file
 gives its full diff. Truncates at 60 KB rather than failing.
+**Leave `rev_a` out for the last change** — the cheap question, one call:
+- `diff(X, path="a.md")`: the last change of THAT file, whichever commit it was,
+  even if other files were committed after it.
+- `diff(X)`: what the dataset's last commit changed.
+The answer then carries `changed`: the commit used, its date and its message.
+`from` is the revision the diff started from.
 **`path` sits BETWEEN the two revisions.** `diff(X, a, b)` passes `b` as a path,
 silently, and diffs the wrong thing against HEAD. Two moments of one file is
 `diff(X, "HEAD~5", path="a.md", rev_b="HEAD")`.

@@ -359,6 +359,13 @@ _GIT_CONFIG = {
 }
 
 
+# git's empty tree: what a file born in a dataset's FIRST commit is compared
+# with, since that commit has no parent. Shown to the caller as a sentence,
+# never as the hash, which would read as a commit of the dataset.
+_EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+_EMPTY_TREE_LABEL = "(nothing: the file was born in the dataset's first commit)"
+
+
 def _git_env() -> dict[str, str]:
     return {**os.environ, **_GIT_IDENTITY, **_GIT_CONFIG}
 
@@ -1898,9 +1905,20 @@ class Dataset:
         return {"dataset": self.name, "path": self._rel(rel),
                 "entries": out.splitlines() if out else ["(no history)"]}
 
-    def diff(self, rev_a: str, rev_b: str = "HEAD", rel: str = "") -> dict:
-        self._check_rev(rev_a)
+    def diff(self, rev_a: str = "", rev_b: str = "HEAD", rel: str = "") -> dict:
+        """Since 4.5.0 `rev_a` may be left out, and then it is the moment
+        BEFORE THE LAST CHANGE: of the dataset (`rev_b~1`) without a path, of
+        that FILE with one — the parent of the last commit that touched it, up
+        to `rev_b`. Not `HEAD~1` for a file: when the last commit touched
+        another file, that diff is empty and reads as "this file never
+        changed". Either way the answer says which commit it took and when
+        (`changed`), at the price of one `git log`, paid only when asked."""
         self._check_rev(rev_b)
+        changed = None
+        if not rev_a:
+            rev_a, changed = self._before_last_change(rev_b, rel)
+        else:
+            self._check_rev(rev_a)
         args = ["diff", "--stat=120", f"{rev_a}..{rev_b}"]
         if rel:
             p = self._resolve(rel, must_exist=False)
@@ -1911,8 +1929,40 @@ class Dataset:
         out = self._git(*args, fault=False)
         if len(out.encode()) > MAX_DIFF_BYTES:
             out = out.encode()[:MAX_DIFF_BYTES].decode(errors="replace") + "\n[... diff truncated ...]"
-        return {"dataset": self.name, "path": self._rel(rel), "from": rev_a, "to": rev_b,
-                "diff": out or "(no differences)"}
+        res = {"dataset": self.name, "path": self._rel(rel),
+               "from": _EMPTY_TREE_LABEL if rev_a == _EMPTY_TREE else rev_a, "to": rev_b,
+               "diff": out or "(no differences)"}
+        if changed:
+            res["changed"] = changed
+        return res
+
+    def _before_last_change(self, rev_b: str, rel: str) -> tuple[str, dict]:
+        """(the revision to diff from, {commit, date, message} of the last
+        change) — see diff. A refusal when there is no such change: a file
+        no commit ever touched, a dataset with a single commit."""
+        args = ["log", "-1", "--format=%h%x00%cI%x00%s", rev_b]
+        if rel:
+            p = self._resolve(rel, must_exist=False)
+            args += ["--follow", "--", str(p.relative_to(self.root))]
+        # fault=False, as in diff: rev_b came from the caller.
+        line = self._git(*args, fault=False).strip()
+        if not line:
+            raise VaultError(
+                f"no commit up to {rev_b!r} touches {rel!r}: there is no last change "
+                "to show. `history` with this path lists what there is.")
+        commit, date, subject = (line.split("\0") + ["", ""])[:3]
+        changed = {"commit": commit, "date": date, "message": subject}
+        parent = self._git("rev-parse", "--verify", "-q", "--short", f"{commit}^",
+                           check=False).strip()
+        if parent:
+            return parent, changed
+        if rel:
+            # The file was born in the dataset's first commit: its last change
+            # IS its creation, shown against nothing.
+            return _EMPTY_TREE, changed
+        raise VaultError(
+            "the dataset has a single commit: there is no earlier moment to "
+            "compare with. Pass rev_a to compare two named revisions.")
 
     # ---------- maintenance ----------
 

@@ -90,7 +90,7 @@ from preflight import HTTP_MODES, http_mode_from_env
 from vault import (CALL_SCOPE, VaultRoot, VaultError, VaultFault, WithImages, guide_for,
                    server_instructions)
 
-VERSION = "4.4.0"
+VERSION = "4.5.0"
 
 # The shape of a line of ours. It is a NAME because it is used twice: here, and
 # again below where fastmcp's own handlers are given the same shape. Written out
@@ -641,11 +641,13 @@ def history(dataset: str, path: str = "", n: int = 10, key: str = "") -> dict:
 
 
 @tool
-def diff(dataset: str, rev_a: str, path: str = "", rev_b: str = "HEAD",
+def diff(dataset: str, rev_a: str = "", path: str = "", rev_b: str = "HEAD",
          key: str = "") -> dict:
     """Differences between two revisions: a summary per file, or with
-    `path` that file's full diff. Pass path and rev_b BY NAME: `path` sits
-    between the two revisions."""
+    `path` that file's full diff. Leave rev_a out for the LAST change: of the
+    dataset, or with `path` of that file, and `changed` says which commit
+    and when. Pass path and rev_b BY NAME: `path` sits between the two
+    revisions."""
     ds, rel = vault.open(dataset, path, key, need=NEED["diff"])
     return ds.diff(rev_a, rev_b, rel)
 

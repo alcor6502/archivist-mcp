@@ -244,7 +244,7 @@ limits and examples are on each tool's card in
 | **`render_report(dataset, path, sources, layout=None, expected_sha256="new")`** | dataset Markdown bound into one PDF |
 | **`move_path(dataset, src, dst)`** | move, rename or trash; never overwrites |
 | **`history(dataset, path="", n=10)`** | the last commits |
-| **`diff(dataset, rev_a, path="", rev_b="HEAD")`** | changes between revisions |
+| **`diff(dataset, rev_a="", path="", rev_b="HEAD")`** | changes between revisions; without `rev_a`, the last change (of the file, with `path`) |
 | **`dataset_restore(dataset, rev, expected_manifest)`** | the dataset back to a revision, as a new commit |
 | **`trash_purge(dataset, before)`** | empty `Trash/` of what was trashed before a date |
 
