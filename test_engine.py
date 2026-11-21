@@ -992,6 +992,89 @@ for _first, _second, _label in ((arm_argument_redaction, None, "redaction then s
        f"{_label}: the line carries a time AND no payload — neither cure "
        f"dislodges the other", _line[:110])
 
+print("\n[logs] a copy of every line in a file that outlives the container")
+
+import stat as _stat                                              # noqa: E402
+import tempfile as _tempfile                                      # noqa: E402
+from mcp_common_engine.logs import add_log_file                   # noqa: E402
+
+_fdir = Path(_tempfile.mkdtemp())
+_fpath = _fdir / "logs" / "server.log"
+_own = logging.getLogger("probe.file.own")
+_own.handlers, _own.propagate = [], False
+_own.setLevel(logging.INFO)
+_fm, _fm_sink = _stamp_probe("probe.file.fm")
+_old_umask = os.umask(0)          # the container's umask
+try:
+    _h = add_log_file(_fpath, _FMT, max_bytes=400, backups=2,
+                      logger_names=("probe.file.own",))
+finally:
+    os.umask(_old_umask)
+ok(_own.handlers == [_h] and _h not in _fm.handlers,
+   "the handler is hung on the loggers named and on no other", (_own.handlers, _fm.handlers))
+# What server.py does once its server object exists: the SAME handler.
+_fm.addHandler(_h)
+# The order server.py uses: the file first, then the two cures, which arm
+# every handler they find.
+arm_argument_redaction("probe.file.fm")
+arm_timestamps(_FMT, "probe.file.fm")
+_own.info("call edit_file: 3 ms, 9 bytes — Example Project (full)")
+logging.getLogger("probe.file.fm.server").warning(
+    "Invalid arguments for tool %r: %s", "edit_file", _DETAIL)
+_h.flush()
+_ftext = _fpath.read_text(encoding="utf-8")
+ok(_ftext.count("call edit_file: 3 ms, 9 bytes — Example Project (full)") == 1,
+   "a line of the server's own reaches the file, once", _ftext[:200])
+ok("Invalid arguments" in _ftext and _SECRET not in _ftext and REDACTED in _ftext,
+   "fastmcp's warning reaches it too, WITHOUT the payload: the file is armed "
+   "like the container log when it is added first", _ftext[-200:])
+ok(re.search(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} WARNING probe.file.fm.server: ",
+             _ftext, re.M) is not None,
+   "and with the same shape as every other line: date, time, level, logger", _ftext[-200:])
+ok(_stat.S_IMODE(_fpath.stat().st_mode) == 0o640,
+   "the file is 640 under umask 000: it names what was called and where",
+   oct(_stat.S_IMODE(_fpath.stat().st_mode)))
+for _i in range(60):
+    _own.info("line %03d of a probe that has to rotate", _i)
+_h.flush()
+_rotated = sorted(x.name for x in _fpath.parent.iterdir())
+ok(_rotated == ["server.log", "server.log.1", "server.log.2"],
+   "past max_bytes it rotates, and keeps exactly `backups` old files",
+   _rotated)
+ok(all(x.stat().st_size <= 400 for x in _fpath.parent.iterdir()),
+   "and no file grows past max_bytes", [x.stat().st_size for x in _fpath.parent.iterdir()])
+ok(all(_stat.S_IMODE(x.stat().st_mode) == 0o640 for x in _fpath.parent.iterdir()),
+   "and every file a rotation opens is 640 too",
+   [oct(_stat.S_IMODE(x.stat().st_mode)) for x in _fpath.parent.iterdir()])
+for _lg in (_own, _fm):
+    _lg.removeHandler(_h)
+_h.close()
+
+# A file left from before with wider rights — made by hand, or by a version
+# that did not care — is narrowed when it is opened, not trusted.
+_wide = _fdir / "wide" / "server.log"
+_wide.parent.mkdir()
+_wide.write_text("old line\n")
+os.chmod(_wide, 0o666)
+_hw = add_log_file(_wide, _FMT, 400, 2, logger_names=("probe.file.own",))
+ok(_stat.S_IMODE(_wide.stat().st_mode) == 0o640,
+   "a file already there at 666 is narrowed to 640 when it is opened",
+   oct(_stat.S_IMODE(_wide.stat().st_mode)))
+_own.removeHandler(_hw)
+_hw.close()
+
+_blocker = _fdir / "a-file"
+_blocker.write_text("x")
+_before = list(_own.handlers)
+try:
+    add_log_file(_blocker / "logs" / "server.log", _FMT, 400, 2,
+                 logger_names=("probe.file.own",))
+    ok(False, "a folder that cannot be made raises OSError", "nothing was raised")
+except OSError:
+    ok(_own.handlers == _before,
+       "a folder that cannot be made raises OSError, and nothing is attached",
+       _own.handlers)
+
 # =====================================================================
 # verdict
 # =====================================================================

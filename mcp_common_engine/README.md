@@ -20,6 +20,7 @@ repository, `github.com/alcor6502/mcp-common-engine`.
 | `preflight` | The harness of the startup checks: the `check` decorator, the results, the skip list. Every check **blocks**, and a check that crashes counts as failed. The checks themselves live in the server's `preflight.py`. |
 | `logs.arm_argument_redaction` | Keeps a malformed call from printing what it carried. FastMCP validates arguments before the tool runs and logs the whole argument dict on failure — and here the arguments are the stored documents. |
 | `logs.arm_timestamps` | Gives FastMCP's own log lines the same format as ours, so they carry a date, a time and the service name. |
+| `logs.add_log_file` | Copies the log into a file on a volume that outlives the container, rotated by size, 640. One handler: the server hangs it on the root at once and on FastMCP's logger after the server object exists and before the two `arm_*` calls, so the file is armed like the container log. A file that cannot be opened raises `OSError`, and the server goes on without it. |
 
 Each module's docstring holds the reasoning: where the gate hooks and why not
 one level narrower, why the refusal conversion cannot live in a middleware, why

@@ -48,7 +48,8 @@ Environment:
                           with no MCP session behind it. Anything else falls
                           back to stateful and says so. See the startup line:
                           it prints which one is running
-  FASTMCP_HOME            token store; set in the Dockerfile, MUST persist
+  FASTMCP_HOME            token store; set in the Dockerfile, MUST persist.
+                          The log file goes next to it, in ../logs (4.5.0)
   VAULT_UID / VAULT_GID   service user, dropped to by the entrypoint (99/100)
   PREFLIGHT_SKIP          checks to skip, by name. Testing only
 """
@@ -79,7 +80,7 @@ from mcp.types import Icon, ImageContent, TextContent, ToolAnnotations
 from mcp_common_engine import (VERSION as ENGINE_VERSION, cidrs_from_env,
                                describe_cidrs, log_level_from_env)
 from mcp_common_engine.gate import Gate
-from mcp_common_engine.logs import arm_argument_redaction, arm_timestamps
+from mcp_common_engine.logs import add_log_file, arm_argument_redaction, arm_timestamps
 from mcp_common_engine.refusals import json_bytes, make_tool
 # Read from preflight and not restated here for the same reason the log level
 # is read from one expression: the suite can import preflight (it drags no
@@ -112,6 +113,36 @@ _LEVEL, _REJECTED = log_level_from_env()
 log.setLevel(_LEVEL)
 if _REJECTED:
     log.warning("LOG_LEVEL=%r is not INFO or WARNING — using INFO", _REJECTED)
+
+# A copy of the log in a file that outlives the container (4.5.0). Unraid
+# recreates the container at every Apply and the container log goes with it:
+# the startup line of 3.3.0 was lost that way, and every line that proves
+# something had to be copied out by hand before an update. The folder is
+# DERIVED, not asked for: the token store already lives on the persistent
+# volume (FASTMCP_HOME, which the preflight requires under /data), and the
+# logs go next to it. Without FASTMCP_HOME — a run outside the image — there
+# is no file. Rotated by size: at today's rate (~12 KB a day) ten files of
+# 2 MB are years of history and can never fill the volume.
+#
+# HERE, right after the logger is set, so the boot lines below are in the
+# file too. This hangs it on the root logger only; fastmcp's logger, which
+# propagates nothing, gets the SAME handler further down, once the server
+# object exists. A file that cannot be opened does not stop the service: the
+# container log still has every line, and the startup line says OFF and why.
+LOG_FILE_MAX_BYTES = 2 * 1024 * 1024
+LOG_FILE_BACKUPS = 9
+_HOME = os.environ.get("FASTMCP_HOME", "")
+LOG_FILE = str(Path(_HOME).parent / "logs" / "archivist-mcp.log") if _HOME else ""
+LOG_FILE_STATE = "OFF (no FASTMCP_HOME: not running in the image)"
+LOG_FILE_HANDLER = None
+if LOG_FILE:
+    try:
+        LOG_FILE_HANDLER = add_log_file(LOG_FILE, LOG_FORMAT, LOG_FILE_MAX_BYTES,
+                                        LOG_FILE_BACKUPS)
+        LOG_FILE_STATE = LOG_FILE
+    except OSError as e:
+        LOG_FILE_STATE = f"OFF ({type(e).__name__}: {e})"
+        log.warning("log file %s cannot be opened, the container log only: %s", LOG_FILE, e)
 
 # uvicorn's access log is one line per request; a request carries a path, and a
 # path carries dataset and document names. Left on, the log slowly becomes a
@@ -251,6 +282,14 @@ except (OSError, VaultError) as e:
 mcp = FastMCP("archivist-mcp", auth=auth, instructions=INSTRUCTIONS,
               icons=[Icon(src=ICON_URL, mimeType="image/png",
                           sizes=["256x256"])])
+
+# The copy of the log in /data reaches fastmcp's lines too, and only from
+# HERE: fastmcp's handler exists once the server object above is built, and
+# the two arm_* calls below arm every handler they find. Hung after them, the
+# file would be the one door nobody armed, and a malformed call would print
+# its payload into it. The suite pins the order.
+if LOG_FILE_HANDLER is not None:
+    logging.getLogger("fastmcp").addHandler(LOG_FILE_HANDLER)
 
 # A malformed call must not print what it carried. fastmcp validates arguments
 # BEFORE the tool runs, so such a call never reaches `tool` below and leaves no
@@ -631,12 +670,13 @@ if __name__ == "__main__":
     # looks at after every Apply.
     log.info("archivist-mcp %s (engine %s) — starting on %s:%s (http %s) — "
              "base_url %s — allowed user: %s — IP filter: %s — token store: %s "
-             "— retention: %s",
+             "— retention: %s — log file: %s",
              VERSION, ENGINE_VERSION, BIND_ADDR, PORT, HTTP_MODE,
              BASE_URL, ALLOWED_LOGIN,
              describe_cidrs(ALLOWED_CIDRS),
              os.environ.get("FASTMCP_HOME", "(default — NOT persistent!)"),
-             f"{RETENTION} months" if RETENTION else "disabled")
+             f"{RETENTION} months" if RETENTION else "disabled",
+             LOG_FILE_STATE)
     # The mode travels as a boolean because that is what fastmcp's signature
     # asks for (`stateless_http: bool | None` on run_http_async, forwarded by
     # run() through **transport_kwargs — read off fastmcp 3.4.5 itself, not a

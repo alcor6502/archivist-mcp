@@ -41,7 +41,8 @@ ENV FASTMCP_SHOW_SERVER_BANNER=false
 ENV FASTMCP_ENABLE_RICH_LOGGING=false
 ENV FASTMCP_CHECK_FOR_UPDATES=off
 ENV FASTMCP_LOG_LEVEL=WARNING
-# The vault mounts on /vault, state (OAuth tokens + HOME) on /data. NOT logs:
-# nothing here opens a log file, the service prints and Docker keeps it.
+# The vault mounts on /vault, state (OAuth tokens + HOME) on /data, and since
+# 4.5.0 a copy of the log in /data/logs, next to the token store: Docker's own
+# log goes away with the container at every Apply, that file does not.
 # No EXPOSE: the Funnel inside the container handles ingress.
 CMD ["/bin/sh", "/app/entrypoint.sh"]

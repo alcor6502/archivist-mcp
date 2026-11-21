@@ -93,9 +93,35 @@ caller passes the one it already gave `logging.basicConfig`, so there is one
 string in one place per server instead of two that agree until somebody edits
 one. It also leaves the twin free to have its own shape without this module
 having an opinion about it.
+
+A COPY OF THE LOG IN A FILE, since 1.4.0 — the third piece, `add_log_file`.
+The container log is the only record a server has of itself, and the host may
+throw it away whenever it recreates the container: Unraid does at every
+update. A line that proves something then has to be copied out by hand before
+the update, and once (archivist-mcp 3.3.0) it was not. The cure is to print
+the same lines into a file on a volume that outlives the container, rotated
+by size so it can never fill that volume.
+
+THE SAME LINES, AND THAT IS WHY IT HANGS WHERE IT HANGS. One handler, hung on
+the root logger, which already receives every record the server's own logger
+propagates, and — by the caller, later — on `fastmcp`, which propagates
+nothing (see above). Hanging it on `fastmcp` is the dangerous part: it is a
+new door for fastmcp's warning about malformed arguments, the one that
+carries the whole payload. So it must be there BEFORE `arm_argument_redaction` and `arm_timestamps` run — they arm every
+handler they find, and a handler added after them would print the payload,
+with no date, into a file nobody reads until it matters. `add_log_file` cannot
+enforce its own place in the boot; the consumer's suite has to.
+
+FAILING TO OPEN IS NOT A REASON TO STOP. The file is a convenience on top of
+the container log, which still gets every line. `add_log_file` raises
+`OSError` and the caller says so at WARNING and goes on. The file is created
+640: it names what was called and where, which is nobody else's business on
+the host.
 """
 
 import logging
+import os
+from logging.handlers import RotatingFileHandler
 
 REDACTED = "<redacted>"
 
@@ -219,3 +245,45 @@ def arm_timestamps(fmt: str, logger_name: str = "fastmcp",
         handler.setFormatter(_StampedFormatter(fmt, datefmt))
         stamped += 1
     return stamped
+
+
+class _PrivateRotatingFileHandler(RotatingFileHandler):
+    """A RotatingFileHandler whose file is 640 whatever the umask — the
+    container runs with umask 000, and every rotation opens a new file — and
+    whatever rights a file already there had: `fchmod`, not only the mode of
+    `os.open`, which applies to a file it creates and to no other."""
+
+    def _open(self):
+        fd = os.open(self.baseFilename, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o640)
+        os.fchmod(fd, 0o640)
+        return os.fdopen(fd, "a", encoding=self.encoding, errors=self.errors)
+
+
+def add_log_file(path, fmt: str, max_bytes: int, backups: int,
+                 logger_names=("",)) -> logging.Handler:
+    """Copy every line of `logger_names` into `path`, rotated at `max_bytes`
+    with `backups` old files kept. Returns the handler.
+
+    ONE handler, and whoever else must write into the same file is given
+    THIS handler (`logging.getLogger("fastmcp").addHandler(h)`), never a
+    second one: two handlers on one file would each rotate on their own
+    count, and the one that did not rotate would go on writing into the file
+    the other had just renamed away. A record of `fastmcp` does not propagate
+    to the root, so no line is written twice.
+
+    The default is the root alone because the two belong to different
+    moments of the boot: the root as early as possible, so the boot's own
+    lines are in the file; `fastmcp` only once the server object exists —
+    fastmcp installs its handler then — and BEFORE `arm_argument_redaction`
+    and `arm_timestamps` (module docstring). `fmt` is the caller's own
+    format. Raises `OSError` when the folder or the file cannot be made;
+    nothing is attached then.
+    """
+    path = os.fspath(path)
+    os.makedirs(os.path.dirname(path) or ".", mode=0o750, exist_ok=True)
+    handler = _PrivateRotatingFileHandler(path, maxBytes=max_bytes,
+                                          backupCount=backups, encoding="utf-8")
+    handler.setFormatter(logging.Formatter(fmt))
+    for name in logger_names:
+        logging.getLogger(name or None).addHandler(handler)
+    return handler

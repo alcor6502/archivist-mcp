@@ -1003,6 +1003,87 @@ def timestamps_armed_check() -> None:
     ok(callable(_arm), "and the installed engine really provides it")
 
 
+def log_file_check() -> None:
+    """The copy of the log in /data (4.5.0) is one more door for fastmcp's
+    warning about malformed arguments, and its ORDER is what keeps the payload
+    out: added after the two arm_* calls, the file would be the one handler
+    nobody armed. After the server object, because building it is what makes
+    fastmcp configure its logging. The engine's suite proves the cure works in
+    that order; this proves server.py uses that order."""
+    src = (HERE / "server.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    _sole_import(tree, "add_log_file", "mcp_common_engine.logs")
+
+    adds = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+            and ast.unparse(n.func) == "add_log_file"]
+    ok(len(adds) == 1, "add_log_file() is called exactly once", len(adds))
+    if not adds:
+        return
+    call = adds[0]
+    args = [ast.unparse(a) for a in call.args]
+    ok(args == ["LOG_FILE", "LOG_FORMAT", "LOG_FILE_MAX_BYTES", "LOG_FILE_BACKUPS"]
+       and not call.keywords,
+       "with the derived path, the ONE format, the two named sizes, and the "
+       "engine's default of the root logger alone", (args, [k.arg for k in call.keywords]))
+    boot = [n.lineno for n in ast.walk(tree) if isinstance(n, ast.Call)
+            and ast.unparse(n.func) == "log.info" and n.args
+            and isinstance(n.args[0], ast.Constant)
+            and str(n.args[0].value).startswith(("boot", "datasets:"))]
+    ok(boot and call.lineno < min(boot),
+       "and it comes BEFORE the boot's own lines, so they are in the file too",
+       f"file {call.lineno}, boot lines {boot}")
+
+    hung = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+            and ast.unparse(n) == "logging.getLogger('fastmcp').addHandler(LOG_FILE_HANDLER)"]
+    ok(len(hung) == 1, "fastmcp's logger is given THE SAME handler, once — a "
+       "second handler on the file would rotate on its own count", len(hung))
+    arms = {ast.unparse(n.value.func): n.lineno for n in tree.body
+            if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)
+            and ast.unparse(n.value.func) in ("arm_argument_redaction", "arm_timestamps")}
+    server = next((n for n in tree.body if isinstance(n, ast.Assign)
+                   and any(getattr(t, "id", "") == "mcp" for t in n.targets)), None)
+    ok(hung and len(arms) == 2 and server is not None
+       and server.lineno < hung[0].lineno < min(arms.values()),
+       "and that comes AFTER the server object and BEFORE both arm_* calls — "
+       "hung later, the file prints the payload of a malformed call",
+       f"server {server.lineno if server else '-'}, "
+       f"fastmcp hung {hung[0].lineno if hung else '-'}, arms {arms}")
+
+    derive = next((n for n in tree.body if isinstance(n, ast.Assign)
+                   and any(getattr(t, "id", "") == "LOG_FILE" for t in n.targets)), None)
+    ok(derive is not None and "_HOME" in ast.unparse(derive.value)
+       and "logs" in ast.unparse(derive.value),
+       "the path is DERIVED from FASTMCP_HOME, next to the token store — no "
+       "variable to ask for", ast.unparse(derive.value) if derive else None)
+    home = next((n for n in tree.body if isinstance(n, ast.Assign)
+                 and any(getattr(t, "id", "") == "_HOME" for t in n.targets)), None)
+    ok(home is not None and "FASTMCP_HOME" in ast.unparse(home.value),
+       "and _HOME is FASTMCP_HOME itself", ast.unparse(home.value) if home else None)
+
+    startup = next((n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                    and ast.unparse(n.func) == "log.info" and n.args
+                    and isinstance(n.args[0], ast.Constant)
+                    and "starting on" in str(n.args[0].value)), None)
+    ok(startup is not None and "log file: %s" in startup.args[0].value
+       and any(ast.unparse(a) == "LOG_FILE_STATE" for a in startup.args),
+       "and the startup line says where the file is, or OFF and why",
+       ast.unparse(startup)[:80] if startup else None)
+
+    # The sizes, read from the constants and not written here a second time:
+    # what is checked is that they keep the history long and the volume safe.
+    import re as _r
+    mx = _r.search(r"^LOG_FILE_MAX_BYTES = (.+)$", src, _r.M)
+    bk = _r.search(r"^LOG_FILE_BACKUPS = (\d+)$", src, _r.M)
+    total = eval(mx.group(1)) * (int(bk.group(1)) + 1) if mx and bk else None  # noqa: S307
+    ok(total is not None and total <= 32 * 1024 * 1024,
+       "and the files together can never take more than 32 MB of the volume",
+       total)
+
+    xml = (HERE / "archivist-mcp.xml").read_text(encoding="utf-8")
+    ok("the service opens no log file at all" not in xml and "logs/archivist-mcp.log" in xml,
+       "the template's App Data says the log file lives there, not that there is none")
+
+
 def icon_check() -> None:
     """The icon URL is written in two files that nothing links together: the
     Unraid template, which puts it on the container, and server.py, which hands
@@ -4710,6 +4791,7 @@ def main() -> int:
 
         print("\n[14f2] and the same lines carry our clock, in our one format")
         timestamps_armed_check()
+        log_file_check()
 
         print("\n[15] the IP filter list, in both directions")
         cidr_checks()

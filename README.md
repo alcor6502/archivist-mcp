@@ -310,8 +310,10 @@ Unraid's saved template (`/boot/config/plugins/dockerMan/templates-user/`)
 holds the secrets **in plaintext**.
 
 **Updating.** Docker page → **Check for Updates**, then apply. **Apply, never
-Restart**: Restart keeps the old configuration. Apply clears the container log,
-so copy out what you need first. The startup line then shows the new version.
+Restart**: Restart keeps the old configuration. Apply clears the container log;
+since 4.5.0 the same lines stay in `logs/archivist-mcp.log` under App Data,
+rotated at 2 MB with 9 old files kept (the boot checks are only in the
+container log). The startup line then shows the new version.
 To go back, put the previous version tag in `Repository` instead of `:latest`.
 
 - **Crossing 3.0.0**: registry lines become `name | key` (was a TAB). Rewrite
